@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ESP32-C5 智能盲杖模拟闭环</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>ESP32-C5 智能盲杖模拟闭环</h1>
+        <p>手机上传位置，模拟盲杖上传风险，云端合并并展示。</p>
+      </div>
+      <div class="device">
+        <label for="deviceId">设备 ID</label>
+        <input id="deviceId" value="cane_001" />
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel status">
+        <h2>手机定位</h2>
+        <p id="locationText">尚未上传位置</p>
+        <div class="manual-location">
+          <input id="latInput" aria-label="纬度" value="31.230400" />
+          <input id="lngInput" aria-label="经度" value="121.473700" />
+        </div>
+        <div class="actions">
+          <button id="sendLocation">上传当前位置</button>
+          <button id="watchLocation">连续上传</button>
+          <button id="sendManualLocation" class="secondary">上传手动位置</button>
+        </div>
+      </section>
+
+      <section class="panel status">
+        <h2>模拟风险</h2>
+        <p id="riskText">可以手动生成一条 ESP32-C5 风险事件。</p>
+        <div class="actions">
+          <button id="sendFrontRisk">前方障碍</button>
+          <button id="sendDropRisk">地面落差</button>
+        </div>
+      </section>
+
+      <section class="panel map-panel">
+        <div class="section-head">
+          <h2>风险点视图</h2>
+          <button id="refresh">刷新</button>
+        </div>
+        <div id="map" class="map"></div>
+      </section>
+
+      <section class="panel list-panel">
+        <div class="section-head">
+          <h2>最新记录</h2>
+          <span id="count">0 条</span>
+        </div>
+        <div id="records" class="records"></div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
