@@ -12,10 +12,10 @@ DEVICE_ID = "cane_001"
 
 
 SENSORS = [
-    ("front_obstacle", "front", "tof_front"),
-    ("left_obstacle", "left", "tof_left"),
-    ("right_obstacle", "right", "tof_right"),
-    ("ground_drop", "down", "tof_down"),
+    ("obstacle_detected", "front_obstacle", "front", "tof_front"),
+    ("obstacle_detected", "left_obstacle", "left", "tof_left"),
+    ("obstacle_detected", "right_obstacle", "right", "tof_right"),
+    ("ground_drop_detected", "ground_drop", "down", "tof_down"),
 ]
 
 
@@ -36,20 +36,48 @@ def post_json(path: str, payload: dict) -> dict:
 
 
 def make_event() -> dict:
-    risk_type, direction, sensor = random.choice(SENSORS)
+    event_type, risk_type, direction, sensor = random.choice(SENSORS)
+    front_mm = random.randint(900, 1600)
+    left_mm = random.randint(800, 1500)
+    right_mm = random.randint(800, 1500)
+    down_mm = random.randint(600, 760)
+    ground_base_mm = 650
+
     if risk_type == "ground_drop":
-        distance = random.randint(850, 1400)
-        level = "high" if distance > 1050 else "medium"
+        down_mm = random.randint(900, 1400)
+        distance = down_mm
+        level = "high" if down_mm - ground_base_mm > 350 else "medium"
+    elif risk_type == "front_obstacle":
+        front_mm = random.randint(250, 1100)
+        distance = front_mm
+        level = "high" if front_mm < 550 else "medium"
+    elif risk_type == "left_obstacle":
+        left_mm = random.randint(250, 900)
+        distance = left_mm
+        level = "high" if left_mm < 500 else "medium"
+    elif risk_type == "right_obstacle":
+        right_mm = random.randint(250, 900)
+        distance = right_mm
+        level = "high" if right_mm < 500 else "medium"
     else:
         distance = random.randint(250, 1300)
         level = "high" if distance < 550 else "medium" if distance < 1000 else "low"
+
     return {
         "device_id": DEVICE_ID,
+        "event_type": event_type,
         "risk_type": risk_type,
         "level": level,
         "direction": direction,
         "sensor": sensor,
         "distance_mm": distance,
+        "front_mm": front_mm,
+        "left_mm": left_mm,
+        "right_mm": right_mm,
+        "down_mm": down_mm,
+        "ground_base_mm": ground_base_mm,
+        "alarm_triggered": level in {"medium", "high"},
+        "alarm_mode": "vibration" if level == "medium" else "vibration_buzzer",
         "battery": random.randint(65, 100),
         "timestamp": now_iso(),
     }
