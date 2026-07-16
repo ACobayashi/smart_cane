@@ -13,6 +13,10 @@ void communication_set_location(const location_data_t *location);
 bool communication_upload_location(const location_data_t *location);
 bool communication_upload_event(const char *risk_type,
                                 const char *risk_level,
+                                const char *direction,
+                                const char *sensor,
+                                int distance_mm,
+                                int battery_percent,
                                 const distance_readings_t *distances,
                                 const char *extra);
 bool communication_fetch_nearby(float lat, float lng, nearby_risk_summary_t *out);

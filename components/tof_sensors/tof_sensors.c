@@ -23,16 +23,6 @@ static int64_t now_ms(void)
     return esp_timer_get_time() / 1000;
 }
 
-static esp_err_t vl53l1x_write_reg8(uint16_t reg, uint8_t value)
-{
-    uint8_t data[3] = {
-        (uint8_t)(reg >> 8),
-        (uint8_t)(reg & 0xff),
-        value,
-    };
-    return i2c_bus_write(SMARTCANE_VL53L1X_ADDR, data, sizeof(data), 50);
-}
-
 static esp_err_t vl53l1x_read_reg16(uint16_t reg, uint16_t *value)
 {
     if (value == NULL) {
@@ -51,6 +41,17 @@ static esp_err_t vl53l1x_read_reg16(uint16_t reg, uint16_t *value)
     return ESP_OK;
 }
 
+#if !SMARTCANE_MOCK_SENSOR_MODE
+static esp_err_t vl53l1x_write_reg8(uint16_t reg, uint8_t value)
+{
+    uint8_t data[3] = {
+        (uint8_t)(reg >> 8),
+        (uint8_t)(reg & 0xff),
+        value,
+    };
+    return i2c_bus_write(SMARTCANE_VL53L1X_ADDR, data, sizeof(data), 50);
+}
+
 static bool vl53l1x_probe_and_start(uint8_t channel)
 {
     if (i2c_bus_select_tca_channel(channel) != ESP_OK) {
@@ -67,6 +68,7 @@ static bool vl53l1x_probe_and_start(uint8_t channel)
     (void)vl53l1x_write_reg8(0x0087, 0x40);
     return true;
 }
+#endif
 
 static int clamp_distance_cm(uint16_t mm)
 {

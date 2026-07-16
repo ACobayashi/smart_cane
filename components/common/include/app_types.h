@@ -9,6 +9,14 @@ typedef enum {
     RISK_HIGH = 2,
 } risk_level_t;
 
+typedef enum {
+    LOCATION_QUALITY_MOCK = 0,
+    LOCATION_QUALITY_STALE,
+    LOCATION_QUALITY_POOR,
+    LOCATION_QUALITY_USABLE,
+    LOCATION_QUALITY_GOOD,
+} location_quality_t;
+
 typedef struct {
     int front_cm;
     int left_cm;
@@ -47,7 +55,11 @@ typedef struct {
     bool valid;
     bool mock;
     float accuracy_m;
+    float hdop;
+    uint8_t fix_quality;
     uint8_t satellite_count;
+    location_quality_t quality;
+    char provider[12];
     int64_t updated_at_ms;
 } location_data_t;
 
@@ -85,5 +97,22 @@ static inline risk_level_t risk_level_from_string(const char *level)
         return RISK_MEDIUM;
     }
     return RISK_LOW;
+}
+
+static inline const char *location_quality_to_string(location_quality_t quality)
+{
+    switch (quality) {
+    case LOCATION_QUALITY_GOOD:
+        return "good";
+    case LOCATION_QUALITY_USABLE:
+        return "usable";
+    case LOCATION_QUALITY_POOR:
+        return "poor";
+    case LOCATION_QUALITY_STALE:
+        return "stale";
+    case LOCATION_QUALITY_MOCK:
+    default:
+        return "mock";
+    }
 }
 

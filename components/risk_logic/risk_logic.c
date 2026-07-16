@@ -37,6 +37,23 @@ static void make_low_risk(risk_state_t *out)
     out->detected_at_ms = now_ms();
 }
 
+static const char *front_guidance(const distance_readings_t *distances)
+{
+    bool left_safe = distances->left_cm > SMARTCANE_SIDE_SAFE_CM;
+    bool right_safe = distances->right_cm > SMARTCANE_SIDE_SAFE_CM;
+
+    if (!left_safe && !right_safe) {
+        return "stop";
+    }
+    if (left_safe && distances->left_cm > distances->right_cm) {
+        return "turn_left";
+    }
+    if (right_safe && distances->right_cm > distances->left_cm) {
+        return "turn_right";
+    }
+    return "slow";
+}
+
 void risk_logic_calculate(const distance_readings_t *distances,
                           const nearby_risk_summary_t *history,
                           risk_state_t *out)
@@ -66,7 +83,7 @@ void risk_logic_calculate(const distance_readings_t *distances,
     if (front_danger) {
         out->level = RISK_HIGH;
         set_text(out->risk_type, sizeof(out->risk_type), "front_obstacle");
-        set_text(out->direction_hint, sizeof(out->direction_hint), "avoid");
+        set_text(out->direction_hint, sizeof(out->direction_hint), front_guidance(distances));
         set_text(out->reason, sizeof(out->reason), "front distance below danger threshold");
         out->front_obstacle = true;
         out->realtime_high = true;
@@ -76,7 +93,7 @@ void risk_logic_calculate(const distance_readings_t *distances,
     if (front_warn) {
         out->level = RISK_MEDIUM;
         set_text(out->risk_type, sizeof(out->risk_type), "front_obstacle");
-        set_text(out->direction_hint, sizeof(out->direction_hint), "slow");
+        set_text(out->direction_hint, sizeof(out->direction_hint), front_guidance(distances));
         set_text(out->reason, sizeof(out->reason), "front distance below warning threshold");
         out->front_obstacle = true;
         out->realtime_medium = true;

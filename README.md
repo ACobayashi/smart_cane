@@ -11,7 +11,9 @@ It no longer uses:
 - Arduino APIs
 - Arduino as an ESP-IDF component
 
-The `backend/` directory is still kept as the FastAPI + SQLite + cloud AI service for risk upload, nearby risk lookup, AI advice, and voice endpoints.
+The `backend/` directory is still kept as the FastAPI + SQLite + cloud AI service for risk upload, nearby risk lookup, deep-learning risk scoring, AI advice, and voice endpoints.
+
+The shared API contract for team members A/B/C is in `docs/api_contract.md`.
 
 ## Project Info
 
@@ -26,27 +28,30 @@ The `backend/` directory is still kept as the FastAPI + SQLite + cloud AI servic
 
 ```text
 .
-├── CMakeLists.txt
-├── sdkconfig.defaults
-├── partitions.csv
-├── main/
-│   ├── CMakeLists.txt
-│   ├── main.c
-│   ├── board_config.h
-│   ├── app_tasks.c
-│   └── app_tasks.h
-├── components/
-│   ├── common/
-│   ├── i2c_bus/
-│   ├── tof_sensors/
-│   ├── touch_input/
-│   ├── vibration_motor/
-│   ├── buzzer/
-│   ├── buttons/
-│   ├── gps_location/
-│   ├── risk_logic/
-│   └── communication/
-└── backend/
+|-- CMakeLists.txt
+|-- sdkconfig.defaults
+|-- partitions.csv
+|-- main/
+|   |-- CMakeLists.txt
+|   |-- main.c
+|   |-- board_config.h
+|   |-- app_tasks.c
+|   `-- app_tasks.h
+|-- components/
+|   |-- common/
+|   |-- i2c_bus/
+|   |-- tof_sensors/
+|   |-- touch_input/
+|   |-- vibration_motor/
+|   |-- buzzer/
+|   |-- buttons/
+|   |-- gps_location/
+|   |-- risk_logic/
+|   `-- communication/
+|-- backend/
+|   |-- main.py
+|   `-- deep_model.py
+`-- docs/
 ```
 
 ## Completed Firmware Features
@@ -64,9 +69,24 @@ The `backend/` directory is still kept as the FastAPI + SQLite + cloud AI servic
 - Nearby historical risk fusion
 - Native Wi-Fi STA connection
 - HTTP JSON upload for events and location
+- GNSS/BeiDou/GPS provider and location quality upload
 - HTTP nearby risk lookup and AI advice request
+- Backend lightweight deep-learning risk scoring through `/api/ai/deep-risk`
 - ESP-NOW local device status broadcast and receive
 - FreeRTOS tasks: `sensor_task`, `logic_task`, `feedback_task`, `communication_task`, `debug_task`
+
+## Role A Checklist
+
+If you are member A, focus on the native ESP-IDF device side:
+
+- Flash and monitor the ESP32-C5 firmware.
+- Update Wi-Fi, backend URL, and `SMARTCANE_DEVICE_ID` in `components/common/include/smartcane_config.h`.
+- Keep `SMARTCANE_MOCK_SENSOR_MODE` enabled until real VL53L1X modules are wired.
+- Verify TCA9548A, four ToF modules, MPR121, PCA9685, buzzer, SOS button, and GPS one by one.
+- Verify GNSS/BeiDou NMEA output, satellite count, HDOP, and location quality logs.
+- Calibrate `SMARTCANE_FRONT_WARN_CM`, `SMARTCANE_FRONT_DANGER_CM`, `SMARTCANE_SIDE_SAFE_CM`, `SMARTCANE_GROUND_BASE_CM`, and `SMARTCANE_GROUND_DROP_THRESHOLD_CM`.
+- Confirm uploads reach `POST /api/risk-events`.
+- Confirm the second device can read collaborative history through `GET /api/risks/nearby`.
 
 ## Hardware Wiring
 
@@ -158,4 +178,3 @@ Do not use `127.0.0.1` for the ESP32-C5, because that points to the device itsel
 ## Migration Report
 
 See [MIGRATION_REPORT.md](MIGRATION_REPORT.md).
-

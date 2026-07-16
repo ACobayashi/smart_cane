@@ -47,6 +47,10 @@ static location_data_t s_location = {
     .valid = true,
     .mock = true,
     .accuracy_m = SMARTCANE_GPS_MOCK_ACCURACY_M,
+    .hdop = 0.0f,
+    .fix_quality = 0,
+    .quality = LOCATION_QUALITY_MOCK,
+    .provider = "mock",
 };
 static risk_state_t s_risk = {
     .level = RISK_LOW,
@@ -160,6 +164,49 @@ static void run_pattern(last_feedback_pattern_t pattern)
     }
 }
 
+static int event_distance_mm(const char *risk_type, const distance_readings_t *distances)
+{
+    if (risk_type == NULL || distances == NULL) {
+        return -1;
+    }
+    if (strcmp(risk_type, "ground_drop") == 0) {
+        return distances->down_cm * 10;
+    }
+    if (strcmp(risk_type, "left_obstacle") == 0) {
+        return distances->left_cm * 10;
+    }
+    if (strcmp(risk_type, "right_obstacle") == 0) {
+        return distances->right_cm * 10;
+    }
+    return distances->front_cm * 10;
+}
+
+static const char *event_sensor_name(const char *risk_type, const char *source)
+{
+    if (source != NULL && strstr(source, "touch") != NULL) {
+        return "touch";
+    }
+    if (source != NULL && strstr(source, "sos") != NULL) {
+        return "sos_button";
+    }
+    if (risk_type == NULL) {
+        return "unknown";
+    }
+    if (strcmp(risk_type, "ground_drop") == 0) {
+        return "tof_down";
+    }
+    if (strcmp(risk_type, "left_obstacle") == 0) {
+        return "tof_left";
+    }
+    if (strcmp(risk_type, "right_obstacle") == 0) {
+        return "tof_right";
+    }
+    if (strcmp(risk_type, "front_obstacle") == 0) {
+        return "tof_front";
+    }
+    return "device";
+}
+
 static void upload_current_event(const char *risk_type, const char *risk_level, const char *source)
 {
     distance_readings_t distances;
@@ -174,11 +221,18 @@ static void upload_current_event(const char *risk_type, const char *risk_level, 
              sizeof(extra),
              "source=%s;location=%s;reason=%s;history_count=%d;history_high=%d",
              source,
-             location.mock ? "mock" : "gps",
+             location_quality_to_string(location.quality),
              risk.reason,
              history.risk_count,
              history.high_count);
-    (void)communication_upload_event(risk_type, risk_level, &distances, extra);
+    (void)communication_upload_event(risk_type,
+                                     risk_level,
+                                     risk.direction_hint,
+                                     event_sensor_name(risk_type, source),
+                                     event_distance_mm(risk_type, &distances),
+                                     SMARTCANE_BATTERY_PERCENT_UNKNOWN,
+                                     &distances,
+                                     extra);
 }
 
 static void handle_sos(void *ctx)
@@ -458,10 +512,12 @@ static void debug_task(void *arg)
         copy_state(&distances, &risk, &history, &location);
         risk_logic_log_state(&distances, &risk, &history);
         ESP_LOGI(TAG,
-                 "location lat=%.6f lng=%.6f source=%s network=%s",
+                 "location lat=%.6f lng=%.6f provider=%s quality=%s acc=%.1fm network=%s",
                  location.lat,
                  location.lng,
-                 location.mock ? "mock" : "gps",
+                 location.provider,
+                 location_quality_to_string(location.quality),
+                 location.accuracy_m,
                  communication_network_available() ? "connected" : "unavailable");
         vTaskDelay(pdMS_TO_TICKS(SMARTCANE_STATUS_INTERVAL_MS));
     }

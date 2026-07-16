@@ -47,6 +47,10 @@ static location_data_t s_location = {
     .valid = true,
     .mock = true,
     .accuracy_m = SMARTCANE_GPS_MOCK_ACCURACY_M,
+    .hdop = 0.0f,
+    .fix_quality = 0,
+    .quality = LOCATION_QUALITY_MOCK,
+    .provider = "mock",
 };
 static nearby_risk_summary_t s_remote_summary = {0};
 
@@ -395,16 +399,21 @@ bool communication_upload_location(const location_data_t *location)
     }
     communication_set_location(location);
 
-    char payload[384];
+    char payload[512];
     snprintf(payload,
              sizeof(payload),
              "{\"device_id\":\"%s\",\"lat\":%.6f,\"lng\":%.6f,"
-             "\"source\":\"%s\",\"accuracy_m\":%.1f,\"satellite_count\":%u}",
+             "\"source\":\"%s\",\"provider\":\"%s\",\"quality\":\"%s\","
+             "\"accuracy_m\":%.1f,\"hdop\":%.1f,\"fix_quality\":%u,\"satellite_count\":%u}",
              SMARTCANE_DEVICE_ID,
              location->lat,
              location->lng,
              location->mock ? "mock" : "gps",
+             location->provider,
+             location_quality_to_string(location->quality),
              location->accuracy_m,
+             location->hdop,
+             location->fix_quality,
              location->satellite_count);
 
     char response[HTTP_RESPONSE_CAP];
@@ -415,6 +424,10 @@ bool communication_upload_location(const location_data_t *location)
 
 bool communication_upload_event(const char *risk_type,
                                 const char *risk_level,
+                                const char *direction,
+                                const char *sensor,
+                                int distance_mm,
+                                int battery_percent,
                                 const distance_readings_t *distances,
                                 const char *extra)
 {
@@ -425,11 +438,12 @@ bool communication_upload_event(const char *risk_type,
     char extra_escaped[192];
     json_escape(extra == NULL ? "" : extra, extra_escaped, sizeof(extra_escaped));
 
-    char payload[640];
+    char payload[896];
     snprintf(payload,
              sizeof(payload),
              "{\"device_id\":\"%s\",\"lat\":%.6f,\"lng\":%.6f,"
-             "\"risk_type\":\"%s\",\"risk_level\":\"%s\","
+             "\"risk_type\":\"%s\",\"risk_level\":\"%s\",\"level\":\"%s\","
+             "\"direction\":\"%s\",\"sensor\":\"%s\",\"distance_mm\":%d,\"battery\":%d,"
              "\"front_cm\":%d,\"left_cm\":%d,\"right_cm\":%d,\"down_cm\":%d,"
              "\"extra_json\":\"%s\"}",
              SMARTCANE_DEVICE_ID,
@@ -437,6 +451,11 @@ bool communication_upload_event(const char *risk_type,
              s_location.lng,
              risk_type,
              risk_level,
+             risk_level,
+             direction == NULL ? "none" : direction,
+             sensor == NULL ? "unknown" : sensor,
+             distance_mm,
+             battery_percent,
              distances->front_cm,
              distances->left_cm,
              distances->right_cm,
@@ -445,7 +464,7 @@ bool communication_upload_event(const char *risk_type,
 
     char response[HTTP_RESPONSE_CAP];
     int status = 0;
-    bool ok = http_request("POST", "/api/events", payload, response, sizeof(response), &status);
+    bool ok = http_request("POST", "/api/risk-events", payload, response, sizeof(response), &status);
     return ok;
 }
 
@@ -494,12 +513,13 @@ bool communication_fetch_ai_advice(const risk_state_t *risk,
     char reason_escaped[128];
     json_escape(risk->reason, reason_escaped, sizeof(reason_escaped));
 
-    char payload[768];
+    char payload[896];
     snprintf(payload,
              sizeof(payload),
              "{\"device_id\":\"%s\",\"lat\":%.6f,\"lng\":%.6f,"
              "\"risk_type\":\"%s\",\"risk_level\":\"%s\","
              "\"front_cm\":%d,\"left_cm\":%d,\"right_cm\":%d,\"down_cm\":%d,"
+             "\"accuracy_m\":%.1f,\"location_quality\":\"%s\","
              "\"nearby_radius_m\":%d,\"extra\":\"%s\"}",
              SMARTCANE_DEVICE_ID,
              s_location.lat,
@@ -510,6 +530,8 @@ bool communication_fetch_ai_advice(const risk_state_t *risk,
              distances->left_cm,
              distances->right_cm,
              distances->down_cm,
+             s_location.accuracy_m,
+             location_quality_to_string(s_location.quality),
              SMARTCANE_NEARBY_RADIUS_M,
              reason_escaped);
 

@@ -96,3 +96,7 @@
 #define SMARTCANE_ESPNOW_STATUS_INTERVAL_MS 5000
 #define SMARTCANE_REMOTE_STATUS_TIMEOUT_MS 15000
 
+/* Optional telemetry. The current BOM has no battery ADC circuit, so keep -1
+ * until a voltage divider or fuel-gauge module is added and calibrated. */
+#define SMARTCANE_BATTERY_PERCENT_UNKNOWN -1
+
