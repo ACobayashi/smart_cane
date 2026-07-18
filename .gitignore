@@ -28,7 +28,7 @@ __pycache__/
 *.hex
 *.map
 
-# ESP-IDF build artifacts.
+# Local build/config artifacts.
 build/
 sdkconfig
 sdkconfig.old

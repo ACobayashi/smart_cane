@@ -305,16 +305,16 @@ def deep_advice(req: AdviceRequest, deep: dict[str, Any]) -> str:
     level = deep.get("level", "low")
     if level == "high":
         if req.risk_type == "ground_drop" or (req.down_cm is not None and req.down_cm > 75):
-            return "深度模型提示落差风险，请停止探路。"
+            return "\u6df1\u5ea6\u6a21\u578b\u63d0\u793a\u843d\u5dee\u98ce\u9669\uff0c\u8bf7\u505c\u6b62\u63a2\u8def\u3002"
         if req.left_cm is not None and req.right_cm is not None:
             if req.left_cm > req.right_cm and req.left_cm > 90:
-                return "深度模型提示高风险，请向左慢行。"
+                return "\u6df1\u5ea6\u6a21\u578b\u63d0\u793a\u9ad8\u98ce\u9669\uff0c\u8bf7\u5411\u5de6\u6162\u884c\u3002"
             if req.right_cm > req.left_cm and req.right_cm > 90:
-                return "深度模型提示高风险，请向右慢行。"
-        return "深度模型提示高风险，请停止。"
+                return "\u6df1\u5ea6\u6a21\u578b\u63d0\u793a\u9ad8\u98ce\u9669\uff0c\u8bf7\u5411\u53f3\u6162\u884c\u3002"
+        return "\u6df1\u5ea6\u6a21\u578b\u63d0\u793a\u9ad8\u98ce\u9669\uff0c\u8bf7\u505c\u6b62\u3002"
     if level == "medium":
-        return "深度模型提示中风险，请减速确认。"
-    return "深度模型提示风险较低，请谨慎前进。"
+        return "\u6df1\u5ea6\u6a21\u578b\u63d0\u793a\u4e2d\u98ce\u9669\uff0c\u8bf7\u51cf\u901f\u786e\u8ba4\u3002"
+    return "\u6df1\u5ea6\u6a21\u578b\u63d0\u793a\u98ce\u9669\u8f83\u4f4e\uff0c\u8bf7\u8c28\u614e\u524d\u8fdb\u3002"
 
 
 async def call_chat_completion(messages: list[dict[str, str]], temperature: float = 0.2) -> tuple[Optional[str], dict[str, Any]]:

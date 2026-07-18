@@ -2,11 +2,11 @@
 
 This document is the shared contract for team members A, B, and C.
 
-- A: ESP32-C5 native ESP-IDF firmware, sensors, local risk fusion, upload.
+- A: ESP32-C5 Arduino firmware, sensors, local risk fusion, route upload.
 - B: FastAPI backend, SQLite, AI advice service.
 - C: map frontend and user-facing display.
 
-The firmware does not use Arduino.
+The firmware uses Arduino IDE / Arduino framework and builds from `firmware/smartcane_arduino/smartcane_arduino.ino`.
 
 ## Units
 

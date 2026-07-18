@@ -1,157 +1,124 @@
-# ESP32-C5 Smart Cane Native ESP-IDF Project
+# ESP32-C5 Collaborative Smart Cane
 
-The ESP32-C5 firmware in this repository has been fully migrated to a native ESP-IDF project.
+This repository now uses the Arduino IDE / Arduino framework as the primary firmware path.
 
-It no longer uses:
+The system demonstrates a practical ESP32-C5 multi-device collaborative smart cane:
 
-- Arduino IDE project structure
-- `.ino` entry files
-- `Arduino.h`
-- `setup()` / `loop()`
-- Arduino APIs
-- Arduino as an ESP-IDF component
+- local obstacle and ground-drop risk detection,
+- vibration and buzzer feedback,
+- touch-handle and SOS interactions,
+- route recording,
+- backend risk-point upload,
+- nearby historical risk lookup for collaborative mapping,
+- backend-side lightweight deep-risk scoring and optional cloud LLM advice.
 
-The `backend/` directory is still kept as the FastAPI + SQLite + cloud AI service for risk upload, nearby risk lookup, deep-learning risk scoring, AI advice, and voice endpoints.
+Local safety remains rule-based and offline-capable. Network, deep-risk scoring, and LLM advice only enhance demos and do not replace local obstacle avoidance.
 
-The shared API contract for team members A/B/C is in `docs/api_contract.md`.
+Private reference PDFs and API keys must not be committed or uploaded.
 
-## Project Info
-
-- Target chip: `esp32c5`
-- Recommended ESP-IDF version: `v6.0.2`
-- Firmware entry point: `app_main(void)` in `main/main.c`
-- Runtime model: FreeRTOS tasks
-- Build system: ESP-IDF CMake
-- Partition table: `partitions.csv`, factory app partition is `1536K`
-
-## Structure
+## Repository Structure
 
 ```text
-.
-|-- CMakeLists.txt
-|-- sdkconfig.defaults
-|-- partitions.csv
-|-- main/
-|   |-- CMakeLists.txt
-|   |-- main.c
-|   |-- board_config.h
-|   |-- app_tasks.c
-|   `-- app_tasks.h
-|-- components/
-|   |-- common/
-|   |-- i2c_bus/
-|   |-- tof_sensors/
-|   |-- touch_input/
-|   |-- vibration_motor/
-|   |-- buzzer/
-|   |-- buttons/
-|   |-- gps_location/
-|   |-- risk_logic/
-|   `-- communication/
-|-- backend/
-|   |-- main.py
-|   `-- deep_model.py
-`-- docs/
+firmware/smartcane_arduino/
+  smartcane_arduino.ino
+  config.h
+  i2c_bus.*
+  tof_sensors.*
+  touch_handle.*
+  vibration.*
+  buttons.*
+  buzzer.*
+  risk_logic.*
+  network_client.*
+  data_model.h
+  README.md
+
+backend/
+  main.py
+  deep_model.py
+  requirements.txt
+  README.md
+
+docs/
+  api_contract.md
 ```
 
-## Completed Firmware Features
+## Hardware
 
-- TCA9548A I2C multiplexer channel selection
-- Four VL53L1X ToF sensor slots: front, left, right, down
-- Mock ToF mode for bench demos without hardware
-- MPR121 touch handle with tap, long press, and double click
-- GPIO fallback for touch input when MPR121 is not available
-- PCA9685 PWM vibration motor control for left, right, and center motors
-- Non-blocking active buzzer patterns
-- SOS button debounce and long-press trigger
-- UART GPS/GNSS NMEA parsing with mock fallback
-- Local obstacle avoidance and ground-drop detection
-- Nearby historical risk fusion
-- Native Wi-Fi STA connection
-- HTTP JSON upload for events and location
-- GNSS/BeiDou/GPS provider and location quality upload
-- HTTP nearby risk lookup and AI advice request
-- Backend lightweight deep-learning risk scoring through `/api/ai/deep-risk`
-- ESP-NOW local device status broadcast and receive
-- FreeRTOS tasks: `sensor_task`, `logic_task`, `feedback_task`, `communication_task`, `debug_task`
-
-## Role A Checklist
-
-If you are member A, focus on the native ESP-IDF device side:
-
-- Flash and monitor the ESP32-C5 firmware.
-- Update Wi-Fi, backend URL, and `SMARTCANE_DEVICE_ID` in `components/common/include/smartcane_config.h`.
-- Keep `SMARTCANE_MOCK_SENSOR_MODE` enabled until real VL53L1X modules are wired.
-- Verify TCA9548A, four ToF modules, MPR121, PCA9685, buzzer, SOS button, and GPS one by one.
-- Verify GNSS/BeiDou NMEA output, satellite count, HDOP, and location quality logs.
-- Calibrate `SMARTCANE_FRONT_WARN_CM`, `SMARTCANE_FRONT_DANGER_CM`, `SMARTCANE_SIDE_SAFE_CM`, `SMARTCANE_GROUND_BASE_CM`, and `SMARTCANE_GROUND_DROP_THRESHOLD_CM`.
-- Confirm uploads reach `POST /api/risk-events`.
-- Confirm the second device can read collaborative history through `GET /api/risks/nearby`.
-
-## Hardware Wiring
-
-| Module | ESP32-C5 connection |
+| Module | Role |
 | --- | --- |
-| TCA9548A / MPR121 / PCA9685 SDA | GPIO 8 |
-| TCA9548A / MPR121 / PCA9685 SCL | GPIO 9 |
-| TCA9548A CH0 | Front VL53L1X |
-| TCA9548A CH1 | Left VL53L1X |
-| TCA9548A CH2 | Right VL53L1X |
-| TCA9548A CH3 | Down-facing VL53L1X |
-| PCA9685 CH0 | Left vibration motor MOS input |
-| PCA9685 CH1 | Right vibration motor MOS input |
-| PCA9685 CH2 | Center vibration motor MOS input |
-| SOS button | GPIO 4, active low by default |
-| Active buzzer | GPIO 5 |
-| GPS TX | ESP32-C5 GPIO 18 |
-| GPS RX | ESP32-C5 GPIO 19, optional |
+| ESP32-C5 SensairShuttle or compatible ESP32-C5 Arduino board | Main controller |
+| TCA9548A | I2C multiplexer for four identical VL53L1X ToF sensors |
+| 4 x VL53L1X | Front, left, right, and down distance sensing |
+| MPR121 / HW-017 | Capacitive touch handle |
+| PCA9685 | PWM driver for three vibration motors |
+| 3 x 1027 3V vibration motors | Left, right, and center tactile feedback through MOS drivers |
+| Active buzzer | High-risk, ground-drop, and SOS alert |
+| SOS button | Physical long-press emergency trigger |
 
-All GPIOs, I2C addresses, thresholds, Wi-Fi credentials, and backend URL are configured in:
+Recommended current bench wiring from the Arduino screenshots:
 
-```text
-components/common/include/smartcane_config.h
-```
+| Hardware | ESP32-C5 / TCA / PCA9685 connection |
+| --- | --- |
+| I2C SDA | `GPIO2` |
+| I2C SCL | `GPIO3` |
+| TCA9548A address | `0x70` |
+| Front VL53L1X | TCA `CH2` |
+| Left VL53L1X | TCA `CH3` |
+| Right VL53L1X | TCA `CH4` |
+| Down VL53L1X | TCA `CH5` |
+| MPR121 | TCA `CH7`, address `0x5A` |
+| PCA9685 | root I2C, address `0x40` |
+| PCA9685 CH0/CH1/CH2 | left/right/center motor MOS gate |
+| Buzzer | `GPIO4` |
+| SOS button | `GPIO5`, active low |
 
-## Build
+If you rewire ToF sensors back to `CH0/CH1/CH2/CH3`, edit only `firmware/smartcane_arduino/config.h`.
 
-Open an ESP-IDF PowerShell or ESP-IDF Command Prompt, then run:
+## Arduino Libraries
 
-```bash
-cd D:\smartcane
-idf.py set-target esp32c5
-idf.py fullclean
-idf.py build
-```
+Install these in Arduino IDE Library Manager:
 
-The project has been verified to build successfully with ESP-IDF v6.0.2.
+- `Adafruit MPR121`
+- `Adafruit PWM Servo Driver Library`
+- `VL53L1X` by Pololu
+- `ArduinoJson`
 
-## Flash And Monitor
+`WiFi` and `HTTPClient` come with the ESP32 Arduino board package.
 
-```bash
-idf.py -p COMx flash monitor
-```
+## Firmware Setup
 
-Replace `COMx` with your board serial port, for example:
-
-```bash
-idf.py -p COM5 flash monitor
-```
-
-Expected monitor logs include:
+Open:
 
 ```text
-[APP] ESP32-C5 blind assistance system starting...
-[I2C] I2C bus ready ...
-[SENSOR] front=xxcm left=xxcm right=xxcm down=xxcm
-[LOGIC] risk=medium/high ...
-[FEEDBACK] motor/buzzer status
-[COMM] Wi-Fi / ESP-NOW / HTTP status
+D:\smartcane\firmware\smartcane_arduino\smartcane_arduino.ino
 ```
 
-## Backend
+In Arduino IDE:
+
+1. Select board `ESP32C5 Dev Module`.
+2. Select the serial port, for example `COM3`.
+3. Set Serial Monitor to `115200 baud`.
+4. Upload.
+
+Configure device, Wi-Fi, backend URL, thresholds, GPIO, I2C channels, and mock route values in:
+
+```text
+firmware/smartcane_arduino/config.h
+```
+
+Use your PC LAN IP for the backend URL, for example:
+
+```cpp
+#define SMARTCANE_SERVER_BASE_URL "http://192.168.1.100:8000"
+```
+
+Do not use `127.0.0.1` on the ESP32.
+
+## Backend Setup
 
 ```powershell
-cd backend
+cd D:\smartcane\backend
 py -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
@@ -159,22 +126,35 @@ copy .env.example .env
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-Then update the backend URL in `components/common/include/smartcane_config.h`:
+Health check:
 
-```c
-#define SMARTCANE_SERVER_BASE_URL "http://192.168.1.100:8000"
+```text
+http://127.0.0.1:8000/api/health
 ```
 
-Do not use `127.0.0.1` for the ESP32-C5, because that points to the device itself.
+Useful demo endpoints:
 
-## Hardware Items Still Requiring Real-World Verification
+- `POST /api/locations`: route point upload
+- `GET /api/locations/history?device_id=cane_001`
+- `POST /api/risk-events`: risk-point upload
+- `GET /api/risk-events`
+- `GET /api/risks/nearby?lat=31.2304&lng=121.4737&radius=80`
+- `POST /api/ai/deep-risk`
+- `POST /api/ai/advice`
 
-- VL53L1X native ranging register behavior across module batches
-- MPR121 threshold tuning for the final handle material
-- GPS module baud rate and indoor fix behavior
-- PCA9685 + MOS drive strength for 1027 vibration motors
-- ESP-NOW range and channel behavior in the target environment
+Cloud LLM and speech services are optional. Put keys only in `backend/.env`; never commit real secrets.
 
-## Migration Report
+## Closed-Loop Demo
 
-See [MIGRATION_REPORT.md](MIGRATION_REPORT.md).
+1. Start the backend.
+2. Flash the Arduino firmware with `SMARTCANE_DEVICE_ID="cane_001"`.
+3. Serial shows four ToF distances and the fused risk state every second.
+4. Put an obstacle in front. The center motor vibrates; high danger beeps.
+5. Leave more space on the left or right. The matching motor suggests the safer bypass direction.
+6. Raise the down-facing sensor or run `mock drop`. The firmware detects a ground-drop risk, vibrates strongly, beeps, and uploads `ground_drop`.
+7. Long-press touch electrode E1 or run `mark`. The backend records `user_mark` at the current route point.
+8. Run `path` to print the local route ring buffer.
+9. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`. The second cane receives historical risk statistics and fuses them into local risk.
+10. Hold the SOS button for 2 seconds or run `sos`. The cane vibrates, beeps, prints SOS, and uploads `sos`.
+
+Serial commands are listed in `firmware/smartcane_arduino/README.md`.
