@@ -28,6 +28,12 @@ Supported LLM providers:
 
 If no key is configured, normal event/location/map APIs still work. AI advice falls back to rule-based text.
 
+Amap / Gaode:
+
+- Put the Web service key in `AMAP_WEB_KEY`.
+- Keep Android platform key in `frontend/SmartCane/local.properties` as `AMAP_ANDROID_KEY`.
+- The ESP32-C5 and Android app call this backend; the Amap Web key is not exposed to firmware or frontend code.
+
 ## Main APIs
 
 | Method | Path | Purpose |
@@ -40,7 +46,15 @@ If no key is configured, normal event/location/map APIs still work. AI advice fa
 | POST | `/api/locations` | upload device location |
 | GET | `/api/locations/latest` | latest location for one device |
 | GET | `/api/locations/history` | recent location history for one device |
+| POST | `/api/sensor-frames` | hardware-adapted four-ToF frame upload and feedback analysis |
+| GET | `/api/hardware/profile` | ESP32-C5 wiring, active levels, touch, and motor mapping |
 | GET | `/api/risks/nearby` | nearby collaborative risk summary |
+| GET | `/api/map/status` | Amap key/config status |
+| GET | `/api/map/geocode` | Amap address to coordinate |
+| GET | `/api/map/regeo` | Amap coordinate to address |
+| GET | `/api/map/risk-points` | map risk points from SQLite |
+| POST | `/api/navigation/risk-aware-route` | Amap walking route plus collaborative risk score |
+| POST | `/api/navigation/voice-route` | parse simple voice destination text and plan safer route |
 | POST | `/api/ai/deep-risk` | lightweight deep-learning risk scoring |
 | POST | `/api/ai/advice` | optional LLM advice |
 | POST | `/api/voice/text-command` | optional text command parsing |
@@ -62,6 +76,54 @@ The Android app in `D:\smartcane\frontend\SmartCane` uses these legacy-compatibl
 | POST | `/telemetry` | optional simulator/device telemetry upload |
 
 These endpoints read and write the same SQLite tables as `/api/risk-events` and `/api/locations`.
+
+## Hardware-Adapted Sensor Frame
+
+`POST /api/sensor-frames` is the preferred full-chain upload from ESP32-C5 or a simulator. It knows the tested wiring:
+
+- front ToF: TCA `CH2`
+- left ToF: TCA `CH3`
+- right ToF: TCA `CH4`
+- down ToF: TCA `CH5`
+- touch MPR121: TCA `CH7`
+- buzzer: GPIO `4`, low-level trigger
+- SOS button: GPIO `5`, active low, long press
+- vibration motors on blue PCA9685 PWM/Servo Shield: left `CH8`, right `CH9`, center `CH10`, address `0x40`
+
+Example:
+
+```json
+{
+  "device_id": "cane_001",
+  "lat": 31.2304,
+  "lng": 121.4737,
+  "front_cm": 42,
+  "left_cm": 130,
+  "right_cm": 50,
+  "down_cm": 45,
+  "battery": 88,
+  "source": "esp32c5"
+}
+```
+
+Response includes `risk.risk_score`, `risk.voice_prompt`, and `risk.feedback`. The frontend can speak `voice_prompt`; firmware can keep using local buzzer/motor rules offline.
+
+## Amap Risk-Aware Navigation
+
+`POST /api/navigation/risk-aware-route` accepts coordinates or address text. It calls Amap walking navigation, overlays stored risk points from SQLite, and returns the route with the lowest combined risk.
+
+```json
+{
+  "device_id": "cane_001",
+  "origin_lat": 31.2304,
+  "origin_lng": 121.4737,
+  "destination_text": "上海人民广场",
+  "city": "上海",
+  "coordsys": "gps"
+}
+```
+
+The `voice_prompt` field is LLM-enhanced when `ARK_API_KEY` or `OPENAI_API_KEY` is configured, and rule-based otherwise.
 
 ## Risk Upload Example
 

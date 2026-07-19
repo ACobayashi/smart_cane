@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
+import secrets
 import sqlite3
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,6 +22,64 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "smartcane.db"
 LEVEL_RANK = {"low": 0, "medium": 1, "high": 2}
 DEVICE_OFFLINE_SECONDS = 60
+AMAP_BASE_URL = "https://restapi.amap.com/v3"
+
+FRONT_WARN_CM = 120
+FRONT_DANGER_CM = 60
+SIDE_SAFE_CM = 90
+SIDE_NEAR_CM = 55
+GROUND_BASE_CM = 45
+GROUND_DROP_THRESHOLD_CM = 30
+DEFAULT_NEARBY_RADIUS_M = 80.0
+ROUTE_RISK_BUFFER_M = 35.0
+
+HARDWARE_PROFILE: dict[str, Any] = {
+    "controller": "ESP32-C5 Dev Module / SensairShuttle compatible",
+    "i2c": {
+        "sda_gpio": 2,
+        "scl_gpio": 3,
+        "tca9548a_addr": "0x70",
+        "mpr121_addr": "0x5A",
+        "pca9685_addr": "0x40",
+    },
+    "tof_sensors": {
+        "front": {"tca_channel": 2, "sensor": "VL53L1X"},
+        "left": {"tca_channel": 3, "sensor": "VL53L1X"},
+        "right": {"tca_channel": 4, "sensor": "VL53L1X"},
+        "down": {"tca_channel": 5, "sensor": "VL53L1X"},
+    },
+    "touch": {
+        "module": "MPR121 / HW-017",
+        "tca_channel": 7,
+        "electrodes": {
+            "0": "query_status",
+            "1": "long_press_upload_user_mark",
+            "2": "repeat_prompt",
+            "3": "toggle_local_network_mode",
+            "4": "previous_or_left",
+            "5": "next_or_right",
+        },
+    },
+    "actuators": {
+        "buzzer": {"gpio": 4, "active_level": "LOW", "idle_level": "HIGH"},
+        "sos_button": {"gpio": 5, "active_level": "LOW", "hold_ms": 2000},
+        "vibration_motors": {
+            "mode": "pca9685_pwm",
+            "addr": "0x40",
+            "left": {"channel": 8},
+            "right": {"channel": 9},
+            "center": {"channel": 10},
+        },
+    },
+    "thresholds_cm": {
+        "front_warn": FRONT_WARN_CM,
+        "front_danger": FRONT_DANGER_CM,
+        "side_safe": SIDE_SAFE_CM,
+        "side_near": SIDE_NEAR_CM,
+        "ground_base": GROUND_BASE_CM,
+        "ground_drop_threshold": GROUND_DROP_THRESHOLD_CM,
+    },
+}
 
 
 try:
@@ -46,6 +107,9 @@ class EventCreate(BaseModel):
     left_cm: Optional[int] = None
     right_cm: Optional[int] = None
     down_cm: Optional[int] = None
+    risk_score: Optional[float] = None
+    voice_prompt: Optional[str] = None
+    feedback_json: Optional[Any] = None
     extra_json: Optional[Any] = None
     timestamp: Optional[str] = None
 
@@ -102,6 +166,50 @@ class TextCommandRequest(BaseModel):
     lng: Optional[float] = None
 
 
+class SensorFrameCreate(BaseModel):
+    device_id: str = Field(..., min_length=1)
+    lat: Optional[float] = Field(None, ge=-90, le=90)
+    lng: Optional[float] = Field(None, ge=-180, le=180)
+    front_cm: Optional[int] = Field(None, ge=0, le=450)
+    left_cm: Optional[int] = Field(None, ge=0, le=450)
+    right_cm: Optional[int] = Field(None, ge=0, le=450)
+    down_cm: Optional[int] = Field(None, ge=0, le=450)
+    battery: Optional[float] = Field(None, ge=-1, le=100)
+    heading_deg: Optional[float] = Field(None, ge=0, lt=360)
+    location_quality: Optional[str] = None
+    location_provider: Optional[str] = None
+    source: str = "esp32c5"
+    button_event: Optional[str] = Field(None, pattern="^(short_press|double_click|long_press|sos)$")
+    touch_electrode: Optional[int] = Field(None, ge=0, le=11)
+    touch_event: Optional[str] = Field(None, pattern="^(tap|double_click|long_press)$")
+    manual_risk_type: Optional[str] = None
+    timestamp: Optional[str] = None
+
+
+class MapRouteRequest(BaseModel):
+    device_id: Optional[str] = None
+    origin_lat: Optional[float] = Field(None, ge=-90, le=90)
+    origin_lng: Optional[float] = Field(None, ge=-180, le=180)
+    destination_lat: Optional[float] = Field(None, ge=-90, le=90)
+    destination_lng: Optional[float] = Field(None, ge=-180, le=180)
+    origin_text: Optional[str] = None
+    destination_text: Optional[str] = None
+    city: Optional[str] = None
+    coordsys: str = "gps"
+    risk_radius_m: float = Field(80.0, gt=0, le=5000)
+    route_buffer_m: float = Field(ROUTE_RISK_BUFFER_M, gt=5, le=200)
+    sensor_frame: Optional[SensorFrameCreate] = None
+
+
+class VoiceRouteRequest(BaseModel):
+    device_id: Optional[str] = None
+    text: str = Field(..., min_length=1)
+    current_lat: Optional[float] = Field(None, ge=-90, le=90)
+    current_lng: Optional[float] = Field(None, ge=-180, le=180)
+    city: Optional[str] = None
+    coordsys: str = "gps"
+
+
 class LegacySosCreate(BaseModel):
     deviceId: str = Field(..., min_length=1)
     latitude: Optional[float] = None
@@ -119,6 +227,17 @@ class LegacyTelemetryCreate(BaseModel):
     latitude: Optional[float] = Field(None, ge=-90, le=90)
     longitude: Optional[float] = Field(None, ge=-180, le=180)
     timestamp: Optional[str] = None
+
+
+class PairingCodeCreate(BaseModel):
+    blindUserId: str = Field(..., min_length=1)
+    deviceId: str = Field(..., min_length=1)
+
+
+class CareRelationRequestCreate(BaseModel):
+    code: str = Field(..., min_length=6, max_length=6)
+    companionUserId: str = Field(..., min_length=1)
+    companionName: str = Field(..., min_length=1)
 
 
 app = FastAPI(title="Smart Cane Collaborative Risk Backend", version="2.0.0")
@@ -165,6 +284,9 @@ def init_db() -> None:
                 left_cm INTEGER,
                 right_cm INTEGER,
                 down_cm INTEGER,
+                risk_score REAL,
+                voice_prompt TEXT,
+                feedback_json TEXT,
                 extra_json TEXT
             )
             """
@@ -187,13 +309,67 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pairing_codes (
+                code TEXT PRIMARY KEY,
+                blind_user_id TEXT NOT NULL,
+                blind_name TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                device_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                status TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS care_requests (
+                request_id TEXT PRIMARY KEY,
+                code TEXT NOT NULL,
+                status TEXT NOT NULL,
+                blind_user_id TEXT NOT NULL,
+                blind_name TEXT NOT NULL,
+                companion_user_id TEXT NOT NULL,
+                companion_name TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                device_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS care_relations (
+                relation_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                blind_user_id TEXT NOT NULL,
+                blind_name TEXT NOT NULL,
+                companion_user_id TEXT NOT NULL,
+                companion_name TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                device_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_events_lat_lng ON risk_events(lat, lng)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_events_level ON risk_events(risk_level)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_device_locations_device ON device_locations(device_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_care_requests_blind ON care_requests(blind_user_id, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_care_requests_companion ON care_requests(companion_user_id, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_care_relations_blind ON care_relations(blind_user_id, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_care_relations_companion ON care_relations(companion_user_id, status)")
         ensure_column(conn, "risk_events", "direction", "TEXT")
         ensure_column(conn, "risk_events", "sensor", "TEXT")
         ensure_column(conn, "risk_events", "distance_mm", "INTEGER")
         ensure_column(conn, "risk_events", "battery", "REAL")
+        ensure_column(conn, "risk_events", "risk_score", "REAL")
+        ensure_column(conn, "risk_events", "voice_prompt", "TEXT")
+        ensure_column(conn, "risk_events", "feedback_json", "TEXT")
         ensure_column(conn, "device_locations", "provider", "TEXT")
         ensure_column(conn, "device_locations", "quality", "TEXT")
         ensure_column(conn, "device_locations", "hdop", "REAL")
@@ -334,6 +510,12 @@ def legacy_event_message(item: dict[str, Any]) -> str:
 
 def legacy_event_dict(row: sqlite3.Row) -> dict[str, Any]:
     item = event_to_dict(row)
+    feedback = None
+    if item.get("feedback_json"):
+        try:
+            feedback = json.loads(item["feedback_json"])
+        except json.JSONDecodeError:
+            feedback = item["feedback_json"]
     return {
         "id": item["id"],
         "deviceId": item["device_id"],
@@ -341,6 +523,9 @@ def legacy_event_dict(row: sqlite3.Row) -> dict[str, Any]:
         "riskLevel": item["risk_level"],
         "distance": event_distance_mm(item),
         "message": legacy_event_message(item),
+        "voicePrompt": item.get("voice_prompt") or legacy_event_message(item),
+        "riskScore": item.get("risk_score"),
+        "feedback": feedback,
         "latitude": item.get("lat"),
         "longitude": item.get("lng"),
         "timestamp": item.get("timestamp"),
@@ -428,6 +613,639 @@ def store_legacy_location(device_id: str, lat: Optional[float], lng: Optional[fl
             timestamp=now_iso(),
         )
     )
+
+
+def user_display_name(user_id: str, role: str) -> str:
+    known = {
+        "blind_demo": "\u5f20\u660e",
+        "user_blind_001": "\u5f20\u660e",
+        "companion_demo": "\u674e\u534e",
+        "user_companion_001": "\u674e\u534e",
+    }
+    if user_id in known:
+        return known[user_id]
+    return ("\u76f2\u4eba\u7528\u6237" if role == "blind" else "\u966a\u62a4\u7528\u6237") + f" {user_id}"
+
+
+def device_display_name(device_id: str) -> str:
+    return "SmartCane 001" if device_id == "cane_001" else f"SmartCane {device_id}"
+
+
+def is_expired(iso_value: str) -> bool:
+    parsed = parse_time(iso_value)
+    return bool(parsed and parsed <= datetime.now(timezone.utc))
+
+
+def pairing_user(user_id: str, display_name: str) -> dict[str, Any]:
+    return {"userId": user_id, "displayName": display_name}
+
+
+def pairing_device(device_id: str, display_name: str) -> dict[str, Any]:
+    return {"deviceId": device_id, "name": display_name}
+
+
+def pairing_code_payload(row: sqlite3.Row, success: bool = True, error: Optional[str] = None) -> dict[str, Any]:
+    payload = {
+        "success": success,
+        "code": row["code"],
+        "expiresAt": row["expires_at"],
+        "blindUser": pairing_user(row["blind_user_id"], row["blind_name"]),
+        "device": pairing_device(row["device_id"], row["device_name"]),
+    }
+    if error:
+        payload["error"] = error
+    return payload
+
+
+def care_request_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "requestId": row["request_id"],
+        "status": row["status"],
+        "code": row["code"],
+        "blindUser": pairing_user(row["blind_user_id"], row["blind_name"]),
+        "companionUser": pairing_user(row["companion_user_id"], row["companion_name"]),
+        "device": pairing_device(row["device_id"], row["device_name"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def care_relation_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "relationId": row["relation_id"],
+        "status": row["status"],
+        "blindUser": pairing_user(row["blind_user_id"], row["blind_name"]),
+        "companionUser": pairing_user(row["companion_user_id"], row["companion_name"]),
+        "device": pairing_device(row["device_id"], row["device_name"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def fetch_pairing_code(code: str) -> sqlite3.Row:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM pairing_codes WHERE code = ?", (code,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="\u672a\u627e\u5230\u8be5\u914d\u5bf9\u7801")
+        if row["status"] != "active" or is_expired(row["expires_at"]):
+            conn.execute("UPDATE pairing_codes SET status = 'expired' WHERE code = ?", (code,))
+            raise HTTPException(status_code=410, detail="\u914d\u5bf9\u7801\u5df2\u8fc7\u671f")
+        return row
+
+
+def latest_relation_for_request(row: sqlite3.Row) -> Optional[dict[str, Any]]:
+    with db() as conn:
+        relation = conn.execute(
+            """
+            SELECT * FROM care_relations
+            WHERE blind_user_id = ? AND companion_user_id = ? AND device_id = ? AND status = 'active'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (row["blind_user_id"], row["companion_user_id"], row["device_id"]),
+        ).fetchone()
+    return care_relation_payload(relation) if relation else None
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def risk_level_from_score(score: float) -> str:
+    if score >= 70:
+        return "high"
+    if score >= 40:
+        return "medium"
+    return "low"
+
+
+def primary_distance_mm(risk_type: str, frame: SensorFrameCreate) -> Optional[int]:
+    if risk_type == "front_obstacle" and frame.front_cm is not None:
+        return frame.front_cm * 10
+    if risk_type == "left_obstacle" and frame.left_cm is not None:
+        return frame.left_cm * 10
+    if risk_type == "right_obstacle" and frame.right_cm is not None:
+        return frame.right_cm * 10
+    if risk_type in {"ground_drop", "down_obstacle", "fall_detected"} and frame.down_cm is not None:
+        return frame.down_cm * 10
+    return None
+
+
+def front_score(front_cm: Optional[int]) -> float:
+    if front_cm is None:
+        return 0.0
+    if front_cm < FRONT_DANGER_CM:
+        return clamp(82 + (FRONT_DANGER_CM - front_cm) * 0.35, 82, 98)
+    if front_cm < FRONT_WARN_CM:
+        return clamp(42 + (FRONT_WARN_CM - front_cm) * 0.55, 42, 78)
+    return 0.0
+
+
+def side_score(side_cm: Optional[int]) -> float:
+    if side_cm is None:
+        return 0.0
+    if side_cm < SIDE_NEAR_CM:
+        return clamp(50 + (SIDE_NEAR_CM - side_cm) * 0.55, 50, 82)
+    if side_cm < SIDE_SAFE_CM:
+        return clamp(25 + (SIDE_SAFE_CM - side_cm) * 0.45, 25, 50)
+    return 0.0
+
+
+def ground_score(down_cm: Optional[int]) -> float:
+    if down_cm is None:
+        return 0.0
+    drop_threshold = GROUND_BASE_CM + GROUND_DROP_THRESHOLD_CM
+    if down_cm > drop_threshold:
+        return clamp(88 + (down_cm - drop_threshold) * 0.18, 88, 99)
+    if down_cm > GROUND_BASE_CM + GROUND_DROP_THRESHOLD_CM * 0.55:
+        return clamp(45 + (down_cm - GROUND_BASE_CM) * 0.45, 45, 70)
+    return 0.0
+
+
+def history_score(history: dict[str, Any]) -> float:
+    return clamp(
+        history.get("high_count", 0) * 16
+        + history.get("medium_count", 0) * 8
+        + history.get("risk_count", 0) * 2,
+        0,
+        35,
+    )
+
+
+def choose_direction(frame: SensorFrameCreate, risk_type: str, level: str) -> str:
+    if risk_type in {"ground_drop", "fall_detected", "sos"}:
+        return "stop"
+    if risk_type == "down_obstacle":
+        return "slow"
+    if risk_type == "left_obstacle":
+        return "keep_right"
+    if risk_type == "right_obstacle":
+        return "keep_left"
+    if risk_type == "history_risk":
+        return "slow"
+    if risk_type == "front_obstacle":
+        left = frame.left_cm if frame.left_cm is not None else 0
+        right = frame.right_cm if frame.right_cm is not None else 0
+        if left < SIDE_SAFE_CM and right < SIDE_SAFE_CM:
+            return "stop"
+        if left > right and left >= SIDE_SAFE_CM:
+            return "turn_left"
+        if right > left and right >= SIDE_SAFE_CM:
+            return "turn_right"
+        return "stop" if level == "high" else "slow"
+    return "none"
+
+
+def feedback_for_risk(risk_type: str, level: str, direction: str) -> dict[str, Any]:
+    if risk_type == "sos":
+        return {
+            "buzzer": {"enabled": True, "beeps": 5, "pattern": "sos"},
+            "vibration": {"left": 100, "right": 100, "center": 100, "duration_ms": 1200},
+            "action": "emergency_contact",
+        }
+    if risk_type == "fall_detected":
+        return {
+            "buzzer": {"enabled": True, "beeps": 4, "pattern": "fall_or_urgent"},
+            "vibration": {"left": 100, "right": 100, "center": 100, "duration_ms": 900},
+            "action": "stop_and_confirm",
+        }
+    if risk_type == "ground_drop":
+        return {
+            "buzzer": {"enabled": True, "beeps": 3, "pattern": "ground_drop"},
+            "vibration": {"left": 90, "right": 90, "center": 100, "duration_ms": 900},
+            "action": "stop",
+        }
+    if risk_type == "down_obstacle":
+        return {
+            "buzzer": {"enabled": level == "high", "beeps": 1, "pattern": "down_obstacle"},
+            "vibration": {"left": 45, "right": 45, "center": 75, "duration_ms": 400},
+            "action": "slow",
+        }
+    if risk_type in {"front_obstacle", "left_obstacle", "right_obstacle"}:
+        motors = {"left": 0, "right": 0, "center": 70 if level == "medium" else 100}
+        if direction in {"turn_left", "keep_left"}:
+            motors["left"] = 80
+        elif direction in {"turn_right", "keep_right"}:
+            motors["right"] = 80
+        elif direction == "stop":
+            motors = {"left": 100, "right": 100, "center": 100}
+        return {
+            "buzzer": {"enabled": level == "high", "beeps": 2, "pattern": "obstacle"},
+            "vibration": {**motors, "duration_ms": 350 if level == "medium" else 650},
+            "action": direction,
+        }
+    if risk_type == "history_risk":
+        return {
+            "buzzer": {"enabled": level == "high", "beeps": 1, "pattern": "history"},
+            "vibration": {"left": 0, "right": 0, "center": 55, "duration_ms": 300},
+            "action": "slow",
+        }
+    if risk_type == "user_mark":
+        return {
+            "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
+            "vibration": {"left": 35, "right": 35, "center": 35, "duration_ms": 250},
+            "action": "recorded",
+        }
+    return {
+        "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
+        "vibration": {"left": 0, "right": 0, "center": 0, "duration_ms": 0},
+        "action": "continue",
+    }
+
+
+def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, direction: str) -> str:
+    if risk_type == "sos":
+        return "SOS 已发送，请停在安全位置等待联系。"
+    if risk_type == "fall_detected":
+        return "检测到跌倒上报，请保持不动并确认安全。"
+    if risk_type == "ground_drop":
+        return f"下方距离约 {frame.down_cm or '-'} 厘米，可能有台阶或坑洼，请停止。"
+    if risk_type == "front_obstacle":
+        if direction == "turn_left":
+            return f"前方 {frame.front_cm or '-'} 厘米有障碍，左侧较空，请向左慢行。"
+        if direction == "turn_right":
+            return f"前方 {frame.front_cm or '-'} 厘米有障碍，右侧较空，请向右慢行。"
+        return f"前方 {frame.front_cm or '-'} 厘米有障碍，请停止确认。"
+    if risk_type == "left_obstacle":
+        return f"左侧 {frame.left_cm or '-'} 厘米有障碍，请向右保持距离。"
+    if risk_type == "right_obstacle":
+        return f"右侧 {frame.right_cm or '-'} 厘米有障碍，请向左保持距离。"
+    if risk_type == "history_risk":
+        return "附近有多人记录的历史风险点，请减速确认。"
+    if risk_type == "user_mark":
+        return "风险点已记录，并会同步给其他用户。"
+    return "当前传感器未发现明显障碍，请继续谨慎前进。"
+
+
+def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> dict[str, Any]:
+    if frame.button_event in {"long_press", "sos"}:
+        risk_type = "sos"
+        score = 100.0
+    elif frame.manual_risk_type == "fall_detected":
+        risk_type = "fall_detected"
+        score = 100.0
+    elif frame.touch_electrode == 1 and frame.touch_event == "long_press":
+        risk_type = "user_mark"
+        score = max(45.0, history_score(history))
+    else:
+        scores = {
+            "front_obstacle": front_score(frame.front_cm),
+            "left_obstacle": side_score(frame.left_cm),
+            "right_obstacle": side_score(frame.right_cm),
+            "ground_drop": ground_score(frame.down_cm),
+        }
+        risk_type, score = max(scores.items(), key=lambda item: item[1])
+        hist_score = history_score(history)
+        if score <= 0 and history.get("high_count", 0) >= 2:
+            risk_type = "history_risk"
+            score = 48 + min(history.get("high_count", 0) * 5, 20)
+        elif score > 0:
+            score = max(score, min(100.0, score + hist_score * 0.35))
+
+    level = risk_level_from_score(score)
+    direction = choose_direction(frame, risk_type, level)
+    feedback = feedback_for_risk(risk_type, level, direction)
+    return {
+        "risk_type": risk_type if score > 0 else "none",
+        "risk_level": level,
+        "risk_score": round(score, 1),
+        "direction": direction,
+        "sensor": {
+            "front_obstacle": "tof_front",
+            "left_obstacle": "tof_left",
+            "right_obstacle": "tof_right",
+            "ground_drop": "tof_down",
+            "user_mark": "touch",
+            "sos": "sos_button",
+            "fall_detected": "phone_or_manual",
+            "history_risk": "backend_history",
+        }.get(risk_type, "none"),
+        "distance_mm": primary_distance_mm(risk_type, frame),
+        "voice_prompt": voice_prompt_for_risk(frame, risk_type, level, direction),
+        "feedback": feedback,
+        "nearby_history": {
+            "risk_count": history.get("risk_count", 0),
+            "high_count": history.get("high_count", 0),
+            "medium_count": history.get("medium_count", 0),
+            "max_level": history.get("max_level", "low"),
+        },
+    }
+
+
+def should_store_sensor_analysis(analysis: dict[str, Any]) -> bool:
+    return analysis["risk_type"] in {"front_obstacle", "left_obstacle", "right_obstacle", "ground_drop", "user_mark", "sos", "fall_detected"} and analysis["risk_level"] in {"medium", "high"}
+
+
+def amap_key() -> str:
+    return env("AMAP_WEB_KEY") or env("GAODE_WEB_KEY") or env("AMAP_KEY")
+
+
+def amap_configured() -> bool:
+    return bool(amap_key())
+
+
+def amap_location(lng: float, lat: float) -> str:
+    return f"{lng:.6f},{lat:.6f}"
+
+
+async def amap_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
+    key = amap_key()
+    if not key:
+        raise HTTPException(status_code=503, detail="AMAP_WEB_KEY is not configured")
+    payload = {**params, "key": key, "output": "JSON"}
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        response = await client.get(f"{AMAP_BASE_URL}{path}", params=payload)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    data = response.json()
+    if str(data.get("status")) != "1":
+        raise HTTPException(
+            status_code=502,
+            detail={"message": "Amap API error", "infocode": data.get("infocode"), "info": data.get("info")},
+        )
+    return data
+
+
+async def convert_to_amap_coord(lat: float, lng: float, coordsys: str = "gps") -> tuple[float, float]:
+    normalized = coordsys.lower()
+    if normalized in {"amap", "gcj02", "gcj-02", "autonavi", "gaode"}:
+        return lat, lng
+    amap_coordsys = "gps" if normalized in {"gps", "wgs84", "wgs-84", "gnss", "beidou"} else normalized
+    data = await amap_get(
+        "/assistant/coordinate/convert",
+        {"locations": amap_location(lng, lat), "coordsys": amap_coordsys},
+    )
+    converted = str(data.get("locations", "")).split(";")[0]
+    converted_lng, converted_lat = [float(part) for part in converted.split(",", 1)]
+    return converted_lat, converted_lng
+
+
+async def geocode_address(address: str, city: Optional[str] = None) -> dict[str, Any]:
+    params: dict[str, Any] = {"address": address}
+    if city:
+        params["city"] = city
+    try:
+        data = await amap_get("/geocode/geo", params)
+    except HTTPException:
+        if not city:
+            raise
+        data = await amap_get("/geocode/geo", {"address": address})
+    geocodes = data.get("geocodes") or []
+    if not geocodes:
+        raise HTTPException(status_code=404, detail=f"Amap geocode not found: {address}")
+    item = geocodes[0]
+    lng, lat = [float(part) for part in str(item["location"]).split(",", 1)]
+    return {
+        "address": address,
+        "formatted_address": item.get("formatted_address", address),
+        "province": item.get("province"),
+        "city": item.get("city"),
+        "district": item.get("district"),
+        "lat": lat,
+        "lng": lng,
+        "coordsys": "amap",
+        "raw": item,
+    }
+
+
+async def reverse_geocode(lat: float, lng: float, coordsys: str = "gps") -> dict[str, Any]:
+    amap_lat, amap_lng = await convert_to_amap_coord(lat, lng, coordsys)
+    data = await amap_get(
+        "/geocode/regeo",
+        {
+            "location": amap_location(amap_lng, amap_lat),
+            "extensions": "base",
+            "radius": 100,
+            "roadlevel": 0,
+        },
+    )
+    regeocode = data.get("regeocode") or {}
+    return {
+        "input": {"lat": lat, "lng": lng, "coordsys": coordsys},
+        "amap_location": {"lat": amap_lat, "lng": amap_lng},
+        "formatted_address": regeocode.get("formatted_address", ""),
+        "address_component": regeocode.get("addressComponent", {}),
+    }
+
+
+def parse_polyline(polyline: str) -> list[dict[str, float]]:
+    points: list[dict[str, float]] = []
+    for token in polyline.split(";"):
+        if not token or "," not in token:
+            continue
+        lng_text, lat_text = token.split(",", 1)
+        try:
+            points.append({"lat": float(lat_text), "lng": float(lng_text)})
+        except ValueError:
+            continue
+    return points
+
+
+def route_points_from_path(path: dict[str, Any]) -> list[dict[str, float]]:
+    points: list[dict[str, float]] = []
+    for step in path.get("steps", []):
+        points.extend(parse_polyline(str(step.get("polyline", ""))))
+    deduped: list[dict[str, float]] = []
+    last: Optional[dict[str, float]] = None
+    for point in points:
+        if last is None or haversine_m(point["lat"], point["lng"], last["lat"], last["lng"]) > 2:
+            deduped.append(point)
+            last = point
+    return deduped
+
+
+def min_distance_to_points(lat: float, lng: float, points: list[dict[str, float]]) -> float:
+    if not points:
+        return float("inf")
+    return min(haversine_m(lat, lng, point["lat"], point["lng"]) for point in points)
+
+
+def route_risk_summary(points: list[dict[str, float]], buffer_m: float) -> dict[str, Any]:
+    if not points:
+        return {"risk_score": 0.0, "risk_points": [], "high_count": 0, "medium_count": 0, "max_level": "low"}
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM risk_events WHERE lat IS NOT NULL AND lng IS NOT NULL").fetchall()
+
+    risk_points: list[dict[str, Any]] = []
+    score = 0.0
+    for row in rows:
+        item = event_to_dict(row)
+        distance = min_distance_to_points(float(item["lat"]), float(item["lng"]), points)
+        if distance > buffer_m:
+            continue
+        level = item.get("risk_level", "low")
+        base = {"high": 32, "medium": 16, "low": 5}.get(level, 5)
+        proximity = (1 - distance / buffer_m) ** 2
+        contribution = base * proximity
+        score += contribution
+        risk_points.append({**item, "distance_to_route_m": round(distance, 1), "score_contribution": round(contribution, 1)})
+
+    risk_points.sort(key=lambda item: item["score_contribution"], reverse=True)
+    max_level = "low"
+    for item in risk_points:
+        if LEVEL_RANK[item["risk_level"]] > LEVEL_RANK[max_level]:
+            max_level = item["risk_level"]
+    return {
+        "risk_score": round(clamp(score, 0, 100), 1),
+        "risk_points": risk_points[:20],
+        "risk_count": len(risk_points),
+        "high_count": sum(1 for item in risk_points if item["risk_level"] == "high"),
+        "medium_count": sum(1 for item in risk_points if item["risk_level"] == "medium"),
+        "max_level": max_level,
+    }
+
+
+async def plan_walking_route(
+    origin_lat: float,
+    origin_lng: float,
+    destination_lat: float,
+    destination_lng: float,
+    coordsys: str,
+) -> dict[str, Any]:
+    origin_amap_lat, origin_amap_lng = await convert_to_amap_coord(origin_lat, origin_lng, coordsys)
+    dest_amap_lat, dest_amap_lng = await convert_to_amap_coord(destination_lat, destination_lng, coordsys)
+    data = await amap_get(
+        "/direction/walking",
+        {
+            "origin": amap_location(origin_amap_lng, origin_amap_lat),
+            "destination": amap_location(dest_amap_lng, dest_amap_lat),
+        },
+    )
+    return {
+        "input": {
+            "origin": {"lat": origin_lat, "lng": origin_lng, "coordsys": coordsys},
+            "destination": {"lat": destination_lat, "lng": destination_lng, "coordsys": coordsys},
+        },
+        "amap_origin": {"lat": origin_amap_lat, "lng": origin_amap_lng},
+        "amap_destination": {"lat": dest_amap_lat, "lng": dest_amap_lng},
+        "raw": data,
+    }
+
+
+def enrich_walking_route(route: dict[str, Any], buffer_m: float) -> dict[str, Any]:
+    raw_paths = (route.get("raw", {}).get("route") or {}).get("paths") or []
+    paths: list[dict[str, Any]] = []
+    for index, path in enumerate(raw_paths):
+        points = route_points_from_path(path)
+        risk = route_risk_summary(points, buffer_m)
+        distance_m = int(float(path.get("distance") or 0))
+        duration_s = int(float(path.get("duration") or 0))
+        paths.append(
+            {
+                "index": index,
+                "distance_m": distance_m,
+                "duration_s": duration_s,
+                "risk_score": risk["risk_score"],
+                "combined_score": round(risk["risk_score"] + distance_m / 1000.0 * 3 + duration_s / 600.0, 1),
+                "risk": risk,
+                "steps": path.get("steps", []),
+                "polyline": points,
+            }
+        )
+    paths.sort(key=lambda item: (item["combined_score"], item["duration_s"], item["distance_m"]))
+    best = paths[0] if paths else None
+    return {
+        "routes": paths,
+        "best_route": best,
+        "route_count": len(paths),
+        "voice_prompt": route_voice_prompt(best),
+    }
+
+
+def route_voice_prompt(best: Optional[dict[str, Any]]) -> str:
+    if not best:
+        return "未能生成步行路线，请检查起点和终点。"
+    if best["risk"]["high_count"] > 0:
+        return "推荐当前风险最低路线，但沿途有高风险点，请减速并听从盲杖提示。"
+    if best["risk"]["medium_count"] > 0:
+        return "推荐当前路线，沿途存在中风险记录，请谨慎通过。"
+    return "推荐当前路线，历史风险较低，请继续谨慎前进。"
+
+
+async def generate_route_advice(best_route: Optional[dict[str, Any]], sensor_analysis: Optional[dict[str, Any]]) -> dict[str, Any]:
+    fallback = route_voice_prompt(best_route)
+    if sensor_analysis and sensor_analysis.get("risk_level") == "high":
+        fallback = sensor_analysis["voice_prompt"]
+    if not best_route:
+        return {"advice": fallback, "fallback": True, "provider": chat_config()["provider"], "model": chat_config()["model"]}
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a navigation safety assistant for a smart cane. "
+                "Return one short Chinese voice prompt, under 55 Chinese characters. "
+                "Mention stop/slow/left/right only when supported by sensor or route risk data."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "best_route": {
+                        "distance_m": best_route.get("distance_m"),
+                        "duration_s": best_route.get("duration_s"),
+                        "risk_score": best_route.get("risk_score"),
+                        "risk_count": best_route.get("risk", {}).get("risk_count"),
+                        "high_count": best_route.get("risk", {}).get("high_count"),
+                        "medium_count": best_route.get("risk", {}).get("medium_count"),
+                    },
+                    "sensor_analysis": sensor_analysis,
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    try:
+        content, meta = await call_chat_completion(messages, temperature=0.1)
+        if content:
+            return {**meta, "advice": content, "fallback": False}
+        return {"advice": fallback, "fallback": True, "provider": chat_config()["provider"], "model": chat_config()["model"]}
+    except Exception as exc:
+        return {
+            "advice": fallback,
+            "fallback": True,
+            "error": str(exc),
+            "provider": chat_config()["provider"],
+            "model": chat_config()["model"],
+        }
+
+
+def parse_route_text(text: str) -> tuple[Optional[str], Optional[str]]:
+    normalized = text.strip()
+    match = re.search(r"从(.+?)(?:到|去|前往)(.+)", normalized)
+    if match:
+        return match.group(1).strip(" ，,。"), match.group(2).strip(" ，,。")
+    match = re.search(r"(?:导航到|带我去|去|到|前往)(.+)", normalized)
+    if match:
+        return None, match.group(1).strip(" ，,。")
+    return None, normalized
+
+
+async def resolve_route_endpoint(request: MapRouteRequest) -> tuple[float, float, float, float, dict[str, Any]]:
+    origin_meta: dict[str, Any] = {}
+    dest_meta: dict[str, Any] = {}
+    origin_lat = request.origin_lat
+    origin_lng = request.origin_lng
+    dest_lat = request.destination_lat
+    dest_lng = request.destination_lng
+
+    if (origin_lat is None or origin_lng is None) and request.origin_text:
+        origin_meta = await geocode_address(request.origin_text, request.city)
+        origin_lat, origin_lng = origin_meta["lat"], origin_meta["lng"]
+    if (dest_lat is None or dest_lng is None) and request.destination_text:
+        dest_meta = await geocode_address(request.destination_text, request.city)
+        dest_lat, dest_lng = dest_meta["lat"], dest_meta["lng"]
+    if (origin_lat is None or origin_lng is None) and request.device_id:
+        latest = latest_location_for_device(request.device_id)
+        if latest:
+            origin_lat, origin_lng = float(latest["lat"]), float(latest["lng"])
+            origin_meta = {"source": "latest_device_location", "device_id": request.device_id}
+    if origin_lat is None or origin_lng is None:
+        raise HTTPException(status_code=400, detail="origin coordinate, origin_text, or device latest location is required")
+    if dest_lat is None or dest_lng is None:
+        raise HTTPException(status_code=400, detail="destination coordinate or destination_text is required")
+    return origin_lat, origin_lng, dest_lat, dest_lng, {"origin": origin_meta, "destination": dest_meta}
 
 
 def chat_config() -> dict[str, str]:
@@ -631,6 +1449,23 @@ def health() -> dict[str, Any]:
     return {"ok": True, "time": now_iso(), "database": str(DB_PATH)}
 
 
+@app.get("/api/hardware/profile")
+def hardware_profile() -> dict[str, Any]:
+    return {
+        "hardware": HARDWARE_PROFILE,
+        "feedback_policy": {
+            "front_or_side_obstacle": "2 short beeps when high risk, plus directional motor cue",
+            "ground_drop": "3 urgent beeps, all motors, stop prompt",
+            "sos": "5 beeps, all motors, emergency event",
+            "low_risk": "no buzzer, serial/frontend status only",
+        },
+        "backend_note": (
+            "ESP32-C5 performs local sensor safety. Backend records risk, "
+            "scores collaborative history, and proxies Amap navigation."
+        ),
+    }
+
+
 @app.get("/api/ai/status")
 def ai_status() -> dict[str, Any]:
     chat = chat_config()
@@ -644,6 +1479,7 @@ def ai_status() -> dict[str, Any]:
         "stt_provider": stt["provider"],
         "stt_model": stt["model"],
         "stt_configured": bool(stt["api_key"] and stt["model"]),
+        "amap_configured": amap_configured(),
     }
 
 
@@ -660,9 +1496,10 @@ def store_event(event: EventCreate) -> dict[str, Any]:
             INSERT INTO risk_events (
                 device_id, timestamp, lat, lng, risk_type, risk_level,
                 direction, sensor, distance_mm, battery,
-                front_cm, left_cm, right_cm, down_cm, extra_json
+                front_cm, left_cm, right_cm, down_cm,
+                risk_score, voice_prompt, feedback_json, extra_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.device_id,
@@ -679,6 +1516,9 @@ def store_event(event: EventCreate) -> dict[str, Any]:
                 event.left_cm,
                 event.right_cm,
                 event.down_cm,
+                event.risk_score,
+                event.voice_prompt,
+                normalize_extra(event.feedback_json),
                 normalize_extra(event.extra_json),
             ),
         )
@@ -737,6 +1577,174 @@ def create_location(location: LocationCreate) -> dict[str, Any]:
         )
         row = conn.execute("SELECT * FROM device_locations WHERE id = ?", (cur.lastrowid,)).fetchone()
     return row_to_dict(row)
+
+
+@app.post("/api/sensor-frames", status_code=201)
+def create_sensor_frame(frame: SensorFrameCreate) -> dict[str, Any]:
+    lat, lng = resolve_legacy_location(frame.device_id, frame.lat, frame.lng)
+    if frame.lat is not None and frame.lng is not None:
+        create_location(
+            LocationCreate(
+                device_id=frame.device_id,
+                lat=frame.lat,
+                lng=frame.lng,
+                source=frame.source,
+                provider=frame.location_provider or "esp32c5",
+                quality=frame.location_quality or "usable",
+                timestamp=frame.timestamp or now_iso(),
+            )
+        )
+
+    history = nearby_summary(lat, lng, DEFAULT_NEARBY_RADIUS_M)
+    analysis = analyze_sensor_frame(frame, history)
+    stored_event: Optional[dict[str, Any]] = None
+    if should_store_sensor_analysis(analysis):
+        stored_event = store_event(
+            EventCreate(
+                device_id=frame.device_id,
+                lat=lat,
+                lng=lng,
+                risk_type=analysis["risk_type"],
+                risk_level=analysis["risk_level"],
+                level=analysis["risk_level"],
+                direction=analysis["direction"],
+                sensor=analysis["sensor"],
+                distance_mm=analysis["distance_mm"],
+                battery=frame.battery,
+                front_cm=frame.front_cm,
+                left_cm=frame.left_cm,
+                right_cm=frame.right_cm,
+                down_cm=frame.down_cm,
+                risk_score=analysis["risk_score"],
+                voice_prompt=analysis["voice_prompt"],
+                feedback_json=analysis["feedback"],
+                extra_json={
+                    "source": frame.source,
+                    "button_event": frame.button_event,
+                    "touch_electrode": frame.touch_electrode,
+                    "touch_event": frame.touch_event,
+                    "hardware_profile": "esp32c5_tca_ch2_3_4_5_mpr121_ch7_gpio_motors",
+                    "nearby_history": analysis["nearby_history"],
+                },
+                timestamp=frame.timestamp or now_iso(),
+            )
+        )
+
+    return {
+        "accepted": True,
+        "device_id": frame.device_id,
+        "lat": lat,
+        "lng": lng,
+        "risk": analysis,
+        "stored_event": stored_event,
+        "hardware": {
+            "tof_mapping": HARDWARE_PROFILE["tof_sensors"],
+            "buzzer": HARDWARE_PROFILE["actuators"]["buzzer"],
+            "motors": HARDWARE_PROFILE["actuators"]["vibration_motors"],
+        },
+    }
+
+
+@app.get("/api/map/status")
+def amap_status() -> dict[str, Any]:
+    return {
+        "provider": "amap_web_service",
+        "configured": amap_configured(),
+        "key_env": "AMAP_WEB_KEY",
+        "key_visible_to_frontend": False,
+    }
+
+
+@app.get("/api/map/regeo")
+async def map_regeo(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+    coordsys: str = Query("gps"),
+) -> dict[str, Any]:
+    return await reverse_geocode(lat, lng, coordsys)
+
+
+@app.get("/api/map/geocode")
+async def map_geocode(
+    address: str = Query(..., min_length=1),
+    city: Optional[str] = Query(None),
+) -> dict[str, Any]:
+    return await geocode_address(address, city)
+
+
+@app.post("/api/navigation/risk-aware-route")
+async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
+    origin_lat, origin_lng, dest_lat, dest_lng, resolved = await resolve_route_endpoint(request)
+    route = await plan_walking_route(origin_lat, origin_lng, dest_lat, dest_lng, request.coordsys)
+    enriched = enrich_walking_route(route, request.route_buffer_m)
+    sensor_analysis = None
+    if request.sensor_frame:
+        history = nearby_summary(origin_lat, origin_lng, request.risk_radius_m)
+        sensor_analysis = analyze_sensor_frame(request.sensor_frame, history)
+    llm_advice = await generate_route_advice(enriched.get("best_route"), sensor_analysis)
+    return {
+        **enriched,
+        "provider": "amap_web_service",
+        "resolved": resolved,
+        "origin": route["input"]["origin"],
+        "destination": route["input"]["destination"],
+        "amap_origin": route["amap_origin"],
+        "amap_destination": route["amap_destination"],
+        "risk_method": {
+            "name": "sensor_history_route_score_v1",
+            "description": "route score = nearby stored risk proximity + walking cost; lower is safer",
+            "route_buffer_m": request.route_buffer_m,
+        },
+        "sensor_analysis": sensor_analysis,
+        "llm_advice": llm_advice,
+        "voice_prompt": llm_advice.get("advice") or enriched.get("voice_prompt"),
+    }
+
+
+@app.post("/api/navigation/voice-route")
+async def voice_route(request: VoiceRouteRequest) -> dict[str, Any]:
+    origin_text, destination_text = parse_route_text(request.text)
+    route_request = MapRouteRequest(
+        device_id=request.device_id,
+        origin_lat=request.current_lat,
+        origin_lng=request.current_lng,
+        origin_text=origin_text,
+        destination_text=destination_text,
+        city=request.city,
+        coordsys=request.coordsys,
+    )
+    route = await risk_aware_route(route_request)
+    return {
+        "text": request.text,
+        "parsed": {"origin_text": origin_text, "destination_text": destination_text},
+        **route,
+    }
+
+
+@app.get("/api/map/risk-points")
+def map_risk_points(
+    lat: Optional[float] = Query(None, ge=-90, le=90),
+    lng: Optional[float] = Query(None, ge=-180, le=180),
+    radius: float = Query(500.0, gt=0, le=10000),
+    limit: int = Query(200, ge=1, le=1000),
+) -> dict[str, Any]:
+    if lat is not None and lng is not None:
+        summary = nearby_summary(lat, lng, radius)
+        return {
+            "risk_count": summary["risk_count"],
+            "high_count": summary["high_count"],
+            "medium_count": summary["medium_count"],
+            "max_level": summary["max_level"],
+            "points": summary["recent_events"][:limit],
+        }
+    events = list_events(limit)
+    return {
+        "risk_count": len(events),
+        "high_count": sum(1 for item in events if item["risk_level"] == "high"),
+        "medium_count": sum(1 for item in events if item["risk_level"] == "medium"),
+        "max_level": max((item["risk_level"] for item in events), key=lambda level: LEVEL_RANK[level], default="low"),
+        "points": events,
+    }
 
 
 @app.get("/status")
@@ -799,56 +1807,221 @@ def legacy_sos(request: LegacySosCreate) -> dict[str, Any]:
     }
 
 
+@app.post("/pairing-codes", status_code=201)
+def create_pairing_code(request: PairingCodeCreate) -> dict[str, Any]:
+    created_at = now_iso()
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(timespec="seconds")
+    blind_name = user_display_name(request.blindUserId, "blind")
+    device_name = device_display_name(request.deviceId)
+
+    with db() as conn:
+        conn.execute(
+            "UPDATE pairing_codes SET status = 'expired' WHERE blind_user_id = ? AND device_id = ? AND status = 'active'",
+            (request.blindUserId, request.deviceId),
+        )
+        code = ""
+        for _ in range(50):
+            candidate = f"{secrets.randbelow(900000) + 100000}"
+            existing = conn.execute(
+                "SELECT code FROM pairing_codes WHERE code = ? AND status = 'active'",
+                (candidate,),
+            ).fetchone()
+            if not existing:
+                code = candidate
+                break
+        if not code:
+            raise HTTPException(status_code=503, detail="\u914d\u5bf9\u7801\u751f\u6210\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5")
+
+        conn.execute(
+            """
+            INSERT INTO pairing_codes
+                (code, blind_user_id, blind_name, device_id, device_name, created_at, expires_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+            """,
+            (code, request.blindUserId, blind_name, request.deviceId, device_name, created_at, expires_at),
+        )
+        row = conn.execute("SELECT * FROM pairing_codes WHERE code = ?", (code,)).fetchone()
+
+    return pairing_code_payload(row)
+
+
+@app.get("/pairing-codes/{code}")
+def get_pairing_code(code: str) -> dict[str, Any]:
+    return pairing_code_payload(fetch_pairing_code(code.strip()))
+
+
+@app.post("/care-relations/requests", status_code=201)
+def create_care_relation_request(request: CareRelationRequestCreate) -> dict[str, Any]:
+    pairing = fetch_pairing_code(request.code.strip())
+    request_id = f"request_{uuid.uuid4().hex[:12]}"
+    created_at = now_iso()
+    companion_name = request.companionName.strip() or user_display_name(request.companionUserId, "companion")
+
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO care_requests
+                (request_id, code, status, blind_user_id, blind_name, companion_user_id,
+                 companion_name, device_id, device_name, created_at, updated_at)
+            VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request_id,
+                pairing["code"],
+                pairing["blind_user_id"],
+                pairing["blind_name"],
+                request.companionUserId,
+                companion_name,
+                pairing["device_id"],
+                pairing["device_name"],
+                created_at,
+                created_at,
+            ),
+        )
+
+    return {"success": True, "requestId": request_id, "status": "pending"}
+
+
+@app.get("/care-relations/requests")
+def get_care_relation_requests(
+    blindUserId: Optional[str] = Query(None),
+    companionUserId: Optional[str] = Query(None),
+) -> dict[str, Any]:
+    clauses: list[str] = []
+    params: list[str] = []
+    if blindUserId:
+        clauses.append("blind_user_id = ?")
+        params.append(blindUserId)
+    if companionUserId:
+        clauses.append("companion_user_id = ?")
+        params.append(companionUserId)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    with db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM care_requests {where} ORDER BY updated_at DESC LIMIT 100",
+            tuple(params),
+        ).fetchall()
+    return {"success": True, "requests": [care_request_payload(row) for row in rows]}
+
+
+@app.post("/care-relations/{request_id}/approve")
+def approve_care_relation_request(request_id: str) -> dict[str, Any]:
+    updated_at = now_iso()
+    with db() as conn:
+        request_row = conn.execute("SELECT * FROM care_requests WHERE request_id = ?", (request_id,)).fetchone()
+        if not request_row:
+            raise HTTPException(status_code=404, detail="\u672a\u627e\u5230\u8be5\u966a\u62a4\u7533\u8bf7")
+
+        existing_relation = conn.execute(
+            """
+            SELECT * FROM care_relations
+            WHERE blind_user_id = ? AND companion_user_id = ? AND device_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (request_row["blind_user_id"], request_row["companion_user_id"], request_row["device_id"]),
+        ).fetchone()
+
+        if existing_relation:
+            relation_id = existing_relation["relation_id"]
+            conn.execute(
+                "UPDATE care_relations SET status = 'active', updated_at = ? WHERE relation_id = ?",
+                (updated_at, relation_id),
+            )
+        else:
+            relation_id = f"relation_{uuid.uuid4().hex[:12]}"
+            conn.execute(
+                """
+                INSERT INTO care_relations
+                    (relation_id, status, blind_user_id, blind_name, companion_user_id,
+                     companion_name, device_id, device_name, created_at, updated_at)
+                VALUES (?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    relation_id,
+                    request_row["blind_user_id"],
+                    request_row["blind_name"],
+                    request_row["companion_user_id"],
+                    request_row["companion_name"],
+                    request_row["device_id"],
+                    request_row["device_name"],
+                    updated_at,
+                    updated_at,
+                ),
+            )
+
+        conn.execute(
+            "UPDATE care_requests SET status = 'active', updated_at = ? WHERE request_id = ?",
+            (updated_at, request_id),
+        )
+        relation = conn.execute("SELECT * FROM care_relations WHERE relation_id = ?", (relation_id,)).fetchone()
+
+    return {
+        "success": True,
+        "requestId": request_id,
+        "status": "active",
+        "relation": care_relation_payload(relation),
+    }
+
+
+@app.post("/care-relations/{request_id}/reject")
+def reject_care_relation_request(request_id: str) -> dict[str, Any]:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM care_requests WHERE request_id = ?", (request_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="\u672a\u627e\u5230\u8be5\u966a\u62a4\u7533\u8bf7")
+        conn.execute(
+            "UPDATE care_requests SET status = 'rejected', updated_at = ? WHERE request_id = ?",
+            (now_iso(), request_id),
+        )
+    return {"success": True, "requestId": request_id, "status": "rejected", "relation": None}
+
+
+@app.get("/care-relations")
+def get_care_relations(userId: str = Query(..., min_length=1), role: str = Query("blind")) -> dict[str, Any]:
+    field = "companion_user_id" if role == "companion" else "blind_user_id"
+    with db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM care_relations WHERE {field} = ? AND status = 'active' ORDER BY updated_at DESC",
+            (userId,),
+        ).fetchall()
+    relations = [care_relation_payload(row) for row in rows]
+    return {"success": True, "relations": relations, "relation": relations[0] if relations else None}
+
+
+@app.delete("/care-relations/{relation_id}")
+def remove_care_relation(relation_id: str) -> dict[str, Any]:
+    with db() as conn:
+        conn.execute(
+            "UPDATE care_relations SET status = 'removed', updated_at = ? WHERE relation_id = ?",
+            (now_iso(), relation_id),
+        )
+    return {"success": True, "relationId": relation_id, "status": "removed"}
+
+
 @app.post("/telemetry", status_code=201)
 def legacy_telemetry(request: LegacyTelemetryCreate) -> dict[str, Any]:
-    store_legacy_location(request.deviceId, request.latitude, request.longitude, request.battery)
-    lat, lng = resolve_legacy_location(request.deviceId, request.latitude, request.longitude)
-
-    generated: list[dict[str, Any]] = []
-    candidates: list[tuple[str, str, str, Optional[int]]] = []
-    if request.frontDistanceMm is not None:
-        if request.frontDistanceMm < 500:
-            candidates.append(("front_obstacle", "high", "tof_front", request.frontDistanceMm))
-        elif request.frontDistanceMm <= 1200:
-            candidates.append(("front_obstacle", "medium", "tof_front", request.frontDistanceMm))
-    if request.leftDistanceMm is not None and request.leftDistanceMm < 500:
-        candidates.append(("left_obstacle", "high", "tof_left", request.leftDistanceMm))
-    if request.rightDistanceMm is not None and request.rightDistanceMm < 500:
-        candidates.append(("right_obstacle", "high", "tof_right", request.rightDistanceMm))
-    if request.downDistanceMm is not None and request.downDistanceMm > 750:
-        candidates.append(("ground_drop", "high", "tof_down", request.downDistanceMm))
-
-    for risk_type, level, sensor, distance_mm in candidates:
-        front_cm = int(request.frontDistanceMm / 10) if request.frontDistanceMm is not None else None
-        left_cm = int(request.leftDistanceMm / 10) if request.leftDistanceMm is not None else None
-        right_cm = int(request.rightDistanceMm / 10) if request.rightDistanceMm is not None else None
-        down_cm = int(request.downDistanceMm / 10) if request.downDistanceMm is not None else None
-        stored = store_event(
-            EventCreate(
-                device_id=request.deviceId,
-                lat=lat,
-                lng=lng,
-                risk_type=risk_type,
-                risk_level=level,
-                level=level,
-                direction="stop" if level == "high" else "slow",
-                sensor=sensor,
-                distance_mm=distance_mm,
-                battery=request.battery,
-                front_cm=front_cm,
-                left_cm=left_cm,
-                right_cm=right_cm,
-                down_cm=down_cm,
-                extra_json={"source": "legacy_telemetry"},
-                timestamp=request.timestamp or now_iso(),
-            )
+    sensor_result = create_sensor_frame(
+        SensorFrameCreate(
+            device_id=request.deviceId,
+            lat=request.latitude,
+            lng=request.longitude,
+            front_cm=int(request.frontDistanceMm / 10) if request.frontDistanceMm is not None else None,
+            left_cm=int(request.leftDistanceMm / 10) if request.leftDistanceMm is not None else None,
+            right_cm=int(request.rightDistanceMm / 10) if request.rightDistanceMm is not None else None,
+            down_cm=int(request.downDistanceMm / 10) if request.downDistanceMm is not None else None,
+            battery=request.battery,
+            source="android_telemetry",
+            timestamp=request.timestamp or now_iso(),
         )
-        generated.append(stored)
+    )
+    generated = [sensor_result["stored_event"]] if sensor_result.get("stored_event") else []
 
     return {
         "success": True,
         "message": "\u9065\u6d4b\u5df2\u63a5\u6536",
         "generatedEvents": len(generated),
+        "risk": sensor_result["risk"],
         "events": [
             {
                 "id": event["id"],
@@ -857,6 +2030,9 @@ def legacy_telemetry(request: LegacyTelemetryCreate) -> dict[str, Any]:
                 "riskLevel": event["risk_level"],
                 "distance": event.get("distance_mm"),
                 "message": legacy_event_message(event),
+                "voicePrompt": event.get("voice_prompt") or legacy_event_message(event),
+                "riskScore": event.get("risk_score"),
+                "feedback": json.loads(event["feedback_json"]) if event.get("feedback_json") else None,
                 "latitude": event.get("lat"),
                 "longitude": event.get("lng"),
                 "timestamp": event.get("timestamp"),

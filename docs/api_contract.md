@@ -228,6 +228,84 @@ Response:
 }
 ```
 
+## GET `/api/hardware/profile`
+
+Returns the tested hardware wiring and active levels for frontend display and debugging.
+
+Important values:
+
+- ToF: front `TCA CH2`, left `CH3`, right `CH4`, down `CH5`
+- Touch: MPR121/HW-017 on `TCA CH7`
+- Buzzer: `GPIO4`, low-level trigger
+- Button: `GPIO5`, active low, long-press SOS
+- Motors: blue PCA9685 PWM/Servo Shield at `0x40`, left `CH8`, right `CH9`, center `CH10`
+
+## POST `/api/sensor-frames`
+
+Preferred full-chain frame upload from the ESP32-C5 or Android simulator. The backend computes a hardware-aware risk score, stores medium/high risks, and returns frontend voice/feedback fields.
+
+```json
+{
+  "device_id": "cane_001",
+  "lat": 31.2304,
+  "lng": 121.4737,
+  "front_cm": 42,
+  "left_cm": 130,
+  "right_cm": 50,
+  "down_cm": 45,
+  "battery": 88,
+  "source": "esp32c5"
+}
+```
+
+Response:
+
+```json
+{
+  "accepted": true,
+  "risk": {
+    "risk_type": "front_obstacle",
+    "risk_level": "high",
+    "risk_score": 89.5,
+    "direction": "turn_left",
+    "voice_prompt": "前方 42 厘米有障碍，左侧较空，请向左慢行。",
+    "feedback": {
+      "buzzer": {"enabled": true, "beeps": 2, "pattern": "obstacle"},
+      "vibration": {"left": 80, "right": 0, "center": 100, "duration_ms": 650}
+    }
+  },
+  "stored_event": {}
+}
+```
+
+## Amap / Gaode Backend Proxy
+
+The Web service key stays in `backend/.env` as `AMAP_WEB_KEY`. Android key stays in `frontend/SmartCane/local.properties` as `AMAP_ANDROID_KEY`.
+
+Frontend endpoints:
+
+- `GET /api/map/status`
+- `GET /api/map/geocode?address=...&city=...`
+- `GET /api/map/regeo?lat=...&lng=...&coordsys=gps`
+- `GET /api/map/risk-points?lat=...&lng=...&radius=500`
+- `POST /api/navigation/risk-aware-route`
+- `POST /api/navigation/voice-route`
+
+Risk-aware route request:
+
+```json
+{
+  "device_id": "cane_001",
+  "origin_lat": 31.2304,
+  "origin_lng": 121.4737,
+  "destination_text": "上海人民广场",
+  "city": "上海",
+  "coordsys": "gps"
+}
+```
+
+The route score combines walking cost with stored collaborative risk points near the polyline. Lower `combined_score` is safer. `voice_prompt` is enhanced by the cloud LLM when configured and falls back to rules when unavailable.
+
 ## POST `/api/ai/advice`
 
 Backend AI advice endpoint. ESP32-C5 can call it for serial demo text, but local obstacle avoidance must not depend on it. The response includes a lightweight deep-learning risk score from `tiny-mlp-risk-v1`.
