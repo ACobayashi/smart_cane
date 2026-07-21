@@ -33,7 +33,8 @@ data class LatestRiskEventDto(
     val longitude: Double?,
     val timestamp: String,
     val voicePrompt: String = "",
-    val riskScore: Double? = null
+    val riskScore: Double? = null,
+    val distanceMeters: Double? = null
 )
 
 data class EmergencyAlertDto(
@@ -506,7 +507,8 @@ object SmartCaneApiClient {
             longitude = nullableDouble("longitude") ?: nullableDouble("lng"),
             timestamp = optString("timestamp"),
             voicePrompt = optString("voicePrompt", optString("voice_prompt", messageValue)),
-            riskScore = nullableDouble("riskScore") ?: nullableDouble("risk_score")
+            riskScore = nullableDouble("riskScore") ?: nullableDouble("risk_score"),
+            distanceMeters = nullableDouble("distanceM") ?: nullableDouble("distance_m")
         )
     }
 

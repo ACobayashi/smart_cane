@@ -1,12 +1,19 @@
 ﻿package com.nankai.smartcane.viewmodel
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import androidx.core.content.ContextCompat
 import com.nankai.smartcane.data.local.DemoData
 import com.nankai.smartcane.data.local.LocalAppPreferences
 import com.nankai.smartcane.data.local.StoredAppState
@@ -55,7 +62,17 @@ class SmartCaneAppController private constructor(
     private var blindPollingJob: Job? = null
     private var companionPollingJob: Job? = null
     private var alertPollingJob: Job? = null
+    private var nearbyRiskPollingJob: Job? = null
+    private var locationUpdatesActive = false
+    private var lastKnownPhoneLocation: Location? = null
+    private var activeTtsUtteranceId: String? = null
     private var lastAlertId: Int = 0
+    private val announcedNearbyRiskIds = mutableSetOf<Int>()
+    private val locationListener = object : LocationListener {
+        override fun onLocationChanged(location: Location) {
+            lastKnownPhoneLocation = location
+        }
+    }
 
     private val _uiState = MutableStateFlow(AppUiState(storedState = preferences.state.value))
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
@@ -291,6 +308,7 @@ class SmartCaneAppController private constructor(
     }
 
     fun startAlertPolling() {
+        startNearbyRiskPolling()
         if (alertPollingJob?.isActive == true) return
         alertPollingJob = scope.launch {
             while (true) {
@@ -337,6 +355,99 @@ class SmartCaneAppController private constructor(
     fun stopAlertPolling() {
         alertPollingJob?.cancel()
         alertPollingJob = null
+        stopNearbyRiskPolling()
+    }
+
+    private fun startNearbyRiskPolling() {
+        if (nearbyRiskPollingJob?.isActive == true) return
+        nearbyRiskPollingJob = scope.launch {
+            while (true) {
+                maybeAnnounceNearbyRisk()
+                delay(4_000L)
+            }
+        }
+    }
+
+    private fun stopNearbyRiskPolling() {
+        nearbyRiskPollingJob?.cancel()
+        nearbyRiskPollingJob = null
+        locationUpdatesActive = false
+        runCatching {
+            (appContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager)
+                ?.removeUpdates(locationListener)
+        }
+    }
+
+    private suspend fun maybeAnnounceNearbyRisk() {
+        if (_uiState.value.currentMode != AppMode.Blind) return
+        if (_uiState.value.voiceState == VoiceState.Speaking) return
+
+        ensureLocationUpdates()
+        val location = currentPhoneLocation() ?: return
+        when (val result = SmartCaneApiClient.getMapRiskPoints(location.latitude, location.longitude, 5)) {
+            is ApiResult.Success -> {
+                val point = result.data
+                    .filterNot { announcedNearbyRiskIds.contains(it.id) }
+                    .filter { isWithinFiveMeters(location, it.latitude, it.longitude, it.distanceMeters) }
+                    .maxWithOrNull(compareBy({ riskLevelRank(it.riskLevel) }, { it.id }))
+                    ?: return
+                announcedNearbyRiskIds += point.id
+                speakText("注意${riskLevelLabel(point.riskLevel)}风险区域")
+            }
+            is ApiResult.Failure -> Unit
+        }
+    }
+
+    private fun ensureLocationUpdates() {
+        if (locationUpdatesActive || !hasLocationPermission()) return
+        val manager = appContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
+        val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
+        providers.forEach { provider ->
+            runCatching {
+                if (manager.isProviderEnabled(provider)) {
+                    manager.requestLocationUpdates(provider, 3_000L, 1f, locationListener, appContext.mainLooper)
+                }
+            }
+        }
+        locationUpdatesActive = true
+    }
+
+    private fun currentPhoneLocation(): Location? {
+        lastKnownPhoneLocation?.let { return it }
+        if (!hasLocationPermission()) return null
+        val manager = appContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
+        return listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
+            .mapNotNull { provider ->
+                runCatching {
+                    if (manager.isProviderEnabled(provider)) manager.getLastKnownLocation(provider) else null
+                }.getOrNull()
+            }
+            .maxByOrNull { it.time }
+            ?.also { lastKnownPhoneLocation = it }
+    }
+
+    private fun hasLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    private fun isWithinFiveMeters(location: Location, latitude: Double?, longitude: Double?, backendDistanceMeters: Double?): Boolean {
+        backendDistanceMeters?.let { return it <= 5.0 }
+        if (latitude == null || longitude == null) return true
+        val distance = FloatArray(1)
+        Location.distanceBetween(location.latitude, location.longitude, latitude, longitude, distance)
+        return distance.first() <= 5f
+    }
+
+    private fun riskLevelRank(level: String): Int = when (level.lowercase(Locale.US)) {
+        "high" -> 3
+        "medium" -> 2
+        else -> 1
+    }
+
+    private fun riskLevelLabel(level: String): String = when (level.lowercase(Locale.US)) {
+        "high" -> "高"
+        "medium" -> "中"
+        else -> "低"
     }
 
     fun dismissUrgentAlert() {
@@ -346,12 +457,29 @@ class SmartCaneAppController private constructor(
     fun toggleVoiceListening() {
         when (_uiState.value.voiceState) {
             VoiceState.Listening -> stopVoiceListening("已收到")
+            VoiceState.Speaking -> Unit
             else -> startVoiceListening()
         }
     }
 
+    fun startVoicePress() {
+        if (_uiState.value.voiceState == VoiceState.Idle) {
+            startVoiceListening()
+        }
+    }
+
+    fun endVoicePress() {
+        if (_uiState.value.voiceState == VoiceState.Listening) {
+            stopVoiceListening("正在理解")
+        }
+    }
+
     fun repeatNavigationPrompt() {
-        val text = "前方路口建议直行"
+        val state = _uiState.value
+        val text = state.lastSpokenText
+            ?: state.urgentAlert?.voicePrompt?.takeIf { it.isNotBlank() }
+            ?: state.urgentAlert?.message
+            ?: "暂无可重复播报内容"
         speakText(text)
     }
 
@@ -360,32 +488,65 @@ class SmartCaneAppController private constructor(
     }
 
     private fun speakText(text: String, listenAfter: Boolean) {
+        if (voiceRecognitionActive) {
+            speechRecognizer?.cancel()
+            voiceRecognitionActive = false
+        }
+        val utteranceId = "smartcane_${System.currentTimeMillis()}"
+        activeTtsUtteranceId = utteranceId
         _uiState.update { it.copy(lastSpokenText = text, voiceState = VoiceState.Speaking, message = "正在播报") }
+
+        fun finishSpeaking() {
+            scope.launch {
+                if (activeTtsUtteranceId != utteranceId) return@launch
+                activeTtsUtteranceId = null
+                if (listenAfter) {
+                    startVoiceListening()
+                } else {
+                    _uiState.update {
+                        if (it.voiceState == VoiceState.Speaking) {
+                            it.copy(voiceState = VoiceState.Idle)
+                        } else {
+                            it
+                        }
+                    }
+                }
+            }
+        }
+
+        fun speakWith(engine: TextToSpeech) {
+            engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) = Unit
+                override fun onDone(doneUtteranceId: String?) {
+                    if (doneUtteranceId == utteranceId) finishSpeaking()
+                }
+
+                @Deprecated("Deprecated in Java")
+                override fun onError(errorUtteranceId: String?) {
+                    if (errorUtteranceId == utteranceId) finishSpeaking()
+                }
+            })
+            val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+            if (result == TextToSpeech.ERROR) {
+                finishSpeaking()
+            }
+        }
+
         val engine = tts
         if (engine == null) {
             tts = TextToSpeech(appContext) { status ->
                 ttsReady = status == TextToSpeech.SUCCESS
                 if (ttsReady) {
                     tts?.language = Locale.CHINESE
-                    tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "smartcane_${System.currentTimeMillis()}")
+                    tts?.let(::speakWith)
+                } else {
+                    finishSpeaking()
                 }
             }
         } else if (ttsReady) {
-            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "smartcane_${System.currentTimeMillis()}")
-        }
-        scope.launch {
-            delay(1600L)
-            if (listenAfter) {
-                startVoiceListening()
-            } else {
-                _uiState.update {
-                    if (it.voiceState == VoiceState.Speaking) {
-                        it.copy(voiceState = VoiceState.Idle)
-                    } else {
-                        it
-                    }
-                }
-            }
+            speakWith(engine)
+        } else {
+            finishSpeaking()
         }
     }
 
@@ -512,6 +673,7 @@ class SmartCaneAppController private constructor(
         tts?.shutdown()
         tts = null
         ttsReady = false
+        activeTtsUtteranceId = null
         speechRecognizer?.destroy()
         speechRecognizer = null
         voiceRecognitionActive = false
@@ -550,7 +712,7 @@ class SmartCaneAppController private constructor(
     }
 }
 
-enum class VoiceState(val label: String) { Idle("点击说话"), Listening("正在聆听"), Speaking("正在播报") }
+enum class VoiceState(val label: String) { Idle("按住说话"), Listening("正在聆听"), Speaking("正在播报") }
 enum class SosActionState { Idle, Sending, Success, Error }
 
 data class AppUiState(

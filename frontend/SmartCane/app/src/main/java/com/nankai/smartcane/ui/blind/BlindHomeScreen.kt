@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -57,7 +59,9 @@ fun BlindHomeScreen(
     message: String?,
     voiceTranscript: String?,
     urgentAlert: EmergencyAlertDto?,
-    onVoiceToggle: () -> Unit,
+    onVoicePressStart: () -> Unit,
+    onVoicePressEnd: () -> Unit,
+    onRepeat: () -> Unit,
     onSos: () -> Unit,
     onDismissAlert: () -> Unit,
     onOpenSettings: () -> Unit
@@ -105,13 +109,32 @@ fun BlindHomeScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                VoiceOrb(state = voiceState, onPressToggle = onVoiceToggle)
+                VoiceOrb(
+                    state = voiceState,
+                    onPressStart = onVoicePressStart,
+                    onPressEnd = onVoicePressEnd
+                )
                 Spacer(Modifier.height(18.dp))
                 VoiceCaption(
                     voiceState = voiceState,
                     transcript = voiceTranscript,
                     message = message
                 )
+                Spacer(Modifier.height(14.dp))
+                OutlinedButton(
+                    onClick = onRepeat,
+                    enabled = voiceState != VoiceState.Speaking,
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = Color.White,
+                        disabledContentColor = Color.White.copy(alpha = 0.45f)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .semantics { contentDescription = "重复播报上一条提示" }
+                ) {
+                    Text("重复播报", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                }
             }
 
             Spacer(Modifier.height(18.dp))
@@ -133,7 +156,11 @@ fun BlindHomeScreen(
 }
 
 @Composable
-private fun VoiceOrb(state: VoiceState, onPressToggle: () -> Unit) {
+private fun VoiceOrb(
+    state: VoiceState,
+    onPressStart: () -> Unit,
+    onPressEnd: () -> Unit
+) {
     val label = when (state) {
         VoiceState.Idle -> "按住说话"
         VoiceState.Listening -> "正在聆听"
@@ -149,16 +176,19 @@ private fun VoiceOrb(state: VoiceState, onPressToggle: () -> Unit) {
                 detectTapGestures(
                     onPress = {
                         if (state != VoiceState.Speaking) {
-                            onPressToggle()
-                            tryAwaitRelease()
-                            if (state == VoiceState.Idle) onPressToggle()
+                            onPressStart()
+                            try {
+                                tryAwaitRelease()
+                            } finally {
+                                onPressEnd()
+                            }
                         }
                     }
                 )
             }
             .semantics {
                 role = Role.Button
-                contentDescription = "语音按钮，双击或按住开始说话"
+                contentDescription = if (state == VoiceState.Speaking) "正在播报，语音按钮暂不可用" else "按住说话，松开结束"
                 stateDescription = label
             },
         contentAlignment = Alignment.Center
@@ -235,7 +265,13 @@ private fun VoiceCaption(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Text("\u5b9e\u65f6\u5b57\u5e55", color = Color(0xFFC7D2FE), fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+        Text(
+            if (voiceState == VoiceState.Speaking) "播报频谱" else "\u5b9e\u65f6\u5b57\u5e55",
+            color = Color(0xFFC7D2FE),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1
+        )
         Text(
             text = caption,
             color = Color.White,
