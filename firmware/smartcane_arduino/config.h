@@ -11,7 +11,7 @@
 #define SMARTCANE_DEVICE_ID "cane_001"
 #define SMARTCANE_WIFI_SSID "xin"
 #define SMARTCANE_WIFI_PASSWORD "22222222"
-#define SMARTCANE_SERVER_BASE_URL "http://192.168.43.7:8000"
+#define SMARTCANE_SERVER_BASE_URL "http://118.31.221.165:8016"
 #define SMARTCANE_PRODUCT_MODE 1
 
 // Location fallback. Keep mock route disabled during bench tests so the device

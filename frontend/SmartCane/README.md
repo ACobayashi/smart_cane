@@ -29,13 +29,19 @@ The app polls `/api/alerts/latest` every few seconds on the blind and companion 
 
 ## Backend Address
 
-Do not edit Kotlin source just to change the backend. Edit local Android properties:
+The committed default backend is the shared cloud FastAPI service:
+
+```properties
+BACKEND_BASE_URL=http://118.31.221.165:8016
+```
+
+You only need to edit local Android properties when overriding the backend for a local test:
 
 ```text
 D:\smartcane\frontend\SmartCane\local.properties
 ```
 
-For a real Android phone on the same Wi-Fi as this computer:
+For a real Android phone on the same Wi-Fi as a local computer:
 
 ```properties
 BACKEND_BASE_URL=http://192.168.1.13:8000
@@ -47,7 +53,7 @@ For the Android Emulator:
 BACKEND_BASE_URL=http://10.0.2.2:8000
 ```
 
-If the computer changes Wi-Fi, run `ipconfig` and replace the IPv4 address.
+If `local.properties` contains `BACKEND_BASE_URL`, it overrides the committed cloud default.
 
 ## Amap Keys
 
@@ -65,7 +71,7 @@ Android platform key:
 ```text
 D:\smartcane\frontend\SmartCane\local.properties
 AMAP_ANDROID_KEY=...
-BACKEND_BASE_URL=http://192.168.1.13:8000
+BACKEND_BASE_URL=http://118.31.221.165:8016
 ```
 
 The Android key is injected into `AndroidManifest.xml` through a manifest placeholder. The app still calls the FastAPI backend for geocoding, route risk scoring, and LLM navigation advice, so the Web service key stays server-side.

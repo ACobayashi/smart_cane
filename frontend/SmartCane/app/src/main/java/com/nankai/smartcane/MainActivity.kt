@@ -149,10 +149,18 @@ private sealed interface MapRiskUiState {
     data class Error(val message: String) : MapRiskUiState
 }
 
-private sealed interface AiAdviceUiState {
-    data object Loading : AiAdviceUiState
-    data class Success(val advice: AiAdviceDto) : AiAdviceUiState
-    data class Error(val message: String) : AiAdviceUiState
+private data class CurrentRiskCardData(
+    val level: String,
+    val adviceText: String,
+    val sourceText: String,
+    val tagText: String
+)
+
+private sealed interface CurrentRiskUiState {
+    data object Loading : CurrentRiskUiState
+    data class Success(val data: CurrentRiskCardData) : CurrentRiskUiState
+    data class Empty(val message: String) : CurrentRiskUiState
+    data class Error(val message: String) : CurrentRiskUiState
 }
 
 private sealed interface SosUiState {
@@ -185,6 +193,39 @@ private fun displayTimestamp(timestamp: String): String = runCatching {
 }.getOrDefault(timestamp.ifBlank { currentTimeText() })
 
 private fun currentTimeText(): String = SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(Date())
+
+private fun LatestRiskEventDto.toAiAdviceRequest(): AiAdviceRequestDto {
+    val distanceMm = distance?.coerceAtLeast(0)
+    return AiAdviceRequestDto(
+        deviceId = deviceId,
+        latitude = latitude,
+        longitude = longitude,
+        riskType = riskType,
+        level = riskLevel,
+        frontMm = if (directionFromRiskType(riskType) == "front") distanceMm else null,
+        leftMm = if (directionFromRiskType(riskType) == "left") distanceMm else null,
+        rightMm = if (directionFromRiskType(riskType) == "right") distanceMm else null,
+        downMm = if (directionFromRiskType(riskType) == "down") distanceMm else null
+    )
+}
+
+private fun directionLabel(direction: String): String = when (direction) {
+    "left" -> "左侧"
+    "right" -> "右侧"
+    "down" -> "下方"
+    else -> "前方"
+}
+
+private fun riskLevelHeadline(level: String): String = when (level.lowercase(Locale.US)) {
+    "high" -> "高风险"
+    "medium" -> "中风险"
+    else -> "低风险"
+}
+
+private fun LatestRiskEventDto.primaryTagText(): String {
+    val direction = directionLabel(directionFromRiskType(riskType))
+    return distance?.let { "$direction ${it / 10} cm" } ?: riskTypeLabel(riskType)
+}
 
 private fun LatestRiskEventDto.toMapMarker(context: Context): MapRiskMarker? {
     val lat = latitude ?: return null
@@ -273,23 +314,16 @@ fun SmartCaneApp() {
 
 @Composable
 fun AppHeader(title: String, subtitle: String) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .statusBarsPadding()
             .padding(horizontal = 20.dp, vertical = 16.dp)
-            .semantics(mergeDescendants = true) { contentDescription = "$title。$subtitle" },
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
+            .semantics(mergeDescendants = true) { contentDescription = "$title。$subtitle" }
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A), lineHeight = 32.sp)
-            Spacer(Modifier.height(6.dp))
-            Text(subtitle, fontSize = 14.sp, color = Color(0xFF64748B), lineHeight = 20.sp)
-        }
-        Surface(color = Color(0xFFDCFCE7), shape = RoundedCornerShape(999.dp)) {
-            Text("在线", modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp), color = Color(0xFF166534), fontSize = 14.sp, fontWeight = FontWeight.Bold)
-        }
+        Text(title, fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A), lineHeight = 32.sp)
+        Spacer(Modifier.height(6.dp))
+        Text(subtitle, fontSize = 14.sp, color = Color(0xFF64748B), lineHeight = 20.sp)
     }
 }
 
@@ -299,7 +333,7 @@ fun GuidePage() {
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 20.dp)
     ) {
-        item { AppHeader("智能出行助手", "ESP32-C5 多设备协同感知") }
+        item { AppHeader("实时", "设备上报与云端风险建议") }
         item { CurrentRiskCard() }
         item { DistanceGrid() }
         item { LatestRiskFromServer() }
@@ -321,7 +355,13 @@ fun LatestRiskFromServer() {
 
     when (val current = state) {
         LatestEventsUiState.Loading -> StateCard("最新风险提醒", "正在从后端加载最新风险数据…")
-        is LatestEventsUiState.Success -> LatestRiskList("最新风险提醒", current.events)
+        is LatestEventsUiState.Success -> {
+            if (current.events.isEmpty()) {
+                StateCard("最新风险提醒", "后端已连接，暂未收到设备上报的风险事件。")
+            } else {
+                LatestRiskList("最新风险提醒", current.events)
+            }
+        }
         is LatestEventsUiState.Error -> StateCard("最新风险提醒", current.message, showRetry = true, onRetry = { retryKey++ })
     }
 }
@@ -346,43 +386,72 @@ fun StateCard(title: String, message: String, showRetry: Boolean = false, onRetr
 @Composable
 fun CurrentRiskCard() {
     var retryKey by remember { mutableIntStateOf(0) }
-    var state by remember { mutableStateOf<AiAdviceUiState>(AiAdviceUiState.Loading) }
+    var state by remember { mutableStateOf<CurrentRiskUiState>(CurrentRiskUiState.Loading) }
 
     LaunchedEffect(retryKey) {
-        state = AiAdviceUiState.Loading
-        val request = AiAdviceRequestDto(
-            deviceId = "cane_android_demo",
-            latitude = DEMO_CENTER_LAT,
-            longitude = DEMO_CENTER_LNG,
-            riskType = "left_obstacle",
-            level = "high",
-            frontMm = 1280,
-            leftMm = 420,
-            rightMm = 1190,
-            downMm = 450
-        )
-        state = when (val result = SmartCaneApiClient.postAiAdvice(request)) {
-            is ApiResult.Success -> AiAdviceUiState.Success(result.data)
-            is ApiResult.Failure -> AiAdviceUiState.Error(result.message)
+        state = CurrentRiskUiState.Loading
+        state = when (val eventResult = SmartCaneApiClient.getLatestEvents()) {
+            is ApiResult.Failure -> CurrentRiskUiState.Error(eventResult.message)
+            is ApiResult.Success -> {
+                val latestEvent = eventResult.data.firstOrNull()
+                if (latestEvent == null) {
+                    CurrentRiskUiState.Empty("后端已连接，正在等待设备上报新的风险事件。")
+                } else {
+                    when (val adviceResult = SmartCaneApiClient.postAiAdvice(latestEvent.toAiAdviceRequest())) {
+                        is ApiResult.Success -> CurrentRiskUiState.Success(
+                            CurrentRiskCardData(
+                                level = latestEvent.riskLevel,
+                                adviceText = adviceResult.data.advice.ifBlank {
+                                    latestEvent.voicePrompt.ifBlank { latestEvent.message }
+                                },
+                                sourceText = if (adviceResult.data.fallback) "后端兜底建议" else "云端建议",
+                                tagText = latestEvent.primaryTagText()
+                            )
+                        )
+                        is ApiResult.Failure -> CurrentRiskUiState.Success(
+                            CurrentRiskCardData(
+                                level = latestEvent.riskLevel,
+                                adviceText = latestEvent.voicePrompt.ifBlank { latestEvent.message }.ifBlank { "已收到设备风险事件。" },
+                                sourceText = "设备已上报",
+                                tagText = latestEvent.primaryTagText()
+                            )
+                        )
+                    }
+                }
+            }
         }
     }
 
+    val levelText = when (val current = state) {
+        CurrentRiskUiState.Loading -> "加载中"
+        is CurrentRiskUiState.Success -> riskLevelHeadline(current.data.level)
+        is CurrentRiskUiState.Empty -> "暂无风险"
+        is CurrentRiskUiState.Error -> "连接异常"
+    }
+    val levelColor = when (val current = state) {
+        is CurrentRiskUiState.Success -> riskLevelColor(current.data.level)
+        is CurrentRiskUiState.Empty -> Color(0xFF0F766E)
+        else -> Color(0xFF64748B)
+    }
     val adviceText = when (val current = state) {
-        AiAdviceUiState.Loading -> "正在向后端大模型请求建议..."
-        is AiAdviceUiState.Success -> current.advice.advice
-        is AiAdviceUiState.Error -> current.message
+        CurrentRiskUiState.Loading -> "正在从后端获取最新风险，并请求云端建议…"
+        is CurrentRiskUiState.Success -> current.data.adviceText
+        is CurrentRiskUiState.Empty -> current.message
+        is CurrentRiskUiState.Error -> current.message
     }
     val sourceText = when (val current = state) {
-        AiAdviceUiState.Loading -> "FastAPI 连接中"
-        is AiAdviceUiState.Success -> if (current.advice.fallback) "后端兜底建议" else "云端大模型建议"
-        is AiAdviceUiState.Error -> "后端连接失败"
+        CurrentRiskUiState.Loading -> "FastAPI 连接中"
+        is CurrentRiskUiState.Success -> current.data.sourceText
+        is CurrentRiskUiState.Empty -> "等待设备上报"
+        is CurrentRiskUiState.Error -> "后端连接失败"
     }
+    val tagText = (state as? CurrentRiskUiState.Success)?.data?.tagText
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 20.dp, vertical = 8.dp)
-            .semantics(mergeDescendants = true) { contentDescription = "当前风险，高风险，$adviceText" },
+            .semantics(mergeDescendants = true) { contentDescription = "当前风险，$levelText，$adviceText" },
         shape = RoundedCornerShape(28.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),
         elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
@@ -390,7 +459,7 @@ fun CurrentRiskCard() {
         Column(Modifier.padding(22.dp)) {
             Text("当前风险", color = Color(0xFF64748B), fontSize = 15.sp)
             Spacer(Modifier.height(8.dp))
-            Text("高风险", fontSize = 38.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFDC2626))
+            Text(levelText, fontSize = 38.sp, fontWeight = FontWeight.ExtraBold, color = levelColor)
             Spacer(Modifier.height(10.dp))
             Text(adviceText, fontSize = 17.sp, lineHeight = 26.sp, color = Color(0xFF1E293B))
             Spacer(Modifier.height(18.dp))
@@ -400,8 +469,8 @@ fun CurrentRiskCard() {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 StatusTag(sourceText)
-                StatusTag("左侧 42 cm")
-                if (state is AiAdviceUiState.Error) {
+                if (tagText != null) StatusTag(tagText)
+                if (state is CurrentRiskUiState.Error) {
                     OutlinedButton(onClick = { retryKey++ }, modifier = Modifier.weight(1f)) { Text("重试") }
                 }
             }
@@ -493,23 +562,6 @@ fun DeviceStatusDataCard(status: ServerStatusDto, devices: List<DeviceDto>) {
 }
 
 @Composable
-fun DeviceStatusCard() {
-    Card(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White)
-    ) {
-        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("我的设备", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
-            StatusRow("设备名称", "SmartCane 001")
-            StatusRow("设备 ID", "cane_001")
-            StatusRow("连接状态", "在线", Color(0xFF16A34A))
-            StatusRow("最后更新时间", "刚刚")
-        }
-    }
-}
-
-@Composable
 fun StatusRow(label: String, value: String, valueColor: Color = Color(0xFF0F172A)) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
         Text(label, color = Color(0xFF64748B), fontSize = 15.sp, modifier = Modifier.weight(1f), lineHeight = 21.sp)
@@ -552,12 +604,8 @@ fun MapPage() {
         }
     }
 
-    val events = (state as? MapRiskUiState.Success)
-        ?.points
-        ?.map { it.toRiskEvent() }
-        ?.ifEmpty { demoEvents.take(3) }
-        ?: demoEvents.take(3)
     val points = (state as? MapRiskUiState.Success)?.points.orEmpty()
+    val events = points.map { it.toRiskEvent() }
 
     BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFFEEF6F7))) {
         val panelExpandedHeight = maxHeight * 0.55f
@@ -620,7 +668,7 @@ private fun MapTopBar(pointCount: Int, locationGranted: Boolean, modifier: Modif
             }
             Surface(color = if (locationGranted) Color(0xFFDCFCE7) else Color(0xFFFFF7ED), shape = RoundedCornerShape(999.dp)) {
                 Text(
-                    if (locationGranted) "定位中" else "待授权",
+                    if (locationGranted) "已授权" else "待授权",
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                     color = if (locationGranted) Color(0xFF166534) else Color(0xFFC2410C),
                     fontSize = 13.sp,
@@ -687,7 +735,18 @@ private fun NearbyRiskBottomSheet(
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("附近风险点", color = Color(0xFF0F172A), fontSize = 18.sp, fontWeight = FontWeight.Black, maxLines = 1)
-                        Text(if (expanded) "下滑收起" else "上拉查看半屏列表", color = Color(0xFF64748B), fontSize = 12.sp, maxLines = 1)
+                        Text(
+                            if (expanded) {
+                                "下滑收起"
+                            } else if (events.isEmpty()) {
+                                "等待设备上报附近风险点"
+                            } else {
+                                "上拉查看半屏列表"
+                            },
+                            color = Color(0xFF64748B),
+                            fontSize = 12.sp,
+                            maxLines = 1
+                        )
                     }
                     Surface(color = Color(0xFFE0F2F1), shape = RoundedCornerShape(999.dp)) {
                         Text("${events.size}", modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), color = Color(0xFF0F766E), fontSize = 13.sp, fontWeight = FontWeight.Bold)
@@ -700,7 +759,18 @@ private fun NearbyRiskBottomSheet(
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(events) { event -> CompactRiskEventItem(event) }
+                    if (events.isEmpty()) {
+                        item {
+                            Text(
+                                "暂未收到附近风险点上报。",
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                                color = Color(0xFF64748B),
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    } else {
+                        items(events) { event -> CompactRiskEventItem(event) }
+                    }
                 }
             }
         }
@@ -754,11 +824,7 @@ private fun CompatibleRiskMap(points: List<LatestRiskEventDto>, showMyLocation: 
             }
             drawPath(route, Color(0xFF2563EB), style = Stroke(width = 12f, cap = StrokeCap.Round))
 
-            val visible = points.ifEmpty {
-                listOf(
-                    LatestRiskEventDto(0, "demo", "front_obstacle", "high", null, "前方障碍，向左绕行。", DEMO_CENTER_LAT, DEMO_CENTER_LNG, currentTimeText())
-                )
-            }.take(8)
+            val visible = points.take(8)
             visible.forEachIndexed { index, point ->
                 val baseX = w * (0.24f + 0.08f * (index % 4))
                 val baseY = h * (0.70f - 0.12f * (index / 2))
@@ -776,7 +842,7 @@ private fun CompatibleRiskMap(points: List<LatestRiskEventDto>, showMyLocation: 
         }
         Column(Modifier.align(Alignment.BottomStart).padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("南开大学图书馆附近", color = Color(0xFF0F172A), fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            Text("风险点来自后端 SQLite 历史数据", color = Color(0xFF64748B), fontSize = 13.sp)
+            Text("风险点来自设备与后端实时上报", color = Color(0xFF64748B), fontSize = 13.sp)
         }
     }
 }
@@ -864,10 +930,9 @@ fun MapDot(level: String, modifier: Modifier = Modifier) {
 @Composable
 fun CollaborationPage() {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 20.dp)) {
-        item { AppHeader("多设备协同", "三台盲杖风险事件聚合") }
-        item { StatisticsGrid() }
-        item { DeviceListCard() }
-        item { LatestRiskList("协同风险提醒", demoEvents) }
+        item { AppHeader("世界", "设备与环境动态") }
+        item { DeviceStatusFromServer() }
+        item { LatestRiskFromServer() }
     }
 }
 
@@ -978,18 +1043,28 @@ private fun SosStatusContent(state: SosUiState) {
 }
 
 @Composable
-fun MinePage() {
+fun MinePage(
+    userName: String = "陪护人",
+    onSwitchToBlind: () -> Unit = {},
+    onLogout: () -> Unit = {}
+) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 20.dp)) {
-        item { AppHeader("我的设备", "设备管理与系统设置") }
-        item { DeviceStatusCard() }
+        item { AppHeader("我的", "账号与设备") }
         item {
-            Card(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+            Card(
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                shape = RoundedCornerShape(24.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White)
+            ) {
                 Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("系统说明", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
-                    Text("当前 Android 前端保留原有网络能力，并新增本地演示登录、模式选择和陪护关联闭环。真实账号、跨手机同步仍需后端接口支持。", color = Color(0xFF64748B), fontSize = 15.sp, lineHeight = 23.sp)
+                    Text("当前账号", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
+                    StatusRow("用户名", userName)
+                    OutlinedButton(onClick = onSwitchToBlind, modifier = Modifier.fillMaxWidth()) { Text("切换到用户模式") }
+                    Button(onClick = onLogout, modifier = Modifier.fillMaxWidth()) { Text("退出登录") }
                 }
             }
         }
+        item { DeviceStatusFromServer() }
     }
 }
 

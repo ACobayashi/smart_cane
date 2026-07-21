@@ -11,7 +11,5 @@ sealed class AppRoute {
     data object CompanionRisk : AppRoute()
     data object CompanionMap : AppRoute()
     data object CompanionCollaboration : AppRoute()
-    data object CompanionSos : AppRoute()
     data object CompanionMine : AppRoute()
 }
-
