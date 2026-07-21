@@ -137,6 +137,7 @@ fun SmartCaneRootApp() {
                 onClearDemoData = controller::clearDemoData
             )
             AppRoute.CompanionHome -> CompanionHomeScreen(
+                userName = uiState.currentUser?.displayName ?: "陪护人",
                 relation = uiState.currentRelation ?: controller.relation(),
                 relationUpdateText = controller.relationUpdateText(),
                 urgentAlert = uiState.urgentAlert,

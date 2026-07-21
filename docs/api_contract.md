@@ -8,6 +8,38 @@ This document is the shared contract for team members A, B, and C.
 
 The firmware uses Arduino IDE / Arduino framework and builds from `firmware/smartcane_arduino/smartcane_arduino.ino`.
 
+## Software Functions
+
+SmartCane is split into four visible parts:
+
+- User app: shows live map, current position, nearby risk points, AI advice, SOS, and device status.
+- Companion app: shows the companion username, linked user status, user location, risk records, SOS alerts, and device status.
+- FastAPI backend: receives ESP32-C5 and Android uploads, writes SQLite, reads collaborative risk history, and calls the cloud LLM.
+- ESP32-C5 firmware: fuses ToF, touch/button, IMU, and location data, then uploads only meaningful risk events.
+
+## Required Team Interfaces
+
+These endpoints are the stable contract between B and C:
+
+| Function | Method | Path | Used By |
+| --- | --- | --- | --- |
+| Map risk points | `GET` | `/api/risk-events` | Android map |
+| Location upload | `POST` | `/api/locations` | ESP32-C5 / Android |
+| Latest location | `GET` | `/api/locations/latest?device_id=...` | Android map / companion |
+| Location history | `GET` | `/api/locations/history?device_id=...` | Android route line |
+| User risk mark | `POST` | `/api/risk-events` | Android user mark |
+| Nearby shared risks | `GET` | `/api/risks/nearby?lat=...&lng=...&radius=...` | ESP32-C5 / Android |
+| AI advice | `POST` | `/api/ai/advice` or `/api/ai-advice` | Android / ESP32-C5 integration test |
+| Backend status | `GET` | `/api/ai/status` | Demo check |
+
+Map point fields required by frontend:
+
+- `lat`
+- `lng`
+- `risk_type`
+- `level` or `risk_level`
+- `ai_message`
+
 ## Units
 
 | Field | Unit |
