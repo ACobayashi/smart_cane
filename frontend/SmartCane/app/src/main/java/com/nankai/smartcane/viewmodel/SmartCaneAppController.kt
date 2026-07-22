@@ -642,7 +642,7 @@ class SmartCaneAppController private constructor(
                 }
                 is ApiResult.Failure -> {
                     _uiState.update { it.copy(voiceState = VoiceState.Idle, message = result.message, voiceTranscript = result.message) }
-                    speakText("语音识别失败，请检查后端语音识别配置")
+                    speakText("语音请求失败，请检查网络或后端服务")
                 }
             }
             runCatching { file.delete() }

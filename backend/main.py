@@ -1713,7 +1713,21 @@ def parse_route_text(text: str) -> tuple[Optional[str], Optional[str]]:
     match = re.search(r"(?:\u5bfc\u822a\u5230|\u5e26\u6211\u53bb|\u53bb|\u524d\u5f80)(.+)", normalized)
     if match:
         return None, match.group(1).strip(" ，。,")
-    return None, normalized
+    return None, None
+
+
+def is_plain_greeting(text: str) -> bool:
+    normalized = re.sub(r"[\s，。！？!?,.]", "", text.strip().lower())
+    return normalized in {
+        "你好",
+        "你好啊",
+        "您好",
+        "您好啊",
+        "hello",
+        "hi",
+        "嗨",
+        "哈喽",
+    }
 
 
 def parse_json_object(text: str) -> dict[str, Any]:
@@ -1730,11 +1744,21 @@ def parse_json_object(text: str) -> dict[str, Any]:
 
 async def parse_route_text_with_llm(text: str) -> dict[str, Any]:
     fallback_origin, fallback_destination = parse_route_text(text)
+    if is_plain_greeting(text):
+        return {
+            "origin_text": None,
+            "destination_text": None,
+            "intent": "unknown",
+            "confidence": 1.0,
+            "reply": "你好，我在。请按住说出要导航去的地方。",
+            "fallback": True,
+        }
     fallback = {
         "origin_text": fallback_origin,
         "destination_text": fallback_destination,
-        "intent": "route",
-        "confidence": 0.45,
+        "intent": "route" if fallback_destination else "unknown",
+        "confidence": 0.45 if fallback_destination else 0.2,
+        "reply": None if fallback_destination else "请说出要导航去的地方，例如：导航到南开大学图书馆。",
         "fallback": True,
     }
     messages = [
@@ -1746,6 +1770,7 @@ async def parse_route_text_with_llm(text: str) -> dict[str, Any]:
                 "intent 可选 route/query_risk/repeat/sos/unknown。"
                 "如果用户想导航，把 destination_text 提取成可用于高德地理编码的中文地点名。"
                 "如果用户说从某地到某地，同时填写 origin_text 和 destination_text。"
+                "问候、闲聊、无目的地的话必须返回 unknown，destination_text 为空。"
             ),
         },
         {"role": "user", "content": json.dumps({"text": text}, ensure_ascii=False)},
@@ -1755,14 +1780,18 @@ async def parse_route_text_with_llm(text: str) -> dict[str, Any]:
         if not content:
             return {**fallback, "provider": meta["provider"], "model": meta["model"]}
         parsed = parse_json_object(content)
+        intent = parsed.get("intent") or fallback["intent"]
         origin_text = parsed.get("origin_text") or fallback_origin
-        destination_text = parsed.get("destination_text") or fallback_destination
+        destination_text = parsed.get("destination_text") if intent == "route" else None
+        destination_text = destination_text or (fallback_destination if intent == "route" else None)
+        if intent == "route" and not destination_text:
+            intent = "unknown"
         return {
             "origin_text": origin_text,
             "destination_text": destination_text,
-            "intent": parsed.get("intent") or "route",
+            "intent": intent,
             "confidence": parsed.get("confidence", 0.0),
-            "reply": parsed.get("reply"),
+            "reply": parsed.get("reply") or (None if destination_text else fallback["reply"]),
             "fallback": False,
             "provider": meta["provider"],
             "model": meta["model"],
@@ -2953,6 +2982,29 @@ async def transcribe_upload(
     }
 
 
+def voice_route_failure_prompt(detail: Any) -> str:
+    if isinstance(detail, dict):
+        infocode = str(detail.get("infocode") or "")
+        info = str(detail.get("info") or "")
+        if infocode == "20803" or info == "OVER_DIRECTION_RANGE":
+            return "语音已识别，但步行路线距离过长。请确认当前定位，或说一个更近的目的地。"
+        if infocode == "20800":
+            return "语音已识别，但起点或终点不在高德步行规划范围内。请换一个附近地点。"
+        if infocode == "20801":
+            return "语音已识别，但起点或终点附近没有可规划道路。请换一个更明确的位置。"
+        if infocode == "10001":
+            return "语音已识别，但高德服务 Key 不正确或已过期。"
+        if infocode == "10002":
+            return "语音已识别，但高德 Web 服务没有开通对应接口权限。"
+        return f"语音已识别，但高德路线规划失败：{info or infocode or '未知错误'}。"
+    text = str(detail or "").strip()
+    if "destination coordinate" in text or "destination_text" in text:
+        return "语音已识别，但没有听清目的地。请再说一次要去哪里。"
+    if "origin coordinate" in text:
+        return "语音已识别，但当前定位不可用。请开启定位后再试。"
+    return "语音已识别，但路线规划暂时失败。请稍后再试。"
+
+
 @app.post("/api/voice/transcribe")
 async def transcribe_voice(
     file: UploadFile = File(...),
@@ -2985,16 +3037,30 @@ async def voice_command(
             "voice_prompt": "\u6ca1\u6709\u542c\u6e05\uff0c\u8bf7\u518d\u6309\u4f4f\u8bf4\u4e00\u6b21",
             "route_count": 0,
         }
-    route_result = await voice_route(
-        VoiceRouteRequest(
-            device_id=device_id,
-            text=transcript_text,
-            current_lat=current_lat,
-            current_lng=current_lng,
-            city=city,
-            coordsys=coordsys,
+    try:
+        route_result = await voice_route(
+            VoiceRouteRequest(
+                device_id=device_id,
+                text=transcript_text,
+                current_lat=current_lat,
+                current_lng=current_lng,
+                city=city,
+                coordsys=coordsys,
+            )
         )
-    )
+    except HTTPException as exc:
+        return {
+            "device_id": device_id,
+            "transcript": transcript_text,
+            "stt": {
+                "provider": transcript["provider"],
+                "model": transcript["model"],
+            },
+            "voice_prompt": voice_route_failure_prompt(exc.detail),
+            "route_count": 0,
+            "best_route": None,
+            "route_error": exc.detail,
+        }
     return {
         "device_id": device_id,
         "transcript": transcript_text,
