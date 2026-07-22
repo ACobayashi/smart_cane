@@ -1,5 +1,9 @@
 ﻿package com.nankai.smartcane.ui.blind
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -29,6 +33,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -38,6 +44,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -47,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.nankai.smartcane.data.network.EmergencyAlertDto
 import com.nankai.smartcane.ui.design.SmartCaneColors
 import com.nankai.smartcane.viewmodel.SosActionState
@@ -67,6 +75,22 @@ fun BlindHomeScreen(
     onOpenSettings: () -> Unit
 ) {
     var showSosConfirm by rememberSaveable { mutableStateOf(false) }
+    var startAfterMicPermission by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val microphonePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted && startAfterMicPermission) {
+            onVoicePressStart()
+        }
+        startAfterMicPermission = false
+    }
+    val handleVoicePressStart = {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            onVoicePressStart()
+        } else {
+            startAfterMicPermission = true
+            microphonePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
     val prompt = "前方路口建议直行"
 
     Box(
@@ -111,7 +135,7 @@ fun BlindHomeScreen(
             ) {
                 VoiceOrb(
                     state = voiceState,
-                    onPressStart = onVoicePressStart,
+                    onPressStart = handleVoicePressStart,
                     onPressEnd = onVoicePressEnd
                 )
                 Spacer(Modifier.height(18.dp))
@@ -123,7 +147,7 @@ fun BlindHomeScreen(
                 Spacer(Modifier.height(14.dp))
                 OutlinedButton(
                     onClick = onRepeat,
-                    enabled = voiceState != VoiceState.Speaking,
+                    enabled = voiceState == VoiceState.Idle,
                     colors = ButtonDefaults.outlinedButtonColors(
                         contentColor = Color.White,
                         disabledContentColor = Color.White.copy(alpha = 0.45f)
@@ -161,9 +185,11 @@ private fun VoiceOrb(
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit
 ) {
+    val latestState by rememberUpdatedState(state)
     val label = when (state) {
         VoiceState.Idle -> "按住说话"
-        VoiceState.Listening -> "正在聆听"
+        VoiceState.Listening -> "正在录音"
+        VoiceState.Processing -> "正在识别"
         VoiceState.Speaking -> "正在播报"
     }
     Box(
@@ -172,10 +198,10 @@ private fun VoiceOrb(
             .shadow(28.dp, CircleShape)
             .clip(CircleShape)
             .background(Brush.radialGradient(listOf(Color(0xFFA5B4FC), Color(0xFF6366F1), Color(0xFF312E81))))
-            .pointerInput(state) {
+            .pointerInput(Unit) {
                 detectTapGestures(
                     onPress = {
-                        if (state != VoiceState.Speaking) {
+                        if (latestState == VoiceState.Idle) {
                             onPressStart()
                             try {
                                 tryAwaitRelease()
@@ -188,13 +214,13 @@ private fun VoiceOrb(
             }
             .semantics {
                 role = Role.Button
-                contentDescription = if (state == VoiceState.Speaking) "正在播报，语音按钮暂不可用" else "按住说话，松开结束"
+                contentDescription = if (state == VoiceState.Idle) "按住说话，松开结束" else "语音处理中，按钮暂不可用"
                 stateDescription = label
             },
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            SoundWave(active = state == VoiceState.Listening || state == VoiceState.Speaking)
+            SoundWave(active = state == VoiceState.Listening || state == VoiceState.Processing || state == VoiceState.Speaking)
             Spacer(Modifier.height(14.dp))
             Text(label, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Black, textAlign = TextAlign.Center, maxLines = 1)
         }
@@ -252,7 +278,8 @@ private fun VoiceCaption(
 ) {
     val caption = when {
         !transcript.isNullOrBlank() -> transcript
-        voiceState == VoiceState.Listening -> "\u6b63\u5728\u542c\u4f60\u8bf4\u2026"
+        voiceState == VoiceState.Listening -> "正在录音，松开后识别…"
+        voiceState == VoiceState.Processing -> "正在上传并识别语音…"
         voiceState == VoiceState.Speaking -> "\u6b63\u5728\u64ad\u62a5\u5bfc\u822a\u63d0\u793a"
         !message.isNullOrBlank() && message.length <= 24 -> message
         else -> "\u6309\u4f4f\u4e0a\u65b9\u5927\u5706\u8bf4\u8bdd\uff0c\u8bc6\u522b\u6587\u5b57\u4f1a\u663e\u793a\u5728\u8fd9\u91cc"

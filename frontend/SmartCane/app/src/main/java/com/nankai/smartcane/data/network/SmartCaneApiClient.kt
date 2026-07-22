@@ -5,9 +5,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.UUID
 
 object ApiConfig {
     /**
@@ -185,6 +188,14 @@ data class RouteAdviceDto(
     val distanceM: Int?,
     val durationS: Int?,
     val riskScore: Double?
+)
+
+data class VoiceCommandDto(
+    val transcript: String,
+    val voicePrompt: String,
+    val routeCount: Int,
+    val provider: String,
+    val model: String
 )
 
 object SmartCaneApiClient {
@@ -390,6 +401,36 @@ object SmartCaneApiClient {
         }
     }
 
+    suspend fun postVoiceCommand(
+        deviceId: String,
+        audioFile: File,
+        currentLatitude: Double?,
+        currentLongitude: Double?,
+        language: String = "zh-CN"
+    ): ApiResult<VoiceCommandDto> = withContext(Dispatchers.IO) {
+        try {
+            val fields = buildMap {
+                put("device_id", deviceId)
+                put("language", language)
+                currentLatitude?.let { put("current_lat", it.toString()) }
+                currentLongitude?.let { put("current_lng", it.toString()) }
+                put("coordsys", "gps")
+            }
+            ApiResult.Success(
+                postMultipart(
+                    path = "/api/voice/command",
+                    fields = fields,
+                    fileFieldName = "file",
+                    file = audioFile,
+                    fileName = "voice_${System.currentTimeMillis()}.pcm",
+                    contentType = "audio/pcm"
+                ).toVoiceCommandDto()
+            )
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
     suspend fun getReverseGeocode(latitude: Double, longitude: Double): ApiResult<String> = withContext(Dispatchers.IO) {
         try {
             ApiResult.Success(getJson("/api/map/regeo?lat=$latitude&lng=$longitude&coordsys=gps").optString("formatted_address"))
@@ -422,6 +463,42 @@ object SmartCaneApiClient {
             setFixedLengthStreamingMode(body.size)
         }
         connection.outputStream.use { it.write(body) }
+        return connection.useJsonConnection { code, responseBody ->
+            if (code in 200..299) JSONObject(responseBody.ifBlank { "{}" }) else throw IllegalStateException(extractError(responseBody, code))
+        }
+    }
+
+    private fun postMultipart(
+        path: String,
+        fields: Map<String, String>,
+        fileFieldName: String,
+        file: File,
+        fileName: String,
+        contentType: String
+    ): JSONObject {
+        val boundary = "SmartCane-${UUID.randomUUID()}"
+        val connection = (URL(ApiConfig.BASE_URL + path).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            doOutput = true
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = 90_000
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            setChunkedStreamingMode(0)
+        }
+        connection.outputStream.use { output ->
+            fields.forEach { (name, value) ->
+                output.writeUtf8("--$boundary\r\n")
+                output.writeUtf8("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
+                output.writeUtf8(value)
+                output.writeUtf8("\r\n")
+            }
+            output.writeUtf8("--$boundary\r\n")
+            output.writeUtf8("Content-Disposition: form-data; name=\"$fileFieldName\"; filename=\"$fileName\"\r\n")
+            output.writeUtf8("Content-Type: $contentType\r\n\r\n")
+            file.inputStream().use { input -> input.copyTo(output) }
+            output.writeUtf8("\r\n--$boundary--\r\n")
+        }
         return connection.useJsonConnection { code, responseBody ->
             if (code in 200..299) JSONObject(responseBody.ifBlank { "{}" }) else throw IllegalStateException(extractError(responseBody, code))
         }
@@ -670,11 +747,24 @@ object SmartCaneApiClient {
         )
     }
 
+    private fun JSONObject.toVoiceCommandDto(): VoiceCommandDto {
+        val bestRoute = optJSONObject("best_route") ?: optJSONObject("bestRoute")
+        val stt = optJSONObject("stt")
+        return VoiceCommandDto(
+            transcript = optString("transcript", optString("text", "")),
+            voicePrompt = optString("voice_prompt", optString("voicePrompt", optString("reply", "已收到语音指令"))),
+            routeCount = optInt("route_count", optInt("routeCount")),
+            provider = stt?.optString("provider").orEmpty(),
+            model = stt?.optString("model").orEmpty().ifBlank { bestRoute?.optString("model").orEmpty() }
+        )
+    }
+
     private fun cleanText(value: String?): String? =
         value?.trim()?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
 
     private fun JSONObject.nullableDouble(name: String): Double? = if (has(name) && !isNull(name)) optDouble(name) else null
     private fun JSONObject.nullableInt(name: String): Int? = if (has(name) && !isNull(name)) optInt(name) else null
+    private fun OutputStream.writeUtf8(value: String) = write(value.toByteArray(Charsets.UTF_8))
 
     private fun extractError(body: String, code: Int): String {
         return runCatching {

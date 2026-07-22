@@ -1,12 +1,16 @@
 ﻿package com.nankai.smartcane.viewmodel
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -44,6 +48,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -59,6 +65,9 @@ class SmartCaneAppController private constructor(
     private var ttsReady = false
     private var speechRecognizer: SpeechRecognizer? = null
     private var voiceRecognitionActive = false
+    private var voiceRecordingJob: Job? = null
+    private var voiceRecorder: AudioRecord? = null
+    private var voiceRecordingFile: File? = null
     private var blindPollingJob: Job? = null
     private var companionPollingJob: Job? = null
     private var alertPollingJob: Job? = null
@@ -380,7 +389,7 @@ class SmartCaneAppController private constructor(
 
     private suspend fun maybeAnnounceNearbyRisk() {
         if (_uiState.value.currentMode != AppMode.Blind) return
-        if (_uiState.value.voiceState == VoiceState.Speaking) return
+        if (_uiState.value.voiceState != VoiceState.Idle) return
 
         ensureLocationUpdates()
         val location = currentPhoneLocation() ?: return
@@ -456,21 +465,22 @@ class SmartCaneAppController private constructor(
 
     fun toggleVoiceListening() {
         when (_uiState.value.voiceState) {
-            VoiceState.Listening -> stopVoiceListening("已收到")
+            VoiceState.Listening -> stopVoiceRecordingAndSubmit()
             VoiceState.Speaking -> Unit
-            else -> startVoiceListening()
+            VoiceState.Processing -> Unit
+            else -> startVoiceRecording()
         }
     }
 
     fun startVoicePress() {
         if (_uiState.value.voiceState == VoiceState.Idle) {
-            startVoiceListening()
+            startVoiceRecording()
         }
     }
 
     fun endVoicePress() {
         if (_uiState.value.voiceState == VoiceState.Listening) {
-            stopVoiceListening("正在理解")
+            stopVoiceRecordingAndSubmit()
         }
     }
 
@@ -501,7 +511,7 @@ class SmartCaneAppController private constructor(
                 if (activeTtsUtteranceId != utteranceId) return@launch
                 activeTtsUtteranceId = null
                 if (listenAfter) {
-                    startVoiceListening()
+                    _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "请按住说话", voiceTranscript = "请按住说话") }
                 } else {
                     _uiState.update {
                         if (it.voiceState == VoiceState.Speaking) {
@@ -549,6 +559,98 @@ class SmartCaneAppController private constructor(
             finishSpeaking()
         }
     }
+
+    @SuppressLint("MissingPermission")
+    private fun startVoiceRecording() {
+        if (!hasAudioPermission()) {
+            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "请给 App 开启麦克风权限", voiceTranscript = "请给 App 开启麦克风权限") }
+            return
+        }
+        val sampleRate = 16_000
+        val minBufferSize = AudioRecord.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        if (minBufferSize <= 0) {
+            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "录音设备不可用", voiceTranscript = "录音设备不可用") }
+            return
+        }
+
+        val bufferSize = maxOf(minBufferSize, sampleRate / 2)
+        val file = File(appContext.cacheDir, "smartcane_voice_${System.currentTimeMillis()}.pcm")
+        val recorder = AudioRecord(
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            bufferSize
+        )
+        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+            recorder.release()
+            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "录音初始化失败", voiceTranscript = "录音初始化失败") }
+            return
+        }
+
+        voiceRecorder = recorder
+        voiceRecordingFile = file
+        voiceRecognitionActive = true
+        _uiState.update { it.copy(voiceState = VoiceState.Listening, message = "正在录音", voiceTranscript = null) }
+        voiceRecordingJob = scope.launch(Dispatchers.IO) {
+            FileOutputStream(file).use { output ->
+                val buffer = ByteArray(bufferSize)
+                runCatching { recorder.startRecording() }
+                while (voiceRecognitionActive) {
+                    val read = runCatching { recorder.read(buffer, 0, buffer.size) }.getOrDefault(0)
+                    if (read > 0) output.write(buffer, 0, read)
+                }
+            }
+        }
+    }
+
+    private fun stopVoiceRecordingAndSubmit() {
+        val file = voiceRecordingFile
+        val recorder = voiceRecorder
+        val job = voiceRecordingJob
+        voiceRecognitionActive = false
+        runCatching { recorder?.stop() }
+        scope.launch {
+            job?.join()
+            runCatching { recorder?.release() }
+            voiceRecorder = null
+            voiceRecordingJob = null
+            voiceRecordingFile = null
+
+            if (file == null || !file.exists() || file.length() < 3_200L) {
+                _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "没有录到声音，请再按住说一次", voiceTranscript = "没有录到声音，请再按住说一次") }
+                return@launch
+            }
+
+            _uiState.update { it.copy(voiceState = VoiceState.Processing, message = "正在识别语音", voiceTranscript = "正在识别语音…") }
+            ensureLocationUpdates()
+            val location = currentPhoneLocation()
+            when (val result = SmartCaneApiClient.postVoiceCommand(DemoData.defaultCane.deviceId, file, location?.latitude, location?.longitude)) {
+                is ApiResult.Success -> {
+                    _uiState.update {
+                        it.copy(
+                            voiceState = VoiceState.Idle,
+                            message = "你说：${result.data.transcript}",
+                            voiceTranscript = result.data.transcript
+                        )
+                    }
+                    speakText(result.data.voicePrompt.ifBlank { "已收到语音指令" })
+                }
+                is ApiResult.Failure -> {
+                    _uiState.update { it.copy(voiceState = VoiceState.Idle, message = result.message, voiceTranscript = result.message) }
+                    speakText("语音识别失败，请检查后端语音识别配置")
+                }
+            }
+            runCatching { file.delete() }
+        }
+    }
+
+    private fun hasAudioPermission(): Boolean =
+        ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     private fun startVoiceListening() {
         if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
@@ -606,7 +708,9 @@ class SmartCaneAppController private constructor(
 
                     scope.launch {
                         _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = "\u4f60\u8bf4\uff1a$text", voiceTranscript = text) }
-                        when (val result = SmartCaneApiClient.postVoiceRoute(text, null, null)) {
+                        ensureLocationUpdates()
+                        val location = currentPhoneLocation()
+                        when (val result = SmartCaneApiClient.postVoiceRoute(text, location?.latitude, location?.longitude)) {
                             is ApiResult.Success -> speakText(result.data.voicePrompt.ifBlank { "\u5df2\u6536\u5230\u8def\u7ebf\u8bf7\u6c42" })
                             is ApiResult.Failure -> speakText("\u8bed\u97f3\u6307\u4ee4\u5df2\u6536\u5230\uff0c\u4f46\u540e\u7aef\u6682\u65f6\u4e0d\u53ef\u7528")
                         }
@@ -674,9 +778,16 @@ class SmartCaneAppController private constructor(
         tts = null
         ttsReady = false
         activeTtsUtteranceId = null
+        voiceRecognitionActive = false
+        voiceRecordingJob?.cancel()
+        voiceRecordingJob = null
+        runCatching { voiceRecorder?.stop() }
+        runCatching { voiceRecorder?.release() }
+        voiceRecorder = null
+        runCatching { voiceRecordingFile?.delete() }
+        voiceRecordingFile = null
         speechRecognizer?.destroy()
         speechRecognizer = null
-        voiceRecognitionActive = false
     }
 
     fun relation(): CareRelation? {
@@ -712,7 +823,7 @@ class SmartCaneAppController private constructor(
     }
 }
 
-enum class VoiceState(val label: String) { Idle("按住说话"), Listening("正在聆听"), Speaking("正在播报") }
+enum class VoiceState(val label: String) { Idle("按住说话"), Listening("正在录音"), Processing("正在识别"), Speaking("正在播报") }
 enum class SosActionState { Idle, Sending, Success, Error }
 
 data class AppUiState(

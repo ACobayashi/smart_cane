@@ -7,6 +7,10 @@ import re
 import secrets
 import sqlite3
 import uuid
+import asyncio
+import base64
+import io
+import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -1712,6 +1716,61 @@ def parse_route_text(text: str) -> tuple[Optional[str], Optional[str]]:
     return None, normalized
 
 
+def parse_json_object(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        cleaned = cleaned[start : end + 1]
+    return json.loads(cleaned)
+
+
+async def parse_route_text_with_llm(text: str) -> dict[str, Any]:
+    fallback_origin, fallback_destination = parse_route_text(text)
+    fallback = {
+        "origin_text": fallback_origin,
+        "destination_text": fallback_destination,
+        "intent": "route",
+        "confidence": 0.45,
+        "fallback": True,
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是智能盲杖的语音指令解析器。"
+                "只返回 JSON，不要 Markdown。字段：intent, origin_text, destination_text, confidence, reply。"
+                "intent 可选 route/query_risk/repeat/sos/unknown。"
+                "如果用户想导航，把 destination_text 提取成可用于高德地理编码的中文地点名。"
+                "如果用户说从某地到某地，同时填写 origin_text 和 destination_text。"
+            ),
+        },
+        {"role": "user", "content": json.dumps({"text": text}, ensure_ascii=False)},
+    ]
+    try:
+        content, meta = await call_chat_completion(messages, temperature=0.0)
+        if not content:
+            return {**fallback, "provider": meta["provider"], "model": meta["model"]}
+        parsed = parse_json_object(content)
+        origin_text = parsed.get("origin_text") or fallback_origin
+        destination_text = parsed.get("destination_text") or fallback_destination
+        return {
+            "origin_text": origin_text,
+            "destination_text": destination_text,
+            "intent": parsed.get("intent") or "route",
+            "confidence": parsed.get("confidence", 0.0),
+            "reply": parsed.get("reply"),
+            "fallback": False,
+            "provider": meta["provider"],
+            "model": meta["model"],
+        }
+    except Exception as exc:
+        return {**fallback, "error": str(exc), "provider": chat_config()["provider"], "model": chat_config()["model"]}
+
+
 async def resolve_route_endpoint(request: MapRouteRequest) -> tuple[float, float, float, float, dict[str, Any]]:
     origin_meta: dict[str, Any] = {}
     dest_meta: dict[str, Any] = {}
@@ -1764,6 +1823,26 @@ def chat_config() -> dict[str, str]:
 
 def stt_config() -> dict[str, str]:
     provider = env("STT_PROVIDER", "openai").lower()
+    if provider in {"volc_seedasr", "seedasr", "doubao_stt", "volc_asr", "volcengine_asr"}:
+        return {
+            "provider": "volc_seedasr",
+            "api_key": env("VOLC_ASR_API_KEY", env("DOUBAO_STT_API_KEY", env("SEEDASR_API_KEY", env("STT_API_KEY", "")))),
+            "app_key": env("VOLC_ASR_APP_KEY", env("DOUBAO_STT_APP_ID", env("VOLC_ASR_APP_ID", ""))),
+            "access_key": env("VOLC_ASR_ACCESS_KEY", env("DOUBAO_STT_ACCESS_KEY", env("VOLC_ASR_ACCESS_TOKEN", ""))),
+            "resource_id": env("VOLC_ASR_RESOURCE_ID", "volc.seedasr.auc"),
+            "submit_url": env("VOLC_ASR_SUBMIT_URL", "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"),
+            "query_url": env("VOLC_ASR_QUERY_URL", "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"),
+            "model": env("VOLC_ASR_MODEL", "bigmodel"),
+            "poll_interval_sec": env("VOLC_ASR_POLL_INTERVAL_SEC", "1.0"),
+            "max_polls": env("VOLC_ASR_MAX_POLLS", "20"),
+        }
+    if provider in {"vei", "volces", "volcengine", "ai_gateway"}:
+        return {
+            "provider": "vei",
+            "api_key": env("VEI_API_KEY"),
+            "base_url": env("VEI_BASE_URL", env("VEI_OPENAI_BASE_URL", "https://ai-gateway.vei.volces.com/v1")).rstrip("/"),
+            "model": env("VEI_STT_MODEL", env("STT_MODEL", "")),
+        }
     if provider == "ark":
         return {
             "provider": "ark",
@@ -2262,7 +2341,19 @@ async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
 
 @app.post("/api/navigation/voice-route")
 async def voice_route(request: VoiceRouteRequest) -> dict[str, Any]:
-    origin_text, destination_text = parse_route_text(request.text)
+    parsed_command = await parse_route_text_with_llm(request.text)
+    origin_text = parsed_command.get("origin_text")
+    destination_text = parsed_command.get("destination_text")
+    if parsed_command.get("intent") in {"repeat", "query_risk", "sos", "unknown"} and not destination_text:
+        return {
+            "text": request.text,
+            "parsed": parsed_command,
+            "voice_prompt": parsed_command.get("reply") or "\u5df2\u6536\u5230\u8bed\u97f3\u6307\u4ee4",
+            "route_count": 0,
+            "best_route": None,
+            "provider": parsed_command.get("provider"),
+            "model": parsed_command.get("model"),
+        }
     route_request = MapRouteRequest(
         device_id=request.device_id,
         origin_lat=request.current_lat,
@@ -2275,7 +2366,7 @@ async def voice_route(request: VoiceRouteRequest) -> dict[str, Any]:
     route = await risk_aware_route(route_request)
     return {
         "text": request.text,
-        "parsed": {"origin_text": origin_text, "destination_text": destination_text},
+        "parsed": parsed_command,
         **route,
     }
 
@@ -2704,17 +2795,136 @@ async def text_command(req: TextCommandRequest) -> dict[str, Any]:
     return {"text": req.text, **result}
 
 
-@app.post("/api/voice/transcribe")
-async def transcribe_voice(
-    file: UploadFile = File(...),
-    language: Optional[str] = Form(None),
-    prompt: Optional[str] = Form(None),
+def pcm16_mono_16k_to_wav_bytes(content: bytes) -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(content)
+    return output.getvalue()
+
+
+def normalize_audio_for_seedasr(content: bytes, filename: Optional[str], content_type: Optional[str]) -> tuple[bytes, str]:
+    name = (filename or "").lower()
+    mime = (content_type or "").lower()
+    if name.endswith(".wav") or "wav" in mime:
+        return content, "wav"
+    if name.endswith(".mp3") or "mpeg" in mime or "mp3" in mime:
+        return content, "mp3"
+    if name.endswith(".ogg") or "ogg" in mime:
+        return content, "ogg"
+    if name.endswith(".m4a") or "m4a" in mime or "mp4" in mime:
+        return content, "m4a"
+    return pcm16_mono_16k_to_wav_bytes(content), "wav"
+
+
+def seedasr_headers(cfg: dict[str, str], request_id: str) -> dict[str, str]:
+    headers = {
+        "Content-Type": "application/json",
+        "X-Api-Resource-Id": cfg["resource_id"],
+        "X-Api-Request-Id": request_id,
+        "X-Api-Sequence": "-1",
+    }
+    if cfg.get("api_key"):
+        headers["x-api-key"] = cfg["api_key"]
+        return headers
+    if cfg.get("app_key") and cfg.get("access_key"):
+        headers["X-Api-App-Key"] = cfg["app_key"]
+        headers["X-Api-Access-Key"] = cfg["access_key"]
+        return headers
+    raise HTTPException(status_code=503, detail="Doubao speech recognition is not configured")
+
+
+def extract_seedasr_text(payload: dict[str, Any]) -> str:
+    result = payload.get("result")
+    if isinstance(result, dict):
+        text = str(result.get("text") or "").strip()
+        if text:
+            return text
+        utterances = result.get("utterances")
+        if isinstance(utterances, list):
+            parts = [str(item.get("text") or "").strip() for item in utterances if isinstance(item, dict)]
+            return "".join(part for part in parts if part)
+    return str(payload.get("text") or "").strip()
+
+
+async def transcribe_with_seedasr(
+    cfg: dict[str, str],
+    content: bytes,
+    filename: Optional[str],
+    content_type: Optional[str],
+    uid: str,
+) -> dict[str, Any]:
+    audio_bytes, audio_format = normalize_audio_for_seedasr(content, filename, content_type)
+    request_id = str(uuid.uuid4())
+    headers = seedasr_headers(cfg, request_id)
+    audio_payload = {
+        "data": base64.b64encode(audio_bytes).decode("ascii"),
+        "format": audio_format,
+    }
+    body = {
+        "user": {"uid": uid or "smartcane"},
+        "audio": audio_payload,
+        "request": {
+            "model_name": cfg["model"] or "bigmodel",
+            "enable_itn": True,
+            "enable_punc": True,
+            "enable_ddc": False,
+            "enable_speaker_info": False,
+            "enable_channel_split": False,
+            "show_utterances": False,
+            "vad_segment": False,
+            "sensitive_words_filter": "",
+        },
+    }
+    timeout = httpx.Timeout(90.0, connect=15.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        submit_response = await client.post(cfg["submit_url"], headers=headers, json=body)
+        if submit_response.status_code >= 400:
+            raise HTTPException(status_code=submit_response.status_code, detail=submit_response.text)
+        status_code = submit_response.headers.get("X-Api-Status-Code")
+        if status_code and status_code != "20000000":
+            raise HTTPException(status_code=502, detail=submit_response.headers.get("X-Api-Message", "SeedASR submit failed"))
+
+        interval = max(0.5, float(cfg.get("poll_interval_sec") or "1.0"))
+        max_polls = max(1, int(cfg.get("max_polls") or "20"))
+        for _ in range(max_polls):
+            await asyncio.sleep(interval)
+            query_response = await client.post(cfg["query_url"], headers=headers, content="{}")
+            if query_response.status_code >= 400:
+                raise HTTPException(status_code=query_response.status_code, detail=query_response.text)
+            query_text = query_response.text.strip()
+            if not query_text or query_text == "{}":
+                continue
+            payload = query_response.json()
+            transcript = extract_seedasr_text(payload)
+            if transcript:
+                return {
+                    "provider": cfg["provider"],
+                    "model": cfg["model"],
+                    "text": transcript,
+                    "request_id": request_id,
+                    "raw": payload,
+                }
+    raise HTTPException(status_code=504, detail="Doubao speech recognition timed out")
+
+
+async def transcribe_upload(
+    file: UploadFile,
+    language: Optional[str],
+    prompt: Optional[str],
+    uid: str = "smartcane",
 ) -> dict[str, Any]:
     cfg = stt_config()
+    content = await file.read()
+
+    if cfg["provider"] == "volc_seedasr":
+        return await transcribe_with_seedasr(cfg, content, file.filename, file.content_type, uid)
+
     if not cfg["api_key"] or not cfg["model"]:
         raise HTTPException(status_code=503, detail="speech recognition is not configured")
 
-    content = await file.read()
     data: dict[str, str] = {"model": cfg["model"]}
     if language:
         data["language"] = language
@@ -2743,15 +2953,57 @@ async def transcribe_voice(
     }
 
 
+@app.post("/api/voice/transcribe")
+async def transcribe_voice(
+    file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+    prompt: Optional[str] = Form(None),
+) -> dict[str, Any]:
+    return await transcribe_upload(file=file, language=language, prompt=prompt)
+
+
 @app.post("/api/voice/command")
 async def voice_command(
     device_id: str = Form(...),
     file: UploadFile = File(...),
     language: Optional[str] = Form(None),
+    current_lat: Optional[float] = Form(None),
+    current_lng: Optional[float] = Form(None),
+    city: Optional[str] = Form(None),
+    coordsys: str = Form("gps"),
 ) -> dict[str, Any]:
-    transcript = await transcribe_voice(file=file, language=language, prompt=None)
-    parsed = await parse_command_with_llm(transcript["text"], device_id)
-    return {"device_id": device_id, "transcript": transcript["text"], **parsed}
+    transcript = await transcribe_upload(file=file, language=language, prompt=None, uid=device_id)
+    transcript_text = str(transcript.get("text") or "").strip()
+    if not transcript_text:
+        return {
+            "device_id": device_id,
+            "transcript": "",
+            "stt": {
+                "provider": transcript["provider"],
+                "model": transcript["model"],
+            },
+            "voice_prompt": "\u6ca1\u6709\u542c\u6e05\uff0c\u8bf7\u518d\u6309\u4f4f\u8bf4\u4e00\u6b21",
+            "route_count": 0,
+        }
+    route_result = await voice_route(
+        VoiceRouteRequest(
+            device_id=device_id,
+            text=transcript_text,
+            current_lat=current_lat,
+            current_lng=current_lng,
+            city=city,
+            coordsys=coordsys,
+        )
+    )
+    return {
+        "device_id": device_id,
+        "transcript": transcript_text,
+        "stt": {
+            "provider": transcript["provider"],
+            "model": transcript["model"],
+        },
+        **route_result,
+    }
 
 
 if __name__ == "__main__":
