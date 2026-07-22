@@ -431,9 +431,7 @@ class SmartCaneAppController private constructor(
 
     @Suppress("MissingPermission")
     private fun latestPhoneLocation(): Location? {
-        val hasFine = ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        val hasCoarse = ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        if (!hasFine && !hasCoarse) return null
+        if (!hasLocationPermission()) return null
 
         val manager = appContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
         val providers = listOf(
@@ -442,9 +440,12 @@ class SmartCaneAppController private constructor(
             LocationManager.PASSIVE_PROVIDER
         ).filter { provider -> runCatching { manager.isProviderEnabled(provider) }.getOrDefault(false) }
 
-        return (providers
-            .mapNotNull { provider -> runCatching { manager.getLastKnownLocation(provider) }.getOrNull() } + listOfNotNull(latestContinuousLocation))
-            .maxWithOrNull(compareBy<Location> { it.time }.thenBy { -it.accuracy })
+        return selectBestLocation(
+            providers.mapNotNull { provider -> runCatching { manager.getLastKnownLocation(provider) }.getOrNull() } +
+                listOfNotNull(latestContinuousLocation, lastKnownPhoneLocation),
+            LOCATION_MAX_AGE_MS,
+            LOCATION_MAX_ACCURACY_M
+        )
     }
 
     fun startAlertPolling() {
@@ -557,21 +558,50 @@ class SmartCaneAppController private constructor(
     }
 
     private fun currentPhoneLocation(): Location? {
-        lastKnownPhoneLocation?.let { return it }
-        latestContinuousLocation?.let { return it }
         if (!hasLocationPermission()) return null
         val manager = appContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
-        return listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
+        val providerLocations = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
             .mapNotNull { provider ->
                 runCatching {
                     if (manager.isProviderEnabled(provider)) manager.getLastKnownLocation(provider) else null
                 }.getOrNull()
             }
-            .maxByOrNull { it.time }
-            ?.also {
-                lastKnownPhoneLocation = it
-                latestContinuousLocation = it
-            }
+        return selectBestLocation(
+            providerLocations + listOfNotNull(latestContinuousLocation, lastKnownPhoneLocation),
+            LOCATION_MAX_AGE_MS,
+            LOCATION_MAX_ACCURACY_M
+        )?.also {
+            lastKnownPhoneLocation = it
+            latestContinuousLocation = it
+        }
+    }
+
+    private fun currentNavigationLocation(): Location? {
+        ensureLocationUpdates()
+        return currentPhoneLocation()?.takeIf {
+            isUsableLocation(it, NAVIGATION_LOCATION_MAX_AGE_MS, NAVIGATION_LOCATION_MAX_ACCURACY_M)
+        }
+    }
+
+    private fun selectBestLocation(locations: List<Location>, maxAgeMs: Long, maxAccuracyM: Float): Location? =
+        locations
+            .filter { isUsableLocation(it, maxAgeMs, maxAccuracyM) }
+            .maxWithOrNull(compareBy<Location> { locationScore(it) }.thenBy { it.time })
+
+    private fun isUsableLocation(location: Location, maxAgeMs: Long, maxAccuracyM: Float): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && location.isMock) return false
+        @Suppress("DEPRECATION")
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && location.isFromMockProvider) return false
+        val now = System.currentTimeMillis()
+        if (location.time <= 0L || now - location.time > maxAgeMs) return false
+        if (location.hasAccuracy() && location.accuracy > maxAccuracyM) return false
+        return true
+    }
+
+    private fun locationScore(location: Location): Long {
+        val ageScore = (System.currentTimeMillis() - location.time).coerceAtLeast(0L)
+        val accuracyScore = if (location.hasAccuracy()) location.accuracy.toLong() * 1_000L else 80_000L
+        return -(ageScore + accuracyScore)
     }
 
 
@@ -969,8 +999,20 @@ class SmartCaneAppController private constructor(
         scope.launch {
             _uiState.update { it.copy(voiceState = VoiceState.Speaking, message = message, voiceTranscript = "\u6b63\u5728\u4e0a\u4f20\u5230\u540e\u7aef\u8bc6\u522b\u2026") }
             val deviceId = _uiState.value.currentRelation?.caneDevice?.deviceId ?: DemoData.defaultCane.deviceId
-            val location = currentPhoneLocation()
-            when (val result = SmartCaneApiClient.postVoiceCommandAudio(deviceId, file, location?.latitude, location?.longitude)) {
+            val location = currentNavigationLocation()
+            if (location == null) {
+                _uiState.update {
+                    it.copy(
+                        voiceState = VoiceState.Idle,
+                        message = "当前位置不稳定，请到室外或开启精确定位后再试",
+                        voiceTranscript = "当前位置不稳定，暂不能发起导航"
+                    )
+                }
+                speakText("当前位置不稳定，请到室外或开启精确定位后再试。")
+                runCatching { file.delete() }
+                return@launch
+            }
+            when (val result = SmartCaneApiClient.postVoiceCommandAudio(deviceId, file, location.latitude, location.longitude)) {
                 is ApiResult.Success -> {
                     val transcript = result.data.transcript.ifBlank { "\u5df2\u6536\u5230\u8bed\u97f3" }
                     _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "\u4f60\u8bf4\uff1a$transcript", voiceTranscript = transcript) }
@@ -1085,6 +1127,11 @@ class SmartCaneAppController private constructor(
     }
 
     companion object {
+        private const val LOCATION_MAX_AGE_MS = 5 * 60 * 1000L
+        private const val NAVIGATION_LOCATION_MAX_AGE_MS = 90 * 1000L
+        private const val LOCATION_MAX_ACCURACY_M = 80f
+        private const val NAVIGATION_LOCATION_MAX_ACCURACY_M = 50f
+
         @Volatile private var INSTANCE: SmartCaneAppController? = null
         fun get(context: Context): SmartCaneAppController {
             return INSTANCE ?: synchronized(this) {
