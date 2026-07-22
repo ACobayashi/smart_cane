@@ -159,6 +159,8 @@ void networkClientUpdate() {
 bool uploadLocation(const LocationData &location) {
   DynamicJsonDocument doc(512);
   doc["device_id"] = SMARTCANE_DEVICE_ID;
+  doc["device_name"] = SMARTCANE_DEVICE_NAME;
+  doc["firmware_build"] = SMARTCANE_BUILD_TAG;
   doc["lat"] = location.lat;
   doc["lng"] = location.lng;
   doc["source"] = location.mock ? "mock" : "gps";
@@ -184,6 +186,7 @@ bool uploadRiskEvent(const char *riskType,
                      const char *extra) {
   DynamicJsonDocument doc(768);
   doc["device_id"] = SMARTCANE_DEVICE_ID;
+  doc["device_name"] = SMARTCANE_DEVICE_NAME;
   doc["lat"] = location.lat;
   doc["lng"] = location.lng;
   doc["risk_type"] = riskType;
@@ -227,6 +230,8 @@ bool uploadSensorFrame(const RiskState &risk,
                        const char *buttonEvent) {
   DynamicJsonDocument doc(1024);
   doc["device_id"] = SMARTCANE_DEVICE_ID;
+  doc["device_name"] = SMARTCANE_DEVICE_NAME;
+  doc["firmware_build"] = SMARTCANE_BUILD_TAG;
   doc["lat"] = location.lat;
   doc["lng"] = location.lng;
   doc["front_cm"] = distances.frontCm;

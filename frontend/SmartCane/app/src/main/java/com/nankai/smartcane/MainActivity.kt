@@ -84,7 +84,9 @@ import com.nankai.smartcane.data.model.CareRelation
 import com.nankai.smartcane.data.network.AiAdviceDto
 import com.nankai.smartcane.data.network.AiAdviceRequestDto
 import com.nankai.smartcane.data.network.ApiResult
+import com.nankai.smartcane.data.network.CollaborationOverviewDto
 import com.nankai.smartcane.data.network.DeviceDto
+import com.nankai.smartcane.data.network.DeviceStateDto
 import com.nankai.smartcane.data.network.LatestRiskEventDto
 import com.nankai.smartcane.data.network.ServerStatusDto
 import com.nankai.smartcane.data.network.SmartCaneApiClient
@@ -162,6 +164,12 @@ private sealed interface CurrentRiskUiState {
     data class Success(val data: CurrentRiskCardData) : CurrentRiskUiState
     data class Empty(val message: String) : CurrentRiskUiState
     data class Error(val message: String) : CurrentRiskUiState
+}
+
+private sealed interface DeviceRealtimeUiState {
+    data object Loading : DeviceRealtimeUiState
+    data class Success(val state: DeviceStateDto?, val overview: CollaborationOverviewDto?) : DeviceRealtimeUiState
+    data class Error(val message: String) : DeviceRealtimeUiState
 }
 
 private sealed interface SosUiState {
@@ -329,14 +337,14 @@ fun AppHeader(title: String, subtitle: String) {
 }
 
 @Composable
-fun GuidePage() {
+fun GuidePage(deviceName: String? = null) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 20.dp)
     ) {
         item { AppHeader("实时", "设备上报与云端风险建议") }
         item { CurrentRiskCard() }
-        item { DistanceGrid() }
+        item { RealtimeDevicePanel(deviceName = deviceName) }
         item { LatestRiskFromServer() }
     }
 }
@@ -349,7 +357,7 @@ fun LatestRiskFromServer() {
     LaunchedEffect(retryKey) {
         state = LatestEventsUiState.Loading
         state = when (val result = SmartCaneApiClient.getLatestEvents()) {
-            is ApiResult.Success -> LatestEventsUiState.Success(result.data.map { it.toRiskEvent() }.ifEmpty { demoEvents })
+            is ApiResult.Success -> LatestEventsUiState.Success(result.data.map { it.toRiskEvent() })
             is ApiResult.Failure -> LatestEventsUiState.Error(result.message)
         }
     }
@@ -385,6 +393,70 @@ fun StateCard(title: String, message: String, showRetry: Boolean = false, onRetr
 }
 
 @Composable
+fun RealtimeDevicePanel(deviceName: String? = null) {
+    var retryKey by remember { mutableIntStateOf(0) }
+    var state by remember { mutableStateOf<DeviceRealtimeUiState>(DeviceRealtimeUiState.Loading) }
+
+    LaunchedEffect(retryKey) {
+        while (true) {
+            val deviceResult = SmartCaneApiClient.getLatestDeviceState()
+            val overviewResult = SmartCaneApiClient.getCollaborationOverview()
+            state = when {
+                deviceResult is ApiResult.Success -> DeviceRealtimeUiState.Success(
+                    state = deviceResult.data.state,
+                    overview = (overviewResult as? ApiResult.Success)?.data
+                )
+                deviceResult is ApiResult.Failure -> DeviceRealtimeUiState.Error(deviceResult.message)
+                else -> DeviceRealtimeUiState.Error("实时设备数据加载失败")
+            }
+            delay(3_000L)
+        }
+    }
+
+    when (val current = state) {
+        DeviceRealtimeUiState.Loading -> StateCard("实时设备", "正在加载设备上报的实时距离数据…")
+        is DeviceRealtimeUiState.Error -> StateCard("实时设备", current.message, showRetry = true, onRetry = { retryKey++ })
+        is DeviceRealtimeUiState.Success -> RealtimeDeviceDataCard(current.state, deviceName)
+    }
+}
+
+@Composable
+private fun RealtimeDeviceDataCard(state: DeviceStateDto?, deviceName: String? = null) {
+    val displayName = deviceName?.takeIf { it.isNotBlank() }
+        ?: state?.deviceName?.takeIf { it.isNotBlank() }
+        ?: state?.deviceId?.takeIf { it.isNotBlank() }
+
+    if (displayName == null) {
+        StateCard("\u5b9e\u65f6\u8bbe\u5907", "\u6682\u65e0\u8bbe\u5907\u5b9e\u65f6\u8ddd\u79bb\u6570\u636e\u3002\u8bbe\u5907\u4e0a\u62a5\u4f20\u611f\u5668\u5e27\u540e\u4f1a\u5728\u8fd9\u91cc\u663e\u793a\u3002")
+        return
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .semantics(mergeDescendants = true) { contentDescription = "\u5f53\u524d\u8bbe\u5907\uff0c$displayName" },
+        shape = RoundedCornerShape(28.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+    ) {
+        Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("\u5f53\u524d\u8bbe\u5907", color = Color(0xFF64748B), fontSize = 15.sp)
+            Text(displayName, color = Color(0xFF0F172A), fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+        }
+    }
+}
+
+private fun distanceColor(kind: String, value: Int?): Color = when {
+    value == null -> Color(0xFF94A3B8)
+    kind == "front" && value < 60 -> Color(0xFFDC2626)
+    kind == "front" && value < 120 -> Color(0xFFF59E0B)
+    kind == "side" && value < 55 -> Color(0xFFDC2626)
+    kind == "side" && value < 90 -> Color(0xFFF59E0B)
+    else -> Color(0xFF16A34A)
+}
+
+@Composable
 fun CurrentRiskCard() {
     var retryKey by remember { mutableIntStateOf(0) }
     var state by remember { mutableStateOf<CurrentRiskUiState>(CurrentRiskUiState.Loading) }
@@ -396,7 +468,7 @@ fun CurrentRiskCard() {
             is ApiResult.Success -> {
                 val latestEvent = eventResult.data.firstOrNull()
                 if (latestEvent == null) {
-                    CurrentRiskUiState.Empty("后端已连接，正在等待设备上报新的风险事件。")
+                    CurrentRiskUiState.Empty("正在等待设备上报新的风险事件。")
                 } else {
                     when (val adviceResult = SmartCaneApiClient.postAiAdvice(latestEvent.toAiAdviceRequest())) {
                         is ApiResult.Success -> CurrentRiskUiState.Success(
@@ -405,7 +477,7 @@ fun CurrentRiskCard() {
                                 adviceText = adviceResult.data.advice.ifBlank {
                                     latestEvent.voicePrompt.ifBlank { latestEvent.message }
                                 },
-                                sourceText = if (adviceResult.data.fallback) "后端兜底建议" else "云端建议",
+                                sourceText = if (adviceResult.data.fallback) "安全建议" else "智能建议",
                                 tagText = latestEvent.primaryTagText()
                             )
                         )
@@ -435,16 +507,16 @@ fun CurrentRiskCard() {
         else -> Color(0xFF64748B)
     }
     val adviceText = when (val current = state) {
-        CurrentRiskUiState.Loading -> "正在从后端获取最新风险，并请求云端建议…"
+        CurrentRiskUiState.Loading -> "正在获取最新风险与安全建议…"
         is CurrentRiskUiState.Success -> current.data.adviceText
         is CurrentRiskUiState.Empty -> current.message
         is CurrentRiskUiState.Error -> current.message
     }
     val sourceText = when (val current = state) {
-        CurrentRiskUiState.Loading -> "FastAPI 连接中"
+        CurrentRiskUiState.Loading -> "正在加载"
         is CurrentRiskUiState.Success -> current.data.sourceText
         is CurrentRiskUiState.Empty -> "等待设备上报"
-        is CurrentRiskUiState.Error -> "后端连接失败"
+        is CurrentRiskUiState.Error -> "连接异常"
     }
     val tagText = (state as? CurrentRiskUiState.Success)?.data?.tagText
 
@@ -586,9 +658,12 @@ fun MapPage() {
 
     LaunchedEffect(retryKey) {
         state = MapRiskUiState.Loading
-        state = when (val result = SmartCaneApiClient.getMapRiskPoints()) {
-            is ApiResult.Success -> MapRiskUiState.Success(result.data)
-            is ApiResult.Failure -> MapRiskUiState.Error(result.message)
+        while (true) {
+            state = when (val result = SmartCaneApiClient.getMapRiskPoints()) {
+                is ApiResult.Success -> MapRiskUiState.Success(result.data)
+                is ApiResult.Failure -> MapRiskUiState.Error(result.message)
+            }
+            delay(5_000L)
         }
     }
 

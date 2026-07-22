@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import math
 import os
 import re
 import secrets
 import sqlite3
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,7 +16,8 @@ from typing import Any, Optional
 
 import httpx
 from deep_model import score_deep_risk
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -32,6 +36,10 @@ GROUND_BASE_CM = 45
 GROUND_DROP_THRESHOLD_CM = 30
 DEFAULT_NEARBY_RADIUS_M = 80.0
 ROUTE_RISK_BUFFER_M = 35.0
+RISK_POINT_CLUSTER_RADIUS_M = 12.0
+RISK_POINT_TRANSIENT_TTL_SECONDS = 2 * 60 * 60
+RISK_POINT_FIXED_TTL_SECONDS = 7 * 24 * 60 * 60
+RISK_POINT_EMERGENCY_TTL_SECONDS = 30 * 60
 
 HARDWARE_PROFILE: dict[str, Any] = {
     "controller": "ESP32-C5 Dev Module / SensairShuttle compatible",
@@ -99,6 +107,7 @@ except ImportError:
 
 class EventCreate(BaseModel):
     device_id: str = Field(..., min_length=1)
+    device_name: Optional[str] = None
     lat: float
     lng: float
     risk_type: str = Field(..., min_length=1)
@@ -212,6 +221,8 @@ class TextCommandRequest(BaseModel):
 
 class SensorFrameCreate(BaseModel):
     device_id: str = Field(..., min_length=1)
+    device_name: Optional[str] = None
+    firmware_build: Optional[str] = None
     lat: Optional[float] = Field(None, ge=-90, le=90)
     lng: Optional[float] = Field(None, ge=-180, le=180)
     front_cm: Optional[int] = Field(None, ge=0, le=450)
@@ -235,6 +246,7 @@ class SensorFrameCreate(BaseModel):
     touch_electrode: Optional[int] = Field(None, ge=0, le=11)
     touch_event: Optional[str] = Field(None, pattern="^(tap|double_click|long_press)$")
     manual_risk_type: Optional[str] = None
+    extra: Optional[Any] = None
     timestamp: Optional[str] = None
 
 
@@ -286,6 +298,18 @@ class PairingCodeCreate(BaseModel):
     deviceId: str = Field(..., min_length=1)
 
 
+class AuthLoginRequest(BaseModel):
+    account: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+
+
+class AuthRegisterRequest(BaseModel):
+    account: str = Field(..., min_length=3, max_length=40)
+    password: str = Field(..., min_length=6, max_length=100)
+    displayName: str = Field(..., min_length=1, max_length=40)
+    role: str = Field("blind", pattern="^(blind|companion)$")
+
+
 class CareRelationRequestCreate(BaseModel):
     code: str = Field(..., min_length=6, max_length=6)
     companionUserId: str = Field(..., min_length=1)
@@ -314,6 +338,13 @@ async def add_no_cache_headers(request, call_next):
 
 def env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
+
+
+def secret_env(name: str, default: str = "") -> str:
+    value = env(name, default)
+    if value.lower() in {"replace_me", "changeme", "your_api_key", "your-api-key", "none", "null"}:
+        return ""
+    return value
 
 
 def now_iso() -> str:
@@ -379,6 +410,64 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS risk_points (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL DEFAULT 'active',
+                lat REAL NOT NULL,
+                lng REAL NOT NULL,
+                risk_type TEXT NOT NULL,
+                risk_level TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                report_count INTEGER NOT NULL DEFAULT 1,
+                source_devices_json TEXT NOT NULL DEFAULT '[]',
+                first_reported_at TEXT NOT NULL,
+                last_reported_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                latest_event_id INTEGER,
+                voice_prompt TEXT,
+                message TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS device_state (
+                device_id TEXT PRIMARY KEY,
+                device_name TEXT,
+                updated_at TEXT NOT NULL,
+                online INTEGER NOT NULL DEFAULT 1,
+                lat REAL,
+                lng REAL,
+                battery REAL,
+                front_cm INTEGER,
+                left_cm INTEGER,
+                right_cm INTEGER,
+                down_cm INTEGER,
+                heading_deg REAL,
+                risk_type TEXT,
+                risk_level TEXT,
+                risk_score REAL,
+                voice_prompt TEXT,
+                source TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                account TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                role TEXT NOT NULL,
+                password_salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS pairing_codes (
                 code TEXT PRIMARY KEY,
                 blind_user_id TEXT NOT NULL,
@@ -427,6 +516,10 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_events_lat_lng ON risk_events(lat, lng)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_events_level ON risk_events(risk_level)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_device_locations_device ON device_locations(device_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_points_status ON risk_points(status, expires_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_points_lat_lng ON risk_points(lat, lng)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_device_state_updated ON device_state(updated_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_account ON users(account)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_care_requests_blind ON care_requests(blind_user_id, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_care_requests_companion ON care_requests(companion_user_id, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_care_relations_blind ON care_relations(blind_user_id, status)")
@@ -442,6 +535,24 @@ def init_db() -> None:
         ensure_column(conn, "device_locations", "quality", "TEXT")
         ensure_column(conn, "device_locations", "hdop", "REAL")
         ensure_column(conn, "device_locations", "fix_quality", "INTEGER")
+        ensure_column(conn, "risk_points", "confidence", "REAL")
+        ensure_column(conn, "risk_points", "report_count", "INTEGER")
+        ensure_column(conn, "risk_points", "source_devices_json", "TEXT")
+        ensure_column(conn, "risk_points", "expires_at", "TEXT")
+        ensure_column(conn, "risk_points", "latest_event_id", "INTEGER")
+        ensure_column(conn, "risk_points", "voice_prompt", "TEXT")
+        ensure_column(conn, "risk_points", "message", "TEXT")
+        ensure_column(conn, "device_state", "device_name", "TEXT")
+        ensure_column(conn, "device_state", "heading_deg", "REAL")
+        ensure_column(conn, "device_state", "risk_score", "REAL")
+        ensure_column(conn, "device_state", "voice_prompt", "TEXT")
+        ensure_column(conn, "device_state", "source", "TEXT")
+        ensure_column(conn, "users", "account", "TEXT")
+        ensure_column(conn, "users", "display_name", "TEXT")
+        ensure_column(conn, "users", "role", "TEXT")
+        ensure_column(conn, "users", "password_salt", "TEXT")
+        ensure_column(conn, "users", "password_hash", "TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_account ON users(account)")
 
 
 def ensure_column(conn: sqlite3.Connection, table: str, column: str, column_type: str) -> None:
@@ -466,6 +577,154 @@ def normalize_extra(value: Any) -> Optional[str]:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False)
+
+
+def normalize_account(account: str) -> str:
+    return account.strip().lower()
+
+
+def hash_password(password: str, salt: str) -> str:
+    return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+
+
+def public_user(row: sqlite3.Row) -> dict[str, Any]:
+    item = row_to_dict(row)
+    return {
+        "userId": item["user_id"],
+        "account": item["account"],
+        "displayName": item["display_name"],
+        "role": item["role"],
+    }
+
+
+def device_state_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    item = row_to_dict(row)
+    last_seen = parse_time(item.get("updated_at"))
+    online = bool(last_seen and (datetime.now(timezone.utc) - last_seen).total_seconds() <= DEVICE_OFFLINE_SECONDS)
+    return {
+        "deviceId": item["device_id"],
+        "deviceName": item.get("device_name") or item["device_id"],
+        "device_name": item.get("device_name") or item["device_id"],
+        "updatedAt": item.get("updated_at"),
+        "online": online,
+        "latitude": item.get("lat"),
+        "longitude": item.get("lng"),
+        "battery": item.get("battery"),
+        "frontCm": item.get("front_cm"),
+        "leftCm": item.get("left_cm"),
+        "rightCm": item.get("right_cm"),
+        "downCm": item.get("down_cm"),
+        "headingDeg": item.get("heading_deg"),
+        "riskType": item.get("risk_type") or "none",
+        "riskLevel": item.get("risk_level") or "low",
+        "riskScore": item.get("risk_score") or 0,
+        "voicePrompt": item.get("voice_prompt") or "当前未发现明显风险",
+        "source": item.get("source") or "unknown",
+    }
+
+
+def upsert_device_state(frame: SensorFrameCreate, lat: float, lng: float, analysis: dict[str, Any]) -> dict[str, Any]:
+    timestamp = frame.timestamp or now_iso()
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO device_state (
+                device_id, device_name, updated_at, online, lat, lng, battery,
+                front_cm, left_cm, right_cm, down_cm, heading_deg,
+                risk_type, risk_level, risk_score, voice_prompt, source
+            ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET
+                device_name = COALESCE(NULLIF(excluded.device_name, ''), device_state.device_name),
+                updated_at = excluded.updated_at,
+                online = 1,
+                lat = excluded.lat,
+                lng = excluded.lng,
+                battery = excluded.battery,
+                front_cm = excluded.front_cm,
+                left_cm = excluded.left_cm,
+                right_cm = excluded.right_cm,
+                down_cm = excluded.down_cm,
+                heading_deg = excluded.heading_deg,
+                risk_type = excluded.risk_type,
+                risk_level = excluded.risk_level,
+                risk_score = excluded.risk_score,
+                voice_prompt = excluded.voice_prompt,
+                source = excluded.source
+            """,
+            (
+                frame.device_id,
+                frame.device_name,
+                timestamp,
+                lat,
+                lng,
+                frame.battery,
+                frame.front_cm,
+                frame.left_cm,
+                frame.right_cm,
+                frame.down_cm,
+                frame.heading_deg,
+                analysis.get("risk_type") or "none",
+                analysis.get("risk_level") or "low",
+                analysis.get("risk_score") or 0,
+                analysis.get("voice_prompt"),
+                frame.source,
+            ),
+        )
+        row = conn.execute("SELECT * FROM device_state WHERE device_id = ?", (frame.device_id,)).fetchone()
+    return device_state_to_dict(row)
+
+
+def upsert_device_state_from_event(event: dict[str, Any]) -> Optional[dict[str, Any]]:
+    device_id = str(event.get("device_id") or "").strip()
+    if not device_id:
+        return None
+    timestamp = str(event.get("timestamp") or now_iso())
+    source = str(event.get("source") or event.get("sensor") or "risk_event")
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO device_state (
+                device_id, device_name, updated_at, online, lat, lng, battery,
+                front_cm, left_cm, right_cm, down_cm, heading_deg,
+                risk_type, risk_level, risk_score, voice_prompt, source
+            ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET
+                device_name = COALESCE(NULLIF(excluded.device_name, ''), device_state.device_name),
+                updated_at = excluded.updated_at,
+                online = 1,
+                lat = excluded.lat,
+                lng = excluded.lng,
+                battery = COALESCE(excluded.battery, device_state.battery),
+                front_cm = COALESCE(excluded.front_cm, device_state.front_cm),
+                left_cm = COALESCE(excluded.left_cm, device_state.left_cm),
+                right_cm = COALESCE(excluded.right_cm, device_state.right_cm),
+                down_cm = COALESCE(excluded.down_cm, device_state.down_cm),
+                risk_type = excluded.risk_type,
+                risk_level = excluded.risk_level,
+                risk_score = COALESCE(excluded.risk_score, device_state.risk_score),
+                voice_prompt = COALESCE(excluded.voice_prompt, device_state.voice_prompt),
+                source = excluded.source
+            """,
+            (
+                device_id,
+                event.get("device_name") or event.get("deviceName"),
+                timestamp,
+                event.get("lat"),
+                event.get("lng"),
+                event.get("battery"),
+                event.get("front_cm") if event.get("front_cm") is not None else event.get("frontCm"),
+                event.get("left_cm") if event.get("left_cm") is not None else event.get("leftCm"),
+                event.get("right_cm") if event.get("right_cm") is not None else event.get("rightCm"),
+                event.get("down_cm") if event.get("down_cm") is not None else event.get("downCm"),
+                event.get("risk_type") or event.get("riskType") or "none",
+                event.get("risk_level") or event.get("riskLevel") or event.get("level") or "low",
+                event.get("risk_score") if event.get("risk_score") is not None else event.get("riskScore"),
+                event.get("voice_prompt") or event.get("voicePrompt") or legacy_event_message(event),
+                source,
+            ),
+        )
+        row = conn.execute("SELECT * FROM device_state WHERE device_id = ?", (device_id,)).fetchone()
+    return device_state_to_dict(row) if row else None
 
 
 def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -517,6 +776,43 @@ def parse_time(value: str | None) -> Optional[datetime]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def bearing_between_deg(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    d_lam = math.radians(lng2 - lng1)
+    y = math.sin(d_lam) * math.cos(phi2)
+    x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(d_lam)
+    return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+
+def angle_delta_deg(a: float, b: float) -> float:
+    return (a - b + 180.0) % 360.0 - 180.0
+
+
+def relative_direction(delta_deg: Optional[float]) -> str:
+    if delta_deg is None:
+        return "front"
+    abs_delta = abs(delta_deg)
+    if abs_delta <= 30:
+        return "front"
+    if abs_delta <= 75:
+        return "right_front" if delta_deg > 0 else "left_front"
+    if abs_delta <= 120:
+        return "right" if delta_deg > 0 else "left"
+    return "behind"
+
+
+def relative_direction_label(direction: str) -> str:
+    return {
+        "front": "\u524d\u65b9",
+        "left_front": "左前方",
+        "right_front": "右前方",
+        "left": "\u5de6\u4fa7",
+        "right": "\u53f3\u4fa7",
+        "behind": "\u540e\u65b9",
+    }.get(direction, "\u524d\u65b9")
 
 
 def event_distance_mm(item: dict[str, Any]) -> Optional[int]:
@@ -804,6 +1100,207 @@ def alert_event_payload(row: sqlite3.Row, role: str) -> dict[str, Any]:
     }
 
 
+MAPPABLE_RISK_TYPES = {
+    "front_obstacle",
+    "left_obstacle",
+    "right_obstacle",
+    "ground_drop",
+    "down_obstacle",
+    "user_mark",
+    "history_risk",
+    "prolonged_obstacle",
+    "approaching_obstacle",
+    "sos",
+    "fall_detected",
+}
+
+
+def risk_point_ttl_seconds(risk_type: str, level: str) -> int:
+    if risk_type in {"ground_drop", "user_mark", "history_risk"}:
+        return RISK_POINT_FIXED_TTL_SECONDS
+    if risk_type in {"sos", "fall_detected"}:
+        return RISK_POINT_EMERGENCY_TTL_SECONDS
+    if level == "high":
+        return max(RISK_POINT_TRANSIENT_TTL_SECONDS, 4 * 60 * 60)
+    return RISK_POINT_TRANSIENT_TTL_SECONDS
+
+
+def parse_devices_json(raw: Any) -> list[str]:
+    if not raw:
+        return []
+    try:
+        value = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return []
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def risk_point_confidence(level: str, report_count: int, source_count: int) -> float:
+    level_bonus = {"high": 0.18, "medium": 0.08, "low": 0.0}.get(level, 0.0)
+    report_bonus = min(report_count, 8) * 0.055
+    source_bonus = min(source_count, 5) * 0.045
+    return round(min(0.97, 0.32 + level_bonus + report_bonus + source_bonus), 2)
+
+
+def expire_risk_points() -> None:
+    with db() as conn:
+        conn.execute(
+            "UPDATE risk_points SET status = 'expired' WHERE status = 'active' AND expires_at < ?",
+            (now_iso(),),
+        )
+
+
+def risk_point_message_from_event(event: dict[str, Any]) -> str:
+    return str(event.get("voice_prompt") or legacy_event_message(event) or "风险点")
+
+
+def upsert_risk_point_for_event(event: dict[str, Any]) -> None:
+    risk_type = str(event.get("risk_type") or "none")
+    level = str(event.get("risk_level") or "low")
+    if risk_type not in MAPPABLE_RISK_TYPES or level not in LEVEL_RANK:
+        return
+    lat = event.get("lat")
+    lng = event.get("lng")
+    if lat is None or lng is None:
+        return
+    lat = float(lat)
+    lng = float(lng)
+    if abs(lat) < 1e-9 and abs(lng) < 1e-9:
+        return
+
+    now = event.get("timestamp") or now_iso()
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=risk_point_ttl_seconds(risk_type, level))).isoformat(timespec="seconds")
+    message = risk_point_message_from_event(event)
+    device_id = str(event.get("device_id") or "unknown")
+
+    expire_risk_points()
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM risk_points WHERE status = 'active' AND risk_type = ?",
+            (risk_type,),
+        ).fetchall()
+        best_row = None
+        best_distance = None
+        for row in rows:
+            distance = haversine_m(lat, lng, float(row["lat"]), float(row["lng"]))
+            if distance <= RISK_POINT_CLUSTER_RADIUS_M and (best_distance is None or distance < best_distance):
+                best_row = row
+                best_distance = distance
+
+        if best_row:
+            point = row_to_dict(best_row)
+            report_count = int(point.get("report_count") or 1) + 1
+            devices = sorted(set(parse_devices_json(point.get("source_devices_json"))) | {device_id})
+            merged_lat = (float(point["lat"]) * (report_count - 1) + lat) / report_count
+            merged_lng = (float(point["lng"]) * (report_count - 1) + lng) / report_count
+            merged_level = level if LEVEL_RANK[level] >= LEVEL_RANK.get(str(point.get("risk_level") or "low"), 0) else str(point.get("risk_level") or level)
+            confidence = risk_point_confidence(merged_level, report_count, len(devices))
+            conn.execute(
+                """
+                UPDATE risk_points
+                SET lat = ?, lng = ?, risk_level = ?, confidence = ?, report_count = ?,
+                    source_devices_json = ?, last_reported_at = ?, expires_at = ?,
+                    latest_event_id = ?, voice_prompt = ?, message = ?
+                WHERE id = ?
+                """,
+                (
+                    merged_lat,
+                    merged_lng,
+                    merged_level,
+                    confidence,
+                    report_count,
+                    json.dumps(devices, ensure_ascii=False),
+                    now,
+                    expires_at,
+                    event.get("id"),
+                    event.get("voice_prompt"),
+                    message,
+                    point["id"],
+                ),
+            )
+        else:
+            devices = [device_id]
+            confidence = risk_point_confidence(level, 1, 1)
+            conn.execute(
+                """
+                INSERT INTO risk_points (
+                    status, lat, lng, risk_type, risk_level, confidence, report_count,
+                    source_devices_json, first_reported_at, last_reported_at, expires_at,
+                    latest_event_id, voice_prompt, message
+                ) VALUES ('active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lat,
+                    lng,
+                    risk_type,
+                    level,
+                    confidence,
+                    1,
+                    json.dumps(devices, ensure_ascii=False),
+                    now,
+                    now,
+                    expires_at,
+                    event.get("id"),
+                    event.get("voice_prompt"),
+                    message,
+                ),
+            )
+
+
+def risk_point_to_event_dict(row: sqlite3.Row, origin_lat: Optional[float] = None, origin_lng: Optional[float] = None) -> dict[str, Any]:
+    point = row_to_dict(row)
+    devices = parse_devices_json(point.get("source_devices_json"))
+    distance_m = None
+    if origin_lat is not None and origin_lng is not None:
+        distance_m = round(haversine_m(origin_lat, origin_lng, float(point["lat"]), float(point["lng"])), 1)
+    message = point.get("message") or point.get("voice_prompt") or "风险点"
+    return {
+        "id": int(point["id"]),
+        "device_id": ",".join(devices) if devices else "multi_device",
+        "deviceId": ",".join(devices) if devices else "multi_device",
+        "risk_type": point["risk_type"],
+        "riskType": point["risk_type"],
+        "risk_level": point["risk_level"],
+        "riskLevel": point["risk_level"],
+        "level": point["risk_level"],
+        "lat": point["lat"],
+        "lng": point["lng"],
+        "latitude": point["lat"],
+        "longitude": point["lng"],
+        "timestamp": point["last_reported_at"],
+        "message": message,
+        "voice_prompt": point.get("voice_prompt") or message,
+        "voicePrompt": point.get("voice_prompt") or message,
+        "confidence": point.get("confidence"),
+        "reportCount": point.get("report_count"),
+        "report_count": point.get("report_count"),
+        "sourceDevices": devices,
+        "source_devices": devices,
+        "expiresAt": point.get("expires_at"),
+        "expires_at": point.get("expires_at"),
+        "status": point.get("status"),
+        "distance_m": distance_m,
+        "distanceM": distance_m,
+    }
+
+
+def active_risk_points(lat: Optional[float] = None, lng: Optional[float] = None, radius: Optional[float] = None, limit: int = 200) -> list[dict[str, Any]]:
+    expire_risk_points()
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM risk_points WHERE status = 'active' ORDER BY last_reported_at DESC LIMIT ?", (max(limit * 5, limit),)).fetchall()
+    points: list[dict[str, Any]] = []
+    for row in rows:
+        distance_m = None
+        if lat is not None and lng is not None:
+            distance_m = haversine_m(lat, lng, float(row["lat"]), float(row["lng"]))
+            if radius is not None and distance_m > radius:
+                continue
+        point = risk_point_to_event_dict(row, lat, lng)
+        points.append(point)
+    points.sort(key=lambda item: (LEVEL_RANK.get(str(item.get("riskLevel") or "low"), 0), item.get("confidence") or 0, -(item.get("distanceM") or 0)), reverse=True)
+    return points[:limit]
+
+
 def latest_location_for_device(device_id: str) -> Optional[dict[str, Any]]:
     with db() as conn:
         row = conn.execute(
@@ -918,14 +1415,21 @@ def store_legacy_location(device_id: str, lat: Optional[float], lng: Optional[fl
 
 def user_display_name(user_id: str, role: str) -> str:
     known = {
-        "blind_demo": "\u5f20\u660e",
-        "user_blind_001": "\u5f20\u660e",
-        "companion_demo": "\u674e\u534e",
-        "user_companion_001": "\u674e\u534e",
+        "blind_demo": "\u7528\u6237",
+        "user_blind_001": "\u7528\u6237",
+        "companion_demo": "\u966a\u62a4",
+        "user_companion_001": "\u966a\u62a4",
     }
     if user_id in known:
         return known[user_id]
-    return ("\u76f2\u4eba\u7528\u6237" if role == "blind" else "\u966a\u62a4\u7528\u6237") + f" {user_id}"
+    with db() as conn:
+        row = conn.execute(
+            "SELECT display_name FROM users WHERE account = ? OR user_id = ?",
+            (normalize_account(user_id), user_id),
+        ).fetchone()
+    if row:
+        return str(row["display_name"])
+    return ("\u7528\u6237" if role == "blind" else "\u966a\u62a4") + f" {user_id}"
 
 
 def device_display_name(device_id: str) -> str:
@@ -1743,13 +2247,13 @@ def chat_config() -> dict[str, str]:
     if provider == "openai":
         return {
             "provider": "openai",
-            "api_key": env("OPENAI_API_KEY"),
+            "api_key": secret_env("OPENAI_API_KEY"),
             "base_url": env("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
             "model": env("OPENAI_MODEL", "gpt-4.1-mini"),
         }
     return {
         "provider": "ark",
-        "api_key": env("ARK_API_KEY"),
+        "api_key": secret_env("ARK_API_KEY"),
         "base_url": env("ARK_OPENAI_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/"),
         "model": env("ARK_MODEL", "doubao-seed-2-1-pro-260628"),
     }
@@ -1760,13 +2264,13 @@ def stt_config() -> dict[str, str]:
     if provider == "ark":
         return {
             "provider": "ark",
-            "api_key": env("ARK_API_KEY"),
+            "api_key": secret_env("ARK_API_KEY"),
             "base_url": env("ARK_OPENAI_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/"),
             "model": env("ARK_STT_MODEL", env("STT_MODEL", "")),
         }
     return {
         "provider": "openai",
-        "api_key": env("OPENAI_API_KEY"),
+        "api_key": secret_env("OPENAI_API_KEY"),
         "base_url": env("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
         "model": env("OPENAI_STT_MODEL", env("STT_MODEL", "whisper-1")),
     }
@@ -1939,6 +2443,38 @@ def health() -> dict[str, Any]:
     return {"ok": True, "time": now_iso(), "database": str(DB_PATH)}
 
 
+@app.post("/api/auth/register", status_code=201)
+def register_user(request: AuthRegisterRequest) -> dict[str, Any]:
+    account = normalize_account(request.account)
+    created_at = now_iso()
+    salt = secrets.token_hex(16)
+    password_hash = hash_password(request.password, salt)
+    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    try:
+        with db() as conn:
+            conn.execute(
+                """
+                INSERT INTO users (user_id, account, display_name, role, password_salt, password_hash, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, account, request.displayName.strip(), request.role, salt, password_hash, created_at, created_at),
+            )
+            row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="账号已存在")
+    return {"success": True, "message": "注册成功", "user": public_user(row)}
+
+
+@app.post("/api/auth/login")
+def login_user(request: AuthLoginRequest) -> dict[str, Any]:
+    account = normalize_account(request.account)
+    with db() as conn:
+        row = conn.execute("SELECT * FROM users WHERE account = ?", (account,)).fetchone()
+    if not row or hash_password(request.password, row["password_salt"]) != row["password_hash"]:
+        raise HTTPException(status_code=401, detail="账号或密码错误")
+    return {"success": True, "message": "登录成功", "user": public_user(row)}
+
+
 @app.get("/api/hardware/profile")
 def hardware_profile() -> dict[str, Any]:
     return {
@@ -2014,7 +2550,13 @@ def store_event(event: EventCreate) -> dict[str, Any]:
         )
         row = conn.execute("SELECT * FROM risk_events WHERE id = ?", (cur.lastrowid,)).fetchone()
 
-    return event_to_dict(row)
+    stored = event_to_dict(row)
+    if event.device_name:
+        stored["device_name"] = event.device_name
+        stored["deviceName"] = event.device_name
+    upsert_device_state_from_event(stored)
+    upsert_risk_point_for_event(stored)
+    return stored
 
 
 @app.post("/api/risk-events", status_code=201)
@@ -2061,6 +2603,32 @@ def latest_event(
 @app.get("/api/risk-events")
 def list_risk_events(limit: int = Query(200, ge=1, le=1000)) -> list[dict[str, Any]]:
     return list_events(limit)
+
+
+@app.get("/api/events/stream")
+async def stream_events(
+    request: Request,
+    sinceId: int = Query(0, ge=0),
+    role: str = Query("blind", pattern="^(blind|companion)$"),
+) -> StreamingResponse:
+    async def event_generator():
+        last_id = sinceId
+        while not await request.is_disconnected():
+            with db() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM risk_events WHERE id > ? ORDER BY id ASC LIMIT 50",
+                    (last_id,),
+                ).fetchall()
+            if rows:
+                for row in rows:
+                    last_id = max(last_id, int(row["id"]))
+                    payload = alert_event_payload(row, role)
+                    yield f"event: risk\nid: {last_id}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            else:
+                yield f"event: ping\ndata: {json.dumps({'time': now_iso()}, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(2.0)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.post("/api/locations", status_code=201)
@@ -2123,6 +2691,7 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
 
     history = nearby_summary(lat, lng, DEFAULT_NEARBY_RADIUS_M)
     analysis = analyze_sensor_frame(frame, history)
+    device_state = upsert_device_state(frame, lat, lng, analysis)
     stored_event: Optional[dict[str, Any]] = None
     if should_store_sensor_analysis(analysis):
         stored_event = store_event(
@@ -2146,6 +2715,8 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
                 feedback_json=analysis["feedback"],
                 extra_json={
                     "source": frame.source,
+                    "device_name": frame.device_name,
+                    "firmware_build": frame.firmware_build,
                     "button_event": frame.button_event,
                     "touch_electrode": frame.touch_electrode,
                     "touch_event": frame.touch_event,
@@ -2159,6 +2730,7 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
                     "accel_total_g": frame.accel_total_g,
                     "hardware_profile": "esp32c5_tca_ch2_3_4_5_mpr121_ch7_pca9685_ch8_9_10_bmi270",
                     "nearby_history": analysis["nearby_history"],
+                    "extra": frame.extra,
                 },
                 timestamp=frame.timestamp or now_iso(),
             )
@@ -2179,6 +2751,7 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
             "risk_type": analysis["risk_type"],
             "risk_level": analysis["risk_level"],
             "stored_event_id": stored_event["id"] if stored_event else None,
+            "device_state": device_state,
         }
 
     return {
@@ -2187,6 +2760,7 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
         "lat": lat,
         "lng": lng,
         "risk": analysis,
+        "device_state": device_state,
         "stored_event": stored_event,
         "hardware": {
             "tof_mapping": HARDWARE_PROFILE["tof_sensors"],
@@ -2194,6 +2768,81 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
             "buzzer": HARDWARE_PROFILE["actuators"]["buzzer"],
             "motors": HARDWARE_PROFILE["actuators"]["vibration_motors"],
         },
+    }
+
+
+@app.get("/api/device-state/latest")
+def latest_device_state(device_id: Optional[str] = Query(None, min_length=1)) -> dict[str, Any]:
+    query = "SELECT * FROM device_state"
+    params: tuple[Any, ...] = ()
+    if device_id:
+        query += " WHERE device_id = ?"
+        params = (device_id,)
+    query += " ORDER BY updated_at DESC LIMIT 1"
+    with db() as conn:
+        row = conn.execute(query, params).fetchone()
+    if row:
+        return {"success": True, "found": True, "state": device_state_to_dict(row)}
+
+    # Fallback: make the page feel truthful even before /api/sensor-frames is used.
+    query = "SELECT * FROM risk_events"
+    params = ()
+    if device_id:
+        query += " WHERE device_id = ?"
+        params = (device_id,)
+    query += " ORDER BY id DESC LIMIT 1"
+    with db() as conn:
+        event = conn.execute(query, params).fetchone()
+    if not event:
+        return {"success": True, "found": False, "state": None}
+    item = mobile_event_dict(event)
+    return {
+        "success": True,
+        "found": True,
+        "derived": True,
+        "state": {
+            "deviceId": item.get("deviceId"),
+            "deviceName": item.get("deviceName") or item.get("device_id") or item.get("deviceId"),
+            "device_name": item.get("deviceName") or item.get("device_id") or item.get("deviceId"),
+            "updatedAt": item.get("timestamp"),
+            "online": True,
+            "latitude": item.get("latitude"),
+            "longitude": item.get("longitude"),
+            "battery": None,
+            "frontCm": item.get("frontCm"),
+            "leftCm": item.get("leftCm"),
+            "rightCm": item.get("rightCm"),
+            "downCm": item.get("downCm"),
+            "riskType": item.get("riskType"),
+            "riskLevel": item.get("riskLevel"),
+            "riskScore": item.get("riskScore") or 0,
+            "voicePrompt": item.get("voicePrompt") or item.get("message"),
+            "source": "latest_event",
+        },
+    }
+
+
+@app.get("/api/device-state")
+def list_device_states(limit: int = Query(20, ge=1, le=100)) -> dict[str, Any]:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM device_state ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+    states = [device_state_to_dict(row) for row in rows]
+    return {"success": True, "devices": states, "onlineCount": sum(1 for item in states if item["online"])}
+
+
+@app.get("/api/collaboration/overview")
+def collaboration_overview(limit: int = Query(20, ge=1, le=100)) -> dict[str, Any]:
+    points = active_risk_points(limit=limit)
+    states = list_device_states(limit=limit)["devices"]
+    return {
+        "success": True,
+        "deviceCount": len(states),
+        "onlineCount": sum(1 for item in states if item["online"]),
+        "riskPointCount": len(points),
+        "highRiskCount": sum(1 for item in points if item.get("riskLevel") == "high"),
+        "mediumRiskCount": sum(1 for item in points if item.get("riskLevel") == "medium"),
+        "points": points,
+        "devices": states,
     }
 
 
@@ -2280,6 +2929,19 @@ def map_risk_points(
     radius: float = Query(500.0, gt=0, le=10000),
     limit: int = Query(200, ge=1, le=1000),
 ) -> dict[str, Any]:
+    points = active_risk_points(lat, lng, radius if lat is not None and lng is not None else None, limit)
+    if points:
+        return {
+            "risk_count": len(points),
+            "high_count": sum(1 for item in points if item["riskLevel"] == "high"),
+            "medium_count": sum(1 for item in points if item["riskLevel"] == "medium"),
+            "max_level": max((item["riskLevel"] for item in points), key=lambda level: LEVEL_RANK[level], default="low"),
+            "clustered": True,
+            "cluster_radius_m": RISK_POINT_CLUSTER_RADIUS_M,
+            "points": points,
+        }
+
+    # Compatibility fallback for existing databases that only have raw events.
     if lat is not None and lng is not None:
         summary = nearby_summary(lat, lng, radius)
         return {
@@ -2287,6 +2949,7 @@ def map_risk_points(
             "high_count": summary["high_count"],
             "medium_count": summary["medium_count"],
             "max_level": summary["max_level"],
+            "clustered": False,
             "points": summary["recent_events"][:limit],
         }
     events = list_events(limit)
@@ -2295,6 +2958,7 @@ def map_risk_points(
         "high_count": sum(1 for item in events if item["risk_level"] == "high"),
         "medium_count": sum(1 for item in events if item["risk_level"] == "medium"),
         "max_level": max((item["risk_level"] for item in events), key=lambda level: LEVEL_RANK[level], default="low"),
+        "clustered": False,
         "points": events,
     }
 
@@ -2664,6 +3328,97 @@ def nearby_risks(
     return nearby_summary(lat, lng, radius)
 
 
+def nearby_warning_text(distance_m: float, risk_level: str, direction: str, event: dict[str, Any]) -> str:
+    level_text = {"high": "\u9ad8", "medium": "\u4e2d", "low": "\u4f4e"}.get(risk_level, "\u9ad8")
+    direction_text = relative_direction_label(direction)
+    base = f"{direction_text}约 {max(1, int(round(distance_m)))} 米有{level_text}风险，请注意避让"
+    detail = str(event.get("voicePrompt") or event.get("message") or "").strip()
+    if detail and detail not in base:
+        return f"{base}{detail}"
+    return base
+
+
+@app.get("/api/risks/nearby-warning")
+def nearby_risk_warning(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+    radius: float = Query(50.0, gt=0, le=5000),
+    min_level: str = Query("medium", pattern="^(low|medium|high)$"),
+    bearing_deg: Optional[float] = Query(None, ge=0, lt=360),
+    fov_deg: float = Query(140.0, gt=10, le=360),
+) -> dict[str, Any]:
+    """Return the highest-priority nearby risk point for blind-mode voice warning.
+
+    Risk points are clustered from all canes. When bearing_deg is supplied, only
+    points inside the user's forward field of view are considered.
+    """
+    min_rank = LEVEL_RANK[min_level]
+    candidates: list[tuple[int, float, float, int, dict[str, Any], str, Optional[float]]] = []
+    for event in active_risk_points(lat, lng, radius, limit=500):
+        level = str(event.get("riskLevel") or "low")
+        rank = LEVEL_RANK.get(level, 0)
+        if rank < min_rank:
+            continue
+        event_lat = float(event["latitude"])
+        event_lng = float(event["longitude"])
+        distance_m = haversine_m(lat, lng, event_lat, event_lng)
+        delta = None
+        direction = "front"
+        if bearing_deg is not None:
+            target_bearing = bearing_between_deg(lat, lng, event_lat, event_lng)
+            delta = angle_delta_deg(target_bearing, bearing_deg)
+            if abs(delta) > fov_deg / 2.0:
+                continue
+            direction = relative_direction(delta)
+        confidence = float(event.get("confidence") or 0.0)
+        event_id = int(event.get("id") or 0)
+        candidates.append((rank, confidence, -distance_m, event_id, event, direction, delta))
+
+    if not candidates:
+        return {
+            "success": True,
+            "found": False,
+            "radius_m": radius,
+            "min_level": min_level,
+            "bearing_deg": bearing_deg,
+            "fov_deg": fov_deg,
+            "warning": None,
+        }
+
+    candidates.sort(reverse=True)
+    rank, confidence, neg_distance_m, event_id, event, direction, delta = candidates[0]
+    distance_m = -neg_distance_m
+    level = str(event.get("riskLevel") or "low")
+    prompt = nearby_warning_text(distance_m, level, direction, event)
+    return {
+        "success": True,
+        "found": True,
+        "radius_m": radius,
+        "min_level": min_level,
+        "bearing_deg": bearing_deg,
+        "fov_deg": fov_deg,
+        "warning": {
+            "eventId": event_id,
+            "id": event_id,
+            "deviceId": event.get("deviceId"),
+            "riskType": event.get("riskType"),
+            "riskLevel": level,
+            "distanceM": round(distance_m, 1),
+            "relativeDirection": direction,
+            "relativeDirectionText": relative_direction_label(direction),
+            "bearingDeltaDeg": round(delta, 1) if delta is not None else None,
+            "confidence": confidence,
+            "reportCount": event.get("reportCount"),
+            "sourceDevices": event.get("sourceDevices"),
+            "message": event.get("message"),
+            "voicePrompt": prompt,
+            "latitude": event.get("latitude"),
+            "longitude": event.get("longitude"),
+            "timestamp": event.get("timestamp"),
+        },
+    }
+
+
 @app.post("/api/ai/deep-risk")
 def deep_risk(req: DeepRiskRequest) -> dict[str, Any]:
     history = nearby_summary(req.lat, req.lng, req.nearby_radius_m)
@@ -2691,6 +3446,66 @@ async def ai_advice_compat(req: AiAdviceCompatRequest) -> dict[str, Any]:
     return await ai_advice(req.to_advice_request())
 
 
+LOCAL_WHISPER_MODEL: Any = None
+LOCAL_WHISPER_MODEL_NAME = ""
+
+
+def local_stt_requested() -> bool:
+    provider = env("STT_PROVIDER", "openai").lower()
+    return provider in {"local", "whisper", "faster-whisper", "faster_whisper"} or bool(env("LOCAL_STT_MODEL") or env("FASTER_WHISPER_MODEL"))
+
+
+def transcribe_with_local_whisper(content: bytes, filename: str | None, language: Optional[str]) -> dict[str, Any]:
+    """Transcribe with faster-whisper when cloud STT is not configured or STT_PROVIDER=local.
+
+    Install with: pip install faster-whisper
+    Configure optional env: LOCAL_STT_MODEL=base, LOCAL_STT_DEVICE=cpu, LOCAL_STT_COMPUTE_TYPE=int8.
+    """
+    global LOCAL_WHISPER_MODEL, LOCAL_WHISPER_MODEL_NAME
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "speech recognition is not configured: set OPENAI_API_KEY/ARK_STT_MODEL, "
+                "or install faster-whisper and set STT_PROVIDER=local"
+            ),
+        ) from exc
+
+    model_name = env("LOCAL_STT_MODEL", env("FASTER_WHISPER_MODEL", "base"))
+    device = env("LOCAL_STT_DEVICE", "cpu")
+    compute_type = env("LOCAL_STT_COMPUTE_TYPE", "int8")
+    if LOCAL_WHISPER_MODEL is None or LOCAL_WHISPER_MODEL_NAME != model_name:
+        LOCAL_WHISPER_MODEL = WhisperModel(model_name, device=device, compute_type=compute_type)
+        LOCAL_WHISPER_MODEL_NAME = model_name
+
+    suffix = Path(filename or "voice.m4a").suffix or ".m4a"
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(content)
+            temp_path = tmp.name
+        segments, info = LOCAL_WHISPER_MODEL.transcribe(
+            temp_path,
+            language=(language or "zh").split("-")[0],
+            vad_filter=True,
+        )
+        text = "".join(segment.text for segment in segments).strip()
+        return {
+            "provider": "local_faster_whisper",
+            "model": model_name,
+            "text": text,
+            "raw": {"language": getattr(info, "language", language or "zh")},
+        }
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
 @app.post("/api/voice/text-command")
 async def text_command(req: TextCommandRequest) -> dict[str, Any]:
     result = await parse_command_with_llm(req.text, req.device_id)
@@ -2704,10 +3519,11 @@ async def transcribe_voice(
     prompt: Optional[str] = Form(None),
 ) -> dict[str, Any]:
     cfg = stt_config()
-    if not cfg["api_key"] or not cfg["model"]:
-        raise HTTPException(status_code=503, detail="speech recognition is not configured")
-
     content = await file.read()
+
+    if not cfg["api_key"] or not cfg["model"]:
+        return await asyncio.to_thread(transcribe_with_local_whisper, content, file.filename, language)
+
     data: dict[str, str] = {"model": cfg["model"]}
     if language:
         data["language"] = language
@@ -2725,6 +3541,9 @@ async def transcribe_voice(
 
     async with httpx.AsyncClient(timeout=90.0) as client:
         response = await client.post(f"{cfg['base_url']}/audio/transcriptions", headers=headers, data=data, files=files)
+
+    if response.status_code >= 400 and local_stt_requested():
+        return await asyncio.to_thread(transcribe_with_local_whisper, content, file.filename, language)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     payload = response.json()
@@ -2743,8 +3562,21 @@ async def voice_command(
     language: Optional[str] = Form(None),
 ) -> dict[str, Any]:
     transcript = await transcribe_voice(file=file, language=language, prompt=None)
-    parsed = await parse_command_with_llm(transcript["text"], device_id)
-    return {"device_id": device_id, "transcript": transcript["text"], **parsed}
+    text = str(transcript.get("text") or "").strip()
+    if not text:
+        return {
+            "device_id": device_id,
+            "transcript": "",
+            "intent": "none",
+            "action": "none",
+            "confidence": 0.0,
+            "reply": "???????????????",
+            "provider": transcript.get("provider"),
+            "model": transcript.get("model"),
+            "fallback": True,
+        }
+    parsed = await parse_command_with_llm(text, device_id)
+    return {"device_id": device_id, "transcript": text, **parsed}
 
 
 if __name__ == "__main__":

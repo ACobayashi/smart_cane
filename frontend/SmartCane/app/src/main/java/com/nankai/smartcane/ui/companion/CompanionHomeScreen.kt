@@ -51,7 +51,6 @@ fun CompanionHomeScreen(
     onViewDevice: () -> Unit,
     onSwitchMode: () -> Unit,
     onLogout: () -> Unit,
-    onClearDemoData: () -> Unit,
     onDismissAlert: () -> Unit,
     onUnlink: () -> Unit
 ) {
@@ -140,7 +139,6 @@ fun CompanionHomeScreen(
         }
         if (active) BigSecondaryButton("解除关联", onClick = { showUnlink = true })
         BigSecondaryButton("切换到用户入口", onClick = onSwitchMode)
-        BigSecondaryButton("清除演示数据", onClick = onClearDemoData)
         BigSecondaryButton("退出登录", onClick = onLogout)
     }
 

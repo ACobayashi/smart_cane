@@ -18,18 +18,38 @@ class LocalAppPreferences(context: Context) {
 
     fun saveLogin(user: UserProfile, rememberLogin: Boolean) {
         sessionLoginAllowed = true
-        prefs.edit()
-            .putBoolean(KEY_IS_LOGGED_IN, true)
-            .putBoolean(KEY_REMEMBER_LOGIN, rememberLogin)
-            .putString(KEY_USER_ID, user.userId)
-            .putString(KEY_ACCOUNT, user.account)
-            .putString(KEY_DISPLAY_NAME, user.displayName)
-            .putString(KEY_ROLE, user.role.name)
-            .putBoolean(KEY_IS_DEMO, user.isDemo)
-            .remove(KEY_LAST_MODE)
-            .remove(KEY_FIRST_GUIDE_COMPLETED)
-            .apply()
+        val previousAccount = prefs.getString(KEY_ACCOUNT, null)
+        val previousUserId = prefs.getString(KEY_USER_ID, null)
+        val switchingUser = previousAccount != null && (previousAccount != user.account || previousUserId != user.userId)
+        prefs.edit().apply {
+            putBoolean(KEY_IS_LOGGED_IN, true)
+            putBoolean(KEY_REMEMBER_LOGIN, rememberLogin)
+            putString(KEY_USER_ID, user.userId)
+            putString(KEY_ACCOUNT, user.account)
+            putString(KEY_DISPLAY_NAME, user.displayName)
+            putString(KEY_ROLE, user.role.name)
+            putBoolean(KEY_IS_DEMO, user.isDemo)
+            remove(KEY_LAST_MODE)
+            remove(KEY_FIRST_GUIDE_COMPLETED)
+            if (switchingUser) clearUserScopedState()
+        }.apply()
         refresh()
+    }
+
+    private fun android.content.SharedPreferences.Editor.clearUserScopedState(): android.content.SharedPreferences.Editor {
+        remove(KEY_CANE_BOUND)
+        remove(KEY_RELATION_ID)
+        remove(KEY_PENDING_REQUEST_ID)
+        remove(KEY_RELATION_STATUS)
+        remove(KEY_COMPANION_ID)
+        remove(KEY_COMPANION_ACCOUNT)
+        remove(KEY_COMPANION_NAME)
+        remove(KEY_PAIRING_CODE)
+        remove(KEY_PAIRING_CREATED_AT)
+        remove(KEY_PAIRING_EXPIRES_AT)
+        remove(KEY_RELATION_UPDATED_AT)
+        remove(KEY_STATE_OWNER_ACCOUNT)
+        return this
     }
 
     fun saveMode(mode: AppMode) {
@@ -44,6 +64,7 @@ class LocalAppPreferences(context: Context) {
 
     fun savePairingCode(code: String?, createdAtMillis: Long?, expiresAtMillis: Long?) {
         prefs.edit().apply {
+            putString(KEY_STATE_OWNER_ACCOUNT, prefs.getString(KEY_ACCOUNT, null))
             if (code == null || createdAtMillis == null || expiresAtMillis == null) {
                 remove(KEY_PAIRING_CODE)
                 remove(KEY_PAIRING_CREATED_AT)
@@ -59,6 +80,7 @@ class LocalAppPreferences(context: Context) {
 
     fun savePendingRequestId(requestId: String?) {
         prefs.edit().apply {
+            putString(KEY_STATE_OWNER_ACCOUNT, prefs.getString(KEY_ACCOUNT, null))
             if (requestId.isNullOrBlank()) remove(KEY_PENDING_REQUEST_ID) else putString(KEY_PENDING_REQUEST_ID, requestId)
         }.apply()
         refresh()
@@ -66,6 +88,7 @@ class LocalAppPreferences(context: Context) {
 
     fun saveRelation(relation: CareRelation?) {
         prefs.edit().apply {
+            putString(KEY_STATE_OWNER_ACCOUNT, prefs.getString(KEY_ACCOUNT, null))
             if (relation == null || relation.status == RelationStatus.None || relation.status == RelationStatus.Removed) {
                 remove(KEY_RELATION_ID)
                 remove(KEY_RELATION_STATUS)
@@ -90,6 +113,7 @@ class LocalAppPreferences(context: Context) {
 
     fun saveRelationIds(relationId: String?, status: RelationStatus, companionUser: UserProfile? = null) {
         prefs.edit().apply {
+            putString(KEY_STATE_OWNER_ACCOUNT, prefs.getString(KEY_ACCOUNT, null))
             if (relationId.isNullOrBlank() || status == RelationStatus.None || status == RelationStatus.Removed) {
                 remove(KEY_RELATION_ID)
                 remove(KEY_RELATION_STATUS)
@@ -116,6 +140,20 @@ class LocalAppPreferences(context: Context) {
             .remove(KEY_DISPLAY_NAME)
             .remove(KEY_ROLE)
             .remove(KEY_IS_DEMO)
+            .remove(KEY_LAST_MODE)
+            .remove(KEY_FIRST_GUIDE_COMPLETED)
+            .remove(KEY_CANE_BOUND)
+            .remove(KEY_RELATION_ID)
+            .remove(KEY_PENDING_REQUEST_ID)
+            .remove(KEY_RELATION_STATUS)
+            .remove(KEY_COMPANION_ID)
+            .remove(KEY_COMPANION_ACCOUNT)
+            .remove(KEY_COMPANION_NAME)
+            .remove(KEY_PAIRING_CODE)
+            .remove(KEY_PAIRING_CREATED_AT)
+            .remove(KEY_PAIRING_EXPIRES_AT)
+            .remove(KEY_RELATION_UPDATED_AT)
+            .remove(KEY_STATE_OWNER_ACCOUNT)
             .apply()
         refresh()
     }
@@ -159,20 +197,22 @@ class LocalAppPreferences(context: Context) {
                 isDemo = prefs.getBoolean(KEY_IS_DEMO, true)
             )
         } else null
+        val ownerAccount = prefs.getString(KEY_STATE_OWNER_ACCOUNT, null)
+        val userScopedStateValid = user != null && ownerAccount != null && ownerAccount == user.account
         return StoredAppState(
             isLoggedIn = user != null,
             currentUser = user,
             lastMode = prefs.getString(KEY_LAST_MODE, null)?.let { runCatching { AppMode.valueOf(it) }.getOrNull() },
-            isCaneBound = prefs.getBoolean(KEY_CANE_BOUND, true),
-            relationId = prefs.getString(KEY_RELATION_ID, null),
-            pendingRequestId = prefs.getString(KEY_PENDING_REQUEST_ID, null),
-            relationStatus = prefs.getString(KEY_RELATION_STATUS, null)?.let { runCatching { RelationStatus.valueOf(it) }.getOrNull() } ?: RelationStatus.None,
-            companionUser = readCompanionUser(),
-            pairingCode = prefs.getString(KEY_PAIRING_CODE, null),
-            pairingCreatedAtMillis = prefs.getLong(KEY_PAIRING_CREATED_AT, 0L).takeIf { it > 0L },
-            pairingExpiresAtMillis = prefs.getLong(KEY_PAIRING_EXPIRES_AT, 0L).takeIf { it > 0L },
+            isCaneBound = userScopedStateValid && prefs.getBoolean(KEY_CANE_BOUND, false),
+            relationId = if (userScopedStateValid) prefs.getString(KEY_RELATION_ID, null) else null,
+            pendingRequestId = if (userScopedStateValid) prefs.getString(KEY_PENDING_REQUEST_ID, null) else null,
+            relationStatus = if (userScopedStateValid) prefs.getString(KEY_RELATION_STATUS, null)?.let { runCatching { RelationStatus.valueOf(it) }.getOrNull() } ?: RelationStatus.None else RelationStatus.None,
+            companionUser = if (userScopedStateValid) readCompanionUser() else null,
+            pairingCode = if (userScopedStateValid) prefs.getString(KEY_PAIRING_CODE, null) else null,
+            pairingCreatedAtMillis = if (userScopedStateValid) prefs.getLong(KEY_PAIRING_CREATED_AT, 0L).takeIf { it > 0L } else null,
+            pairingExpiresAtMillis = if (userScopedStateValid) prefs.getLong(KEY_PAIRING_EXPIRES_AT, 0L).takeIf { it > 0L } else null,
             isFirstGuideCompleted = prefs.getBoolean(KEY_FIRST_GUIDE_COMPLETED, false),
-            relationUpdatedAtMillis = prefs.getLong(KEY_RELATION_UPDATED_AT, 0L).takeIf { it > 0L }
+            relationUpdatedAtMillis = if (userScopedStateValid) prefs.getLong(KEY_RELATION_UPDATED_AT, 0L).takeIf { it > 0L } else null
         )
     }
 
@@ -209,6 +249,7 @@ class LocalAppPreferences(context: Context) {
         private const val KEY_PAIRING_EXPIRES_AT = "pairing_expires_at"
         private const val KEY_FIRST_GUIDE_COMPLETED = "first_guide_completed"
         private const val KEY_RELATION_UPDATED_AT = "relation_updated_at"
+        private const val KEY_STATE_OWNER_ACCOUNT = "state_owner_account"
     }
 }
 

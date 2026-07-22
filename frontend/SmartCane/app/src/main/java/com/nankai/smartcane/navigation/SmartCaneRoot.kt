@@ -1,5 +1,10 @@
 ﻿package com.nankai.smartcane.navigation
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
@@ -9,12 +14,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.Composable
@@ -34,6 +41,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,6 +51,7 @@ import com.nankai.smartcane.MapPage
 import com.nankai.smartcane.MinePage
 import com.nankai.smartcane.data.model.AppMode
 import com.nankai.smartcane.data.model.RelationStatus
+import com.nankai.smartcane.data.network.EmergencyAlertDto
 import com.nankai.smartcane.ui.auth.LoginScreen
 import com.nankai.smartcane.ui.blind.BlindHomeScreen
 import com.nankai.smartcane.ui.companion.CompanionHomeScreen
@@ -54,12 +63,19 @@ import com.nankai.smartcane.ui.pairing.CompanionPairingScreen
 import com.nankai.smartcane.viewmodel.SmartCaneAppController
 import kotlinx.coroutines.delay
 
+private fun hasSmartCaneLocationPermission(context: Context): Boolean =
+    ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
 @Composable
 fun SmartCaneRootApp() {
     val context = LocalContext.current
     val controller = remember { SmartCaneAppController.get(context) }
     val uiState by controller.uiState.collectAsState()
     var route: AppRoute by remember { mutableStateOf(AppRoute.Splash) }
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { }
 
     DisposableEffect(Unit) { onDispose { controller.release() } }
 
@@ -76,6 +92,17 @@ fun SmartCaneRootApp() {
         }
     }
 
+    LaunchedEffect(route) {
+        if (route is AppRoute.BlindHome && !hasSmartCaneLocationPermission(context)) {
+            locationPermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        }
+    }
+
     DisposableEffect(route, uiState.currentUser?.userId) {
         when (route) {
             AppRoute.BlindPairing -> controller.startBlindRequestPolling()
@@ -88,11 +115,15 @@ fun SmartCaneRootApp() {
                 controller.startCompanionRelationPolling()
                 controller.startAlertPolling()
             }
-            AppRoute.BlindHome -> controller.startAlertPolling()
+            AppRoute.BlindHome -> {
+                controller.startAlertPolling()
+                controller.startBlindRiskProximityMonitoring()
+            }
             else -> Unit
         }
         onDispose {
             if (route is AppRoute.BlindPairing || route is AppRoute.CompanionPairing) controller.stopPairingPolling()
+            if (route is AppRoute.BlindHome) controller.stopBlindRiskProximityMonitoring()
         }
     }
 
@@ -115,7 +146,8 @@ fun SmartCaneRootApp() {
             AppRoute.Login -> LoginScreen(
                 isBusy = uiState.isBusy,
                 message = uiState.message,
-                onLogin = controller::login
+                onLogin = controller::login,
+                onRegister = controller::register
             )
             AppRoute.ModeSelection -> ModeSelectionScreen(
                 userName = uiState.currentUser?.displayName ?: "演示用户",
@@ -131,7 +163,8 @@ fun SmartCaneRootApp() {
                 message = uiState.message,
                 voiceTranscript = uiState.voiceTranscript,
                 urgentAlert = uiState.urgentAlert,
-                onVoiceToggle = controller::toggleVoiceListening,
+                onVoiceStart = controller::startVoiceInput,
+                onVoiceStop = controller::stopVoiceInput,
                 onSos = controller::sendBlindSos,
                 onDismissAlert = controller::dismissUrgentAlert,
                 onOpenSettings = { route = AppRoute.BlindPairing }
@@ -153,8 +186,7 @@ fun SmartCaneRootApp() {
                     controller.selectMode(AppMode.Companion)
                     route = AppRoute.CompanionRisk
                 },
-                onLogout = controller::logout,
-                onClearDemoData = controller::clearDemoData
+                onLogout = controller::logout
             )
             AppRoute.CompanionHome -> CompanionHomeScreen(
                 userName = uiState.currentUser?.displayName ?: "陪护人",
@@ -167,7 +199,6 @@ fun SmartCaneRootApp() {
                 onViewDevice = { route = AppRoute.CompanionMine },
                 onSwitchMode = { controller.selectMode(AppMode.Blind); route = AppRoute.BlindHome },
                 onLogout = controller::logout,
-                onClearDemoData = controller::clearDemoData,
                 onDismissAlert = controller::dismissUrgentAlert,
                 onUnlink = controller::unlinkRelation
             )
@@ -182,10 +213,12 @@ fun SmartCaneRootApp() {
                 onUnlink = controller::unlinkRelation,
                 onBack = { route = AppRoute.CompanionMine }
             )
-            AppRoute.CompanionRisk -> CompanionLegacyShell(0, { route = companionTabToRoute(it) }) { GuidePage() }
-            AppRoute.CompanionMap -> CompanionLegacyShell(1, { route = companionTabToRoute(it) }) { MapPage() }
-            AppRoute.CompanionCollaboration -> CompanionLegacyShell(2, { route = companionTabToRoute(it) }) { CollaborationPage() }
-            AppRoute.CompanionMine -> CompanionLegacyShell(3, { route = companionTabToRoute(it) }) {
+            AppRoute.CompanionRisk -> CompanionLegacyShell(0, { route = companionTabToRoute(it) }, uiState.urgentAlert, controller::dismissUrgentAlert) {
+                GuidePage(deviceName = uiState.currentRelation?.caneDevice?.name ?: controller.relation()?.caneDevice?.name)
+            }
+            AppRoute.CompanionMap -> CompanionLegacyShell(1, { route = companionTabToRoute(it) }, uiState.urgentAlert, controller::dismissUrgentAlert) { MapPage() }
+            AppRoute.CompanionCollaboration -> CompanionLegacyShell(2, { route = companionTabToRoute(it) }, uiState.urgentAlert, controller::dismissUrgentAlert) { CollaborationPage() }
+            AppRoute.CompanionMine -> CompanionLegacyShell(3, { route = companionTabToRoute(it) }, uiState.urgentAlert, controller::dismissUrgentAlert) {
                 MinePage(
                     userName = uiState.currentUser?.displayName ?: "陪护人",
                     relation = uiState.currentRelation ?: controller.relation(),
@@ -229,7 +262,7 @@ private fun SplashScreen() {
 }
 
 @Composable
-private fun CompanionLegacyShell(selectedTab: Int, onSelect: (Int) -> Unit, content: @Composable () -> Unit) {
+private fun CompanionLegacyShell(selectedTab: Int, onSelect: (Int) -> Unit, urgentAlert: EmergencyAlertDto?, onDismissAlert: () -> Unit, content: @Composable () -> Unit) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         bottomBar = {
@@ -261,6 +294,30 @@ private fun CompanionLegacyShell(selectedTab: Int, onSelect: (Int) -> Unit, cont
         Box(Modifier.fillMaxSize().background(SmartBg).padding(innerPadding)) {
             content()
         }
+    }
+
+    if (urgentAlert != null) {
+        AlertDialog(
+            onDismissRequest = onDismissAlert,
+            title = {
+                Text(
+                    if (urgentAlert.riskType == "sos") "SOS 紧急求助" else urgentAlert.title.ifBlank { "风险告警" },
+                    color = Color(0xFFDC2626),
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Black
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(urgentAlert.message.ifBlank { urgentAlert.voicePrompt }.ifBlank { if (urgentAlert.riskType == "sos") "用户已发起 SOS 紧急求助，请立即联系并查看地图位置。" else "请关注该风险告警。" }, fontSize = 18.sp, color = Color(0xFF0F172A), lineHeight = 26.sp)
+                    Text("设备：${urgentAlert.deviceId}", fontSize = 15.sp, color = Color(0xFF64748B))
+                    if (urgentAlert.latitude != null && urgentAlert.longitude != null) {
+                        Text("位置：${urgentAlert.latitude}, ${urgentAlert.longitude}", fontSize = 15.sp, color = Color(0xFF64748B))
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = onDismissAlert) { Text("知道了") } }
+        )
     }
 }
 

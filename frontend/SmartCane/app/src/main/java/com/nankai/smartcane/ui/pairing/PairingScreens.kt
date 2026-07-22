@@ -71,8 +71,7 @@ fun BlindPairingScreen(
     onUnlink: () -> Unit,
     onBack: () -> Unit,
     onSwitchToCompanion: () -> Unit,
-    onLogout: () -> Unit,
-    onClearDemoData: () -> Unit
+    onLogout: () -> Unit
 ) {
     val context = LocalContext.current
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -140,7 +139,6 @@ fun BlindPairingScreen(
         Spacer(Modifier.height(4.dp))
         BigSecondaryButton("返回首页", onClick = onBack)
         BigPrimaryButton("切换到陪护人界面", onClick = onSwitchToCompanion)
-        BigSecondaryButton("清除演示数据", onClick = onClearDemoData)
         BigSecondaryButton("退出登录", onClick = onLogout)
     }
 

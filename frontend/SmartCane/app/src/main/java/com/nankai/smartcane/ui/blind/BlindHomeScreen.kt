@@ -7,7 +7,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,7 +35,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -49,6 +52,7 @@ import com.nankai.smartcane.data.network.EmergencyAlertDto
 import com.nankai.smartcane.ui.design.SmartCaneColors
 import com.nankai.smartcane.viewmodel.SosActionState
 import com.nankai.smartcane.viewmodel.VoiceState
+import kotlinx.coroutines.withTimeoutOrNull
 
 @Composable
 fun BlindHomeScreen(
@@ -57,7 +61,8 @@ fun BlindHomeScreen(
     message: String?,
     voiceTranscript: String?,
     urgentAlert: EmergencyAlertDto?,
-    onVoiceToggle: () -> Unit,
+    onVoiceStart: () -> Unit,
+    onVoiceStop: () -> Unit,
     onSos: () -> Unit,
     onDismissAlert: () -> Unit,
     onOpenSettings: () -> Unit
@@ -105,7 +110,7 @@ fun BlindHomeScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                VoiceOrb(state = voiceState, onPressToggle = onVoiceToggle)
+                VoiceOrb(state = voiceState, onVoiceStart = onVoiceStart, onVoiceStop = onVoiceStop)
                 Spacer(Modifier.height(18.dp))
                 VoiceCaption(
                     voiceState = voiceState,
@@ -133,32 +138,42 @@ fun BlindHomeScreen(
 }
 
 @Composable
-private fun VoiceOrb(state: VoiceState, onPressToggle: () -> Unit) {
+private fun VoiceOrb(state: VoiceState, onVoiceStart: () -> Unit, onVoiceStop: () -> Unit) {
     val label = when (state) {
         VoiceState.Idle -> "按住说话"
         VoiceState.Listening -> "正在聆听"
         VoiceState.Speaking -> "正在播报"
     }
+    val currentState by rememberUpdatedState(state)
+    val currentOnVoiceStart by rememberUpdatedState(onVoiceStart)
+    val currentOnVoiceStop by rememberUpdatedState(onVoiceStop)
     Box(
         modifier = Modifier
             .size(218.dp)
             .shadow(28.dp, CircleShape)
             .clip(CircleShape)
             .background(Brush.radialGradient(listOf(Color(0xFFA5B4FC), Color(0xFF6366F1), Color(0xFF312E81))))
-            .pointerInput(state) {
-                detectTapGestures(
-                    onPress = {
-                        if (state != VoiceState.Speaking) {
-                            onPressToggle()
-                            tryAwaitRelease()
-                            if (state == VoiceState.Idle) onPressToggle()
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    val releasedBeforeLongPress = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                        waitForUpOrCancellation()
+                    }
+                    if (releasedBeforeLongPress == null && currentState == VoiceState.Idle) {
+                        var started = false
+                        try {
+                            currentOnVoiceStart()
+                            started = true
+                            waitForUpOrCancellation()
+                        } finally {
+                            if (started) currentOnVoiceStop()
                         }
                     }
-                )
+                }
             }
             .semantics {
                 role = Role.Button
-                contentDescription = "语音按钮，双击或按住开始说话"
+                contentDescription = "语音按钮，按住开始说话，松开立即停止"
                 stateDescription = label
             },
         contentAlignment = Alignment.Center
@@ -170,7 +185,6 @@ private fun VoiceOrb(state: VoiceState, onPressToggle: () -> Unit) {
         }
     }
 }
-
 @Composable
 private fun SoundWave(active: Boolean) {
     val transition = rememberInfiniteTransition(label = "voice-wave")

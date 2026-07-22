@@ -25,7 +25,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nankai.smartcane.data.model.AppMode
 import com.nankai.smartcane.ui.components.BigSecondaryButton
-import com.nankai.smartcane.ui.components.DemoBanner
 import com.nankai.smartcane.ui.components.ScreenTitle
 import com.nankai.smartcane.ui.components.SmartBg
 import com.nankai.smartcane.ui.components.SmartDark
@@ -51,7 +50,6 @@ fun ModeSelectionScreen(
             title = "选择入口",
             subtitle = "$userName，欢迎使用 SmartCane。"
         )
-        DemoBanner("本账号用于比赛演示，登录后可进入用户端或陪护人端。")
 
         ModeCard(
             title = "用户",
