@@ -40,14 +40,13 @@ static void chooseMoreSevere(RiskState &best, const RiskState &candidate) {
   if (candidate.level < best.level) {
     return;
   }
-  if (candidate.level == RISK_LOW) {
-    return;
-  }
   if (strcmp(candidate.direction, "stop") == 0 && strcmp(best.direction, "stop") != 0) {
     best = candidate;
     return;
   }
-  if (strcmp(candidate.riskType, "ground_drop") == 0 && strcmp(best.riskType, "ground_drop") != 0) {
+  if ((strcmp(candidate.riskType, "ground_drop") == 0 || strcmp(candidate.riskType, "ground_step") == 0) &&
+      strcmp(best.riskType, "ground_drop") != 0 &&
+      strcmp(best.riskType, "ground_step") != 0) {
     best = candidate;
     return;
   }
@@ -61,13 +60,13 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
   risk.detectedAtMs = millis();
 
   if (!d.valid) {
-    risk.level = nearby.highCount >= 2 ? RISK_MEDIUM : RISK_LOW;
-    risk.riskType = risk.level == RISK_MEDIUM ? "history_risk" : "sensor_unreliable";
-    risk.direction = risk.level == RISK_MEDIUM ? "slow" : "none";
+    risk.level = RISK_LOW;
+    risk.riskType = nearby.highCount >= 2 ? "history_risk" : "sensor_unreliable";
+    risk.direction = nearby.highCount >= 2 ? "slow" : "none";
     risk.sensor = "tof";
     risk.reason = "tof_unavailable";
-    risk.confidence = risk.level == RISK_MEDIUM ? 0.45f : 0.15f;
-    risk.historyInfluenced = risk.level == RISK_MEDIUM;
+    risk.confidence = nearby.highCount >= 2 ? 0.35f : 0.15f;
+    risk.historyInfluenced = nearby.highCount >= 2;
     return risk;
   }
 
@@ -81,15 +80,15 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
   best.confidence = d.valid ? 0.7f : 0.2f;
 
   if (d.downValid && d.downCm > SMARTCANE_GROUND_BASE_CM + SMARTCANE_GROUND_DROP_THRESHOLD_CM) {
-    risk.level = RISK_HIGH;
+    risk.level = RISK_MEDIUM;
     risk.riskType = "ground_drop";
     risk.direction = "stop";
     risk.sensor = "tof_down";
     risk.reason = "down_distance_exceeds_ground_baseline";
     risk.distanceMm = d.downCm * 10;
-    risk.confidence = 0.95f;
+    risk.confidence = 0.88f;
     risk.groundDrop = true;
-    risk.realtimeHigh = true;
+    risk.realtimeMedium = true;
     chooseMoreSevere(best, risk);
   }
 
@@ -97,13 +96,30 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
     risk = RiskState();
     risk.detectedAtMs = millis();
     risk.level = RISK_MEDIUM;
-    risk.riskType = "down_obstacle";
-    risk.direction = "slow";
+    risk.riskType = "ground_step";
+    risk.direction = "stop";
     risk.sensor = "tof_down";
-    risk.reason = "down_distance_too_close";
+    risk.reason = "down_distance_too_close_step_or_curb";
     risk.distanceMm = d.downCm * 10;
-    risk.confidence = 0.68f;
-    risk.sideObstacle = true;
+    risk.confidence = 0.82f;
+    risk.groundDrop = true;
+    risk.realtimeMedium = true;
+    chooseMoreSevere(best, risk);
+  }
+
+  if (d.downValid &&
+      d.downCm >= SMARTCANE_DOWN_STEP_EDGE_MIN_CM &&
+      d.downCm <= SMARTCANE_DOWN_STEP_EDGE_MAX_CM) {
+    risk = RiskState();
+    risk.detectedAtMs = millis();
+    risk.level = RISK_MEDIUM;
+    risk.riskType = "ground_step";
+    risk.direction = "stop";
+    risk.sensor = "tof_down";
+    risk.reason = "down_distance_near_step_lower_edge";
+    risk.distanceMm = d.downCm * 10;
+    risk.confidence = 0.80f;
+    risk.groundDrop = true;
     risk.realtimeMedium = true;
     chooseMoreSevere(best, risk);
   }
@@ -116,7 +132,7 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
     risk.sensor = "tof_front";
     risk.reason = "front_distance_below_danger_threshold";
     risk.distanceMm = d.frontCm * 10;
-    risk.confidence = 0.9f;
+    risk.confidence = 0.88f;
     risk.frontObstacle = true;
     risk.realtimeHigh = true;
     applyBestSide(risk, d);
@@ -126,21 +142,19 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
   if (d.frontValid && d.frontCm < SMARTCANE_FRONT_WARN_CM) {
     risk = RiskState();
     risk.detectedAtMs = millis();
-    risk.level = RISK_MEDIUM;
+    risk.level = RISK_LOW;
     risk.riskType = "front_obstacle";
     risk.sensor = "tof_front";
     risk.reason = "front_distance_below_warn_threshold";
     risk.distanceMm = d.frontCm * 10;
-    risk.confidence = 0.72f;
+    risk.confidence = 0.45f;
     risk.frontObstacle = true;
-    risk.realtimeMedium = true;
     applyBestSide(risk, d);
 
     if (isHistoricalMediumOrHigh(nearby)) {
-      risk.level = RISK_HIGH;
       risk.reason = "front_warn_plus_nearby_history";
       risk.historyInfluenced = true;
-      risk.confidence = 0.82f;
+      risk.confidence = 0.55f;
     }
     chooseMoreSevere(best, risk);
   }
@@ -148,17 +162,15 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
   if (d.leftValid && d.leftCm < SMARTCANE_SIDE_NEAR_CM) {
     risk = RiskState();
     risk.detectedAtMs = millis();
-    risk.level = d.leftCm < SMARTCANE_SIDE_DANGER_CM ? RISK_HIGH : RISK_MEDIUM;
+    risk.level = RISK_LOW;
     risk.riskType = "left_obstacle";
     risk.direction = "keep_right";
     risk.sensor = "tof_left";
     risk.reason = "left_side_too_close";
     risk.distanceMm = d.leftCm * 10;
-    risk.confidence = risk.level == RISK_HIGH ? 0.8f : 0.62f;
+    risk.confidence = d.leftCm < SMARTCANE_SIDE_DANGER_CM ? 0.60f : 0.42f;
     risk.sideObstacle = true;
-    risk.realtimeMedium = true;
     if (isHistoricalMediumOrHigh(nearby)) {
-      risk.level = RISK_HIGH;
       risk.historyInfluenced = true;
       risk.reason = "left_side_close_plus_nearby_history";
     }
@@ -168,17 +180,15 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
   if (d.rightValid && d.rightCm < SMARTCANE_SIDE_NEAR_CM) {
     risk = RiskState();
     risk.detectedAtMs = millis();
-    risk.level = d.rightCm < SMARTCANE_SIDE_DANGER_CM ? RISK_HIGH : RISK_MEDIUM;
+    risk.level = RISK_LOW;
     risk.riskType = "right_obstacle";
     risk.direction = "keep_left";
     risk.sensor = "tof_right";
     risk.reason = "right_side_too_close";
     risk.distanceMm = d.rightCm * 10;
-    risk.confidence = risk.level == RISK_HIGH ? 0.8f : 0.62f;
+    risk.confidence = d.rightCm < SMARTCANE_SIDE_DANGER_CM ? 0.60f : 0.42f;
     risk.sideObstacle = true;
-    risk.realtimeMedium = true;
     if (isHistoricalMediumOrHigh(nearby)) {
-      risk.level = RISK_HIGH;
       risk.historyInfluenced = true;
       risk.reason = "right_side_close_plus_nearby_history";
     }
@@ -190,12 +200,12 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
   }
 
   if (nearby.available && nearby.highCount >= 2) {
-    risk.level = RISK_MEDIUM;
+    risk.level = RISK_LOW;
     risk.riskType = "history_risk";
     risk.direction = "slow";
     risk.sensor = "backend_history";
     risk.reason = "nearby_history_high_count";
-    risk.confidence = 0.55f;
+    risk.confidence = 0.35f;
     risk.historyInfluenced = true;
     return risk;
   }

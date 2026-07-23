@@ -6,6 +6,8 @@
 bool connectWifi();
 bool networkAvailable();
 void networkClientUpdate();
+void printWifiDiagnostics();
+void scanWifiNetworks();
 
 bool uploadLocation(const LocationData &location);
 bool uploadRiskEvent(const char *riskType,

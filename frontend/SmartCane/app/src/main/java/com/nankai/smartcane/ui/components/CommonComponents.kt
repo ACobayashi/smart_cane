@@ -81,7 +81,7 @@ fun DemoBanner(text: String, modifier: Modifier = Modifier, dark: Boolean = fals
         shape = RoundedCornerShape(16.dp)
     ) {
         Text(
-            text = "演示模式：$text",
+            text = text,
             modifier = Modifier.padding(14.dp),
             color = if (dark) Color(0xFFFFF7CC) else Color(0xFF9A3412),
             fontSize = 15.sp,

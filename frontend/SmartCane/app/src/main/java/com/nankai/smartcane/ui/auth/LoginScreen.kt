@@ -1,8 +1,8 @@
-﻿package com.nankai.smartcane.ui.auth
+package com.nankai.smartcane.ui.auth
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,12 +14,15 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -46,6 +49,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nankai.smartcane.data.model.UserRole
 import com.nankai.smartcane.ui.components.SmartTeal
 
 @Composable
@@ -53,17 +57,28 @@ fun LoginScreen(
     isBusy: Boolean,
     message: String?,
     onLogin: (String, String, Boolean) -> Unit,
-    onBlindDemo: () -> Unit,
-    onCompanionDemo: () -> Unit,
-    onMessageShown: () -> Unit
+    onRegister: (String, String, String, UserRole, Boolean) -> Unit
 ) {
+    var isRegister by rememberSaveable { mutableStateOf(false) }
     var account by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
+    var confirmPassword by rememberSaveable { mutableStateOf("") }
+    var displayName by rememberSaveable { mutableStateOf("") }
+    var role by rememberSaveable { mutableStateOf(UserRole.Blind) }
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(message) {
-        if (!message.isNullOrBlank() && !message.contains("成功")) localError = message
+        if (!message.isNullOrBlank() && !message.contains("\u6210\u529f")) localError = message
+    }
+
+    LaunchedEffect(isRegister) {
+        if (isRegister) {
+            account = ""
+            password = ""
+            confirmPassword = ""
+            displayName = ""
+        }
     }
 
     Box(
@@ -79,7 +94,7 @@ fun LoginScreen(
             .padding(horizontal = 24.dp, vertical = 18.dp)
     ) {
         Column(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Spacer(Modifier.height(8.dp))
@@ -94,14 +109,14 @@ fun LoginScreen(
             }
             Spacer(Modifier.height(14.dp))
             Text("SmartCane", fontSize = 34.sp, fontWeight = FontWeight.Black, color = Color(0xFF0F172A))
-            Text("智能导盲与远程陪护", fontSize = 16.sp, color = Color(0xFF64748B), lineHeight = 22.sp)
+            Text(if (isRegister) "\u521b\u5efa\u8d26\u53f7" else "\u667a\u80fd\u51fa\u884c\u4e0e\u8fdc\u7a0b\u966a\u62a4", fontSize = 16.sp, color = Color(0xFF64748B), lineHeight = 22.sp)
 
-            Spacer(Modifier.height(26.dp))
+            Spacer(Modifier.height(if (isRegister) 22.dp else 34.dp))
             OutlinedTextField(
                 value = account,
                 onValueChange = { account = it; localError = null },
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("账号") },
+                label = { Text("\u8d26\u53f7") },
                 singleLine = true,
                 shape = RoundedCornerShape(18.dp),
                 colors = OutlinedTextFieldDefaults.colors(focusedContainerColor = Color.White, unfocusedContainerColor = Color.White)
@@ -111,7 +126,7 @@ fun LoginScreen(
                 value = password,
                 onValueChange = { password = it; localError = null },
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("密码") },
+                label = { Text("\u5bc6\u7801") },
                 singleLine = true,
                 shape = RoundedCornerShape(18.dp),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -120,10 +135,39 @@ fun LoginScreen(
                 trailingIcon = {
                     IconButton(
                         onClick = { passwordVisible = !passwordVisible },
-                        modifier = Modifier.semantics { contentDescription = if (passwordVisible) "隐藏密码" else "显示密码" }
-                    ) { Text(if (passwordVisible) "隐藏" else "显示", fontSize = 13.sp, color = SmartTeal) }
+                        modifier = Modifier.semantics { contentDescription = if (passwordVisible) "\u9690\u85cf\u5bc6\u7801" else "\u663e\u793a\u5bc6\u7801" }
+                    ) { Text(if (passwordVisible) "\u9690\u85cf" else "\u663e\u793a", fontSize = 13.sp, color = SmartTeal) }
                 }
             )
+            if (isRegister) {
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = confirmPassword,
+                    onValueChange = { confirmPassword = it; localError = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("\u786e\u8ba4\u5bc6\u7801") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    colors = OutlinedTextFieldDefaults.colors(focusedContainerColor = Color.White, unfocusedContainerColor = Color.White)
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = displayName,
+                    onValueChange = { displayName = it; localError = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("\u6635\u79f0") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(18.dp),
+                    colors = OutlinedTextFieldDefaults.colors(focusedContainerColor = Color.White, unfocusedContainerColor = Color.White)
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = { role = UserRole.Blind }, modifier = Modifier.weight(1f)) { Text(if (role == UserRole.Blind) "\u2713 \u7528\u6237" else "\u7528\u6237") }
+                    OutlinedButton(onClick = { role = UserRole.Companion }, modifier = Modifier.weight(1f)) { Text(if (role == UserRole.Companion) "\u2713 \u966a\u62a4" else "\u966a\u62a4") }
+                }
+            }
             Spacer(Modifier.height(8.dp))
             Box(Modifier.heightIn(min = 22.dp), contentAlignment = Alignment.CenterStart) {
                 localError?.let { Text(it, color = Color(0xFFDC2626), fontSize = 14.sp, maxLines = 1) }
@@ -131,48 +175,68 @@ fun LoginScreen(
             Button(
                 onClick = {
                     localError = when {
-                        account.isBlank() -> "请输入账号"
-                        password.isBlank() -> "请输入密码"
+                        account.isBlank() -> "\u8bf7\u8f93\u5165\u8d26\u53f7"
+                        account.length < 3 -> "\u8d26\u53f7\u81f3\u5c11 3 \u4f4d"
+                        password.isBlank() -> "\u8bf7\u8f93\u5165\u5bc6\u7801"
+                        password.length < 6 -> "\u5bc6\u7801\u81f3\u5c11 6 \u4f4d"
+                        isRegister && confirmPassword != password -> "\u4e24\u6b21\u5bc6\u7801\u4e0d\u4e00\u81f4"
+                        isRegister && displayName.isBlank() -> "\u8bf7\u8f93\u5165\u6635\u79f0"
                         else -> null
                     }
-                    if (localError == null) onLogin(account, password, true)
+                    if (localError == null) {
+                        if (isRegister) {
+                            onRegister(account, password, displayName, role, true)
+                        } else {
+                            onLogin(account, password, true)
+                        }
+                    }
                 },
                 enabled = !isBusy,
                 modifier = Modifier.fillMaxWidth().height(56.dp),
                 shape = RoundedCornerShape(18.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = SmartTeal)
-            ) { Text(if (isBusy) "登录中…" else "登录", fontSize = 18.sp, fontWeight = FontWeight.Bold) }
-
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                TextButton(onClick = { localError = "暂未开放注册" }) { Text("注册", color = Color(0xFF64748B)) }
-                TextButton(onClick = { localError = "暂不支持找回密码" }) { Text("忘记密码", color = Color(0xFF64748B)) }
+            ) {
+                Text(
+                    if (isBusy) {
+                        if (isRegister) "\u6ce8\u518c\u4e2d\u2026" else "\u767b\u5f55\u4e2d\u2026"
+                    } else {
+                        if (isRegister) "\u6ce8\u518c" else "\u767b\u5f55"
+                    },
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
             }
 
-            Spacer(Modifier.weight(1f))
-            Text("快速体验", color = Color(0xFF334155), fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                ExperienceButton("体验盲人端", "直达首页", Modifier.weight(1f), !isBusy, onBlindDemo)
-                ExperienceButton("体验陪护端", "查看状态", Modifier.weight(1f), !isBusy, onCompanionDemo)
+            TextButton(
+                onClick = {
+                    isRegister = !isRegister
+                    localError = null
+                    if (isRegister) {
+                        if (account == "demo") account = ""
+                        if (password == "123456") password = ""
+                        confirmPassword = ""
+                    }
+                }
+            ) {
+                Text(if (isRegister) "\u5df2\u6709\u8d26\u53f7\uff0c\u53bb\u767b\u5f55" else "\u6ca1\u6709\u8d26\u53f7\uff0c\u7acb\u5373\u6ce8\u518c", color = SmartTeal, fontSize = 15.sp, fontWeight = FontWeight.Bold)
             }
-            Spacer(Modifier.height(8.dp))
-            Text("演示账号不保存真实密码", color = Color(0xFF94A3B8), fontSize = 12.sp, textAlign = TextAlign.Center)
-        }
-    }
-}
 
-@Composable
-private fun ExperienceButton(title: String, subtitle: String, modifier: Modifier, enabled: Boolean, onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        enabled = enabled,
-        modifier = modifier.height(72.dp),
-        shape = RoundedCornerShape(22.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color(0xFF0F172A))
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            Text(title, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-            Text(subtitle, fontSize = 12.sp, color = Color(0xFF64748B), maxLines = 1)
+            Spacer(Modifier.height(10.dp))
+            if (!isRegister) {
+                Surface(color = Color.White.copy(alpha = 0.78f), shape = RoundedCornerShape(18.dp)) {
+                    Text(
+                        "\u53ef\u7528\u8d26\u53f7\uff1Ademo / 123456",
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                        color = Color(0xFF64748B),
+                        fontSize = 14.sp,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+            Spacer(Modifier.height(18.dp))
+            Text(if (isRegister) "\u6ce8\u518c\u540e\u53ef\u9009\u62e9\u7528\u6237\u6216\u966a\u62a4\u4eba\u5165\u53e3" else "\u767b\u5f55\u540e\u9009\u62e9\u7528\u6237\u6216\u966a\u62a4\u4eba\u5165\u53e3", color = Color(0xFF94A3B8), fontSize = 12.sp, textAlign = TextAlign.Center)
+            Spacer(Modifier.height(18.dp))
         }
     }
 }

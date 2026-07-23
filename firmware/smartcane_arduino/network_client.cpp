@@ -9,10 +9,63 @@
 
 static unsigned long lastWifiRetryMs = 0;
 static unsigned long lastNetworkUnavailableLogMs = 0;
+static unsigned long lastWifiStatusLogMs = 0;
+static unsigned long lastSensorFramePostFailLogMs = 0;
+static bool lastReportedWifiConnected = false;
 
 static bool wifiConfigured() {
   String ssid = SMARTCANE_WIFI_SSID;
   return ssid.length() > 0 && ssid != "YOUR_WIFI_SSID";
+}
+
+static const __FlashStringHelper *wifiStatusName(int status) {
+  switch (status) {
+    case WL_IDLE_STATUS:
+      return F("IDLE");
+    case WL_NO_SSID_AVAIL:
+      return F("NO_SSID");
+    case WL_SCAN_COMPLETED:
+      return F("SCAN_COMPLETED");
+    case WL_CONNECTED:
+      return F("CONNECTED");
+    case WL_CONNECT_FAILED:
+      return F("CONNECT_FAILED");
+    case WL_CONNECTION_LOST:
+      return F("CONNECTION_LOST");
+    case WL_DISCONNECTED:
+      return F("DISCONNECTED");
+    default:
+      return F("UNKNOWN");
+  }
+}
+
+static const __FlashStringHelper *httpErrorName(int code) {
+  switch (code) {
+    case -1:
+      return F("CONNECTION_REFUSED");
+    case -2:
+      return F("SEND_HEADER_FAILED");
+    case -3:
+      return F("SEND_PAYLOAD_FAILED");
+    case -4:
+      return F("NOT_CONNECTED");
+    case -5:
+      return F("CONNECTION_LOST");
+    case -6:
+      return F("NO_STREAM");
+    case -7:
+      return F("NO_HTTP_SERVER");
+    case -8:
+      return F("TOO_LESS_RAM");
+    case -9:
+      return F("ENCODING");
+    case -10:
+      return F("STREAM_WRITE");
+    case -11:
+      return F("READ_TIMEOUT");
+    default:
+      return F("HTTP_ERROR");
+  }
 }
 
 static String makeUrl(const char *path) {
@@ -21,6 +74,38 @@ static String makeUrl(const char *path) {
     base.remove(base.length() - 1);
   }
   return base + path;
+}
+
+static const char *publicRiskLevelForBackend(const char *riskType, RiskLevel localLevel) {
+  if (strcmp(riskType, "sos") == 0 || strcmp(riskType, "fall_detected") == 0) {
+    return "high";
+  }
+  if (strcmp(riskType, "ground_drop") == 0 ||
+      strcmp(riskType, "ground_step") == 0 ||
+      strcmp(riskType, "user_mark") == 0) {
+    return "medium";
+  }
+  if (strcmp(riskType, "front_obstacle") == 0 ||
+      strcmp(riskType, "left_obstacle") == 0 ||
+      strcmp(riskType, "right_obstacle") == 0 ||
+      strcmp(riskType, "down_obstacle") == 0 ||
+      strcmp(riskType, "history_risk") == 0 ||
+      strcmp(riskType, "prolonged_obstacle") == 0 ||
+      strcmp(riskType, "approaching_obstacle") == 0 ||
+      strcmp(riskType, "voice_request") == 0) {
+    return "low";
+  }
+  return riskLevelToString(localLevel);
+}
+
+static uint16_t timeoutForPostPath(const char *path) {
+  if (strncmp(path, "/api/sensor-frames", strlen("/api/sensor-frames")) == 0) {
+    return SMARTCANE_SENSOR_FRAME_HTTP_TIMEOUT_MS;
+  }
+  if (strncmp(path, "/api/ai/deep-risk", strlen("/api/ai/deep-risk")) == 0) {
+    return SMARTCANE_DEEP_RISK_HTTP_TIMEOUT_MS;
+  }
+  return SMARTCANE_HTTP_TIMEOUT_MS;
 }
 
 static void printNetworkUnavailable() {
@@ -46,20 +131,39 @@ static bool postJson(const char *path, const String &body, String *responseOut =
     Serial.println(url);
     return false;
   }
-  http.setTimeout(SMARTCANE_HTTP_TIMEOUT_MS);
+  http.setTimeout(timeoutForPostPath(path));
   http.setReuse(false);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Connection", "close");
 
   int code = http.POST(body);
-  String response = http.getString();
+  String response;
+  if (code > 0) {
+    response = http.getString();
+  }
   http.end();
 
   if (code < 200 || code >= 300) {
+    bool isSensorFrame = strncmp(path, "/api/sensor-frames", strlen("/api/sensor-frames")) == 0;
+    unsigned long now = millis();
+    if (isSensorFrame &&
+        lastSensorFramePostFailLogMs != 0 &&
+        now - lastSensorFramePostFailLogMs < SMARTCANE_HTTP_FAIL_LOG_INTERVAL_MS) {
+      return false;
+    }
+    if (isSensorFrame) {
+      lastSensorFramePostFailLogMs = now;
+    }
     Serial.print(F("[NET] POST "));
     Serial.print(path);
     Serial.print(F(" failed code="));
     Serial.print(code);
+    if (code < 0) {
+      Serial.print(F(" "));
+      Serial.print(httpErrorName(code));
+    }
+    Serial.print(F(" server="));
+    Serial.print(SMARTCANE_SERVER_BASE_URL);
     Serial.print(F(" body="));
     Serial.println(response);
     return false;
@@ -92,17 +196,88 @@ static bool getJson(const String &url, String &responseOut) {
   http.setReuse(false);
   http.addHeader("Connection", "close");
   int code = http.GET();
-  responseOut = http.getString();
+  if (code > 0) {
+    responseOut = http.getString();
+  } else {
+    responseOut = "";
+  }
   http.end();
 
   if (code < 200 || code >= 300) {
     Serial.print(F("[NET] GET failed code="));
     Serial.print(code);
+    if (code < 0) {
+      Serial.print(F(" "));
+      Serial.print(httpErrorName(code));
+    }
+    Serial.print(F(" server="));
+    Serial.print(SMARTCANE_SERVER_BASE_URL);
     Serial.print(F(" body="));
     Serial.println(responseOut);
     return false;
   }
   return true;
+}
+
+void printWifiDiagnostics() {
+  int status = WiFi.status();
+  Serial.print(F("[NET] Wi-Fi status="));
+  Serial.print(status);
+  Serial.print(F(" "));
+  Serial.println(wifiStatusName(status));
+  Serial.print(F("[NET] target ssid="));
+  Serial.print(SMARTCANE_WIFI_SSID);
+  Serial.print(F(" server="));
+  Serial.println(SMARTCANE_SERVER_BASE_URL);
+  if (status == WL_CONNECTED) {
+    Serial.print(F("[NET] ip="));
+    Serial.print(WiFi.localIP());
+    Serial.print(F(" rssi="));
+    Serial.print(WiFi.RSSI());
+    Serial.println(F(" dBm"));
+  } else {
+    Serial.println(F("[NET] hint: keep the phone hotspot page open; iPhone enable Max Compatibility if available"));
+  }
+}
+
+void scanWifiNetworks() {
+  if (!wifiConfigured()) {
+    Serial.println(F("[NET] Wi-Fi not configured"));
+    return;
+  }
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  Serial.println(F("[NET] scanning Wi-Fi..."));
+  int count = WiFi.scanNetworks();
+  if (count < 0) {
+    Serial.print(F("[NET] scan failed code="));
+    Serial.println(count);
+    return;
+  }
+
+  bool foundTarget = false;
+  Serial.print(F("[NET] networks found="));
+  Serial.println(count);
+  for (int i = 0; i < count; ++i) {
+    String ssid = WiFi.SSID(i);
+    if (ssid == SMARTCANE_WIFI_SSID) {
+      foundTarget = true;
+      Serial.print(F("[NET] target found ssid="));
+      Serial.print(ssid);
+      Serial.print(F(" rssi="));
+      Serial.print(WiFi.RSSI(i));
+      Serial.print(F(" channel="));
+      Serial.print(WiFi.channel(i));
+      Serial.print(F(" enc="));
+      Serial.println((int)WiFi.encryptionType(i));
+    }
+  }
+  if (!foundTarget) {
+    Serial.print(F("[NET] target ssid not found: "));
+    Serial.println(SMARTCANE_WIFI_SSID);
+    Serial.println(F("[NET] check hotspot name/password, hotspot user limit, and 2.4GHz compatibility"));
+  }
+  WiFi.scanDelete();
 }
 
 bool connectWifi() {
@@ -118,6 +293,13 @@ bool connectWifi() {
   Serial.print(F("[NET] connecting Wi-Fi SSID="));
   Serial.println(SMARTCANE_WIFI_SSID);
   WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
+#if SMARTCANE_WIFI_DIAG_ON_CONNECT
+  scanWifiNetworks();
+#endif
+  WiFi.disconnect(false);
+  delay(200);
   WiFi.begin(SMARTCANE_WIFI_SSID, SMARTCANE_WIFI_PASSWORD);
 
   unsigned long start = millis();
@@ -130,12 +312,20 @@ bool connectWifi() {
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println(F("[NET] Wi-Fi connect failed; network unavailable"));
+    printWifiDiagnostics();
+    lastReportedWifiConnected = false;
     lastWifiRetryMs = millis();
     return false;
   }
 
   Serial.print(F("[NET] Wi-Fi OK ip="));
   Serial.println(WiFi.localIP());
+  Serial.print(F("[NET] server="));
+  Serial.println(SMARTCANE_SERVER_BASE_URL);
+  Serial.print(F("[NET] rssi="));
+  Serial.print(WiFi.RSSI());
+  Serial.println(F(" dBm"));
+  lastReportedWifiConnected = true;
   return true;
 }
 
@@ -144,10 +334,40 @@ bool networkAvailable() {
 }
 
 void networkClientUpdate() {
-  if (networkAvailable() || !wifiConfigured()) {
+  if (!wifiConfigured()) {
     return;
   }
   unsigned long now = millis();
+
+  if (networkAvailable()) {
+    if (!lastReportedWifiConnected) {
+      Serial.print(F("[NET] Wi-Fi OK ip="));
+      Serial.println(WiFi.localIP());
+      Serial.print(F("[NET] server="));
+      Serial.println(SMARTCANE_SERVER_BASE_URL);
+      Serial.print(F("[NET] rssi="));
+      Serial.print(WiFi.RSSI());
+      Serial.println(F(" dBm"));
+      lastReportedWifiConnected = true;
+    }
+    return;
+  }
+
+  if (lastReportedWifiConnected) {
+    Serial.println(F("[NET] Wi-Fi lost"));
+    printWifiDiagnostics();
+    lastReportedWifiConnected = false;
+  }
+
+  if (now - lastWifiStatusLogMs >= 5000) {
+    lastWifiStatusLogMs = now;
+    Serial.print(F("[NET] Wi-Fi waiting status="));
+    int status = WiFi.status();
+    Serial.print(status);
+    Serial.print(F(" "));
+    Serial.println(wifiStatusName(status));
+  }
+
   if (now - lastWifiRetryMs >= 15000) {
     lastWifiRetryMs = now;
     WiFi.disconnect(false);
@@ -208,8 +428,9 @@ bool uploadEvent(const RiskState &risk,
                  const DistanceReadings &distances,
                  const LocationData &location,
                  const char *extra) {
+  const char *publicLevel = publicRiskLevelForBackend(risk.riskType, risk.level);
   return uploadRiskEvent(risk.riskType,
-                         riskLevelToString(risk.level),
+                         publicLevel,
                          risk.direction,
                          risk.sensor,
                          risk.distanceMm,
@@ -225,7 +446,7 @@ bool uploadSensorFrame(const RiskState &risk,
                        const char *alertType,
                        const char *extra,
                        const char *buttonEvent) {
-  DynamicJsonDocument doc(1024);
+  DynamicJsonDocument doc(1280);
   doc["device_id"] = SMARTCANE_DEVICE_ID;
   doc["lat"] = location.lat;
   doc["lng"] = location.lng;
@@ -237,7 +458,11 @@ bool uploadSensorFrame(const RiskState &risk,
   doc["source"] = "esp32c5";
   doc["location_provider"] = location.provider;
   doc["location_quality"] = location.quality;
-  doc["manual_risk_type"] = risk.level == RISK_LOW ? "none" : risk.riskType;
+  bool hasRiskType = strcmp(risk.riskType, "none") != 0 &&
+                     strcmp(risk.riskType, "sensor_unreliable") != 0;
+  doc["manual_risk_type"] = hasRiskType ? risk.riskType : "none";
+  doc["manual_risk_level"] = publicRiskLevelForBackend(risk.riskType, risk.level);
+  doc["manual_risk_reason"] = risk.reason;
 
   if (alertType != nullptr && alertType[0] != '\0') {
     doc["alert_type"] = alertType;
@@ -307,7 +532,7 @@ bool fetchDeepRisk(const RiskState &risk,
   doc["lat"] = location.lat;
   doc["lng"] = location.lng;
   doc["risk_type"] = risk.riskType;
-  doc["risk_level"] = riskLevelToString(risk.level);
+  doc["risk_level"] = publicRiskLevelForBackend(risk.riskType, risk.level);
   doc["front_cm"] = distances.frontCm;
   doc["left_cm"] = distances.leftCm;
   doc["right_cm"] = distances.rightCm;

@@ -11,7 +11,7 @@ It is designed for the hardware already tested in the supplied Arduino IDE scree
 - MPR121/HW-017 touch module on TCA `CH7` at `0x5A`
 - Active buzzer on `GPIO4`
 - ESP-SensairShuttle BMI270 motion sensor for fall detection
-- PCA9685 vibration feedback on blue board channels `CH8/CH9/CH10`
+- PCA9685 vibration feedback on the blue board through TCA `CH6`, channels `CH0/CH1/CH2`
 
 All pins, I2C addresses, thresholds, Wi-Fi, backend URL, and device ID are in `config.h`.
 
@@ -36,14 +36,17 @@ Install these from Arduino IDE Library Manager:
 | VL53L1X left | TCA `CH3` |
 | VL53L1X right | TCA `CH4` |
 | VL53L1X down | TCA `CH5` |
-| Left vibration motor | PCA9685 `CH8`: signal to `PWM/SIG`, red to `V+`, black/brown to `GND` |
-| Right vibration motor | PCA9685 `CH9`: signal to `PWM/SIG`, red to `V+`, black/brown to `GND` |
-| Center vibration motor | PCA9685 `CH10`: signal to `PWM/SIG`, red to `V+`, black/brown to `GND` |
+| PCA9685 blue board | TCA `CH6`, address `0x40` |
+| Left vibration motor | PCA9685 `CH0`: signal to `PWM/SIG`, red to `V+`, black/brown to `GND` |
+| Right vibration motor | PCA9685 `CH1`: signal to `PWM/SIG`, red to `V+`, black/brown to `GND` |
+| Center vibration motor | PCA9685 `CH2`: signal to `PWM/SIG`, red to `V+`, black/brown to `GND` |
 | Buzzer | `GPIO4` |
 | Physical button | `GPIO5`, active low with internal pull-up; short press requests Android voice input, long press triggers SOS |
 | BMI270 | SensairShuttle BMI270/BMM350 ShuttleBoard; current hardware appears at I2C `0x69`; firmware probes both `0x68/0x69` and uploads the Bosch BMI270 config before reading acceleration |
 
-Keep each three-pin motor plug orientation unchanged: black/brown to `GND`, red to `V+`, and white/orange/yellow to signal/PWM. Do not put motor signals on ESP32 GPIO `8/9/10` while using the BMI270/BMM350 daughter board; PCA9685 `CH8/CH9/CH10` are safe because they are I2C PWM channels, not ESP32 pins.
+Keep each three-pin motor plug orientation unchanged: black/brown to `GND`, red to `V+`, and white/orange/yellow to signal/PWM. Do not put motor signals on ESP32 GPIO while using the full cane build; the blue PCA9685 board is controlled through I2C on TCA `CH6`. The actual motor plugs are on blue board positions `0/1/2`: left/right/center.
+
+For the blue PCA9685 shield, the green terminal `V+ / GND` is the motor power path. The PCA9685 chip itself also needs a valid logic `VCC / GND` path. On shield variants with `VCC select`, make sure only one side is selected. For ESP32-C5 tests, prefer the 3.3 V logic side when the board supports it; never short the 5 V and 3.3 V sides together. With the replacement motor board installed, keep the existing I2C wiring and verify `pca` shows `0x40` before testing `m1/m2/m3`.
 
 If your final wiring returns to the original `CH0/CH1/CH2/CH3` ToF plan, only change these macros in `config.h`:
 
@@ -62,12 +65,12 @@ Edit `config.h`:
 #define SMARTCANE_DEVICE_ID "cane_001"
 #define SMARTCANE_WIFI_SSID "xin"
 #define SMARTCANE_WIFI_PASSWORD "22222222"
-#define SMARTCANE_SERVER_BASE_URL "http://your_pc_lan_ip:8000"
+#define SMARTCANE_SERVER_BASE_URL "http://118.31.221.165:8016"
 #define SMARTCANE_MOCK_LAT 31.230400
 #define SMARTCANE_MOCK_LNG 121.473700
 ```
 
-Use your PC LAN IP, not `127.0.0.1`, because `127.0.0.1` from the ESP32 means the ESP32 itself. For a phone-hotspot test, connect both the PC and ESP32-C5 to the phone hotspot, run the backend with `--host 0.0.0.0`, and set `SMARTCANE_SERVER_BASE_URL` to the PC IPv4 shown by `ipconfig`.
+For the current group deployment, keep `SMARTCANE_SERVER_BASE_URL` pointed at `http://118.31.221.165:8016`. For temporary local testing, use your PC LAN IP, not `127.0.0.1`, because `127.0.0.1` from the ESP32 means the ESP32 itself.
 
 For an independent product build, keep the ESP32-C5 on a reachable Wi-Fi/hotspot and point `SMARTCANE_SERVER_BASE_URL` at a cloud or LAN backend. The Android phone supplies the real Amap/GPS location to the backend; the cane-side coordinates are only a fallback until a GNSS module or phone-to-cane location bridge is added.
 
@@ -87,9 +90,9 @@ Local safety does not depend on Wi-Fi:
 
 - Samples four ToF distances every `500 ms`.
 - Detects front warning/danger by distance thresholds.
-- Detects ground drops from the down-facing sensor.
+- Detects close ground obstacles, stair lower edges around `45-90 cm`, and ground drops from the down-facing sensor.
 - Fuses nearby history when available.
-- Drives obstacle vibration through PCA9685 `CH8/CH9/CH10`.
+- Drives obstacle vibration through PCA9685 `CH0/CH1/CH2` on TCA `CH6`.
 - Uses the buzzer only for high-risk cases, ground drops, and SOS.
 - Debounces the physical button. Short press uploads `voice_request` for the blind Android app; long press after `2 s` uploads `sos`.
 - Reads MPR121 touch electrodes 0-5.
@@ -169,7 +172,7 @@ Use `scan`, `pca`, `imu`, `read`, `vib all`, and `beep` for real hardware checks
 4. Put an obstacle in front: Serial prints one risk event, center motor vibrates, and high danger also beeps.
 5. Keep the obstacle still: the same place/same risk is not printed repeatedly.
 6. Open left/right side space or move to another grid cell: the left/right motor suggests the safer direction and a new event can be recorded.
-7. Lift the down-facing sensor: ground drop triggers strong vibration and buzzer once for that place.
+7. Point the down-facing sensor at a close curb below `20 cm` or a stair lower edge around `45-90 cm`: `ground_step` is uploaded as medium risk. Lift it above about `150 cm`: `ground_drop` triggers strong vibration and buzzer once for that place.
 8. Run `mark` or long-press touch E1: backend records a user risk point.
 9. Run `path`: local walked route/risk ring buffer is printed.
 10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`: the second cane sees the historical risk area.

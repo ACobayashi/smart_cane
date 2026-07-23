@@ -1,13 +1,13 @@
 ﻿package com.nankai.smartcane.data.model
 
 enum class UserRole(val displayName: String, val apiValue: String) {
-    Blind("盲人用户", "blind"),
-    Companion("陪护用户", "companion")
+    Blind("用户", "blind"),
+    Companion("陪护人", "companion")
 }
 
 enum class AppMode(val displayName: String) {
-    Blind("盲人导航模式"),
-    Companion("陪护模式")
+    Blind("用户"),
+    Companion("陪护人")
 }
 
 enum class PairingFlowStatus(val displayName: String) {

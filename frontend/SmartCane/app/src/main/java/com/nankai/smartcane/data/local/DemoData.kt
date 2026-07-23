@@ -7,15 +7,16 @@ import com.nankai.smartcane.data.model.UserProfile
 import com.nankai.smartcane.data.model.UserRole
 
 object DemoData {
+    const val TEST_ACCOUNT = "demo"
     const val BLIND_ACCOUNT = "blind_demo"
     const val COMPANION_ACCOUNT = "companion_demo"
     const val DEMO_PASSWORD = "123456"
     const val DEFAULT_PAIRING_CODE = "583216"
 
     val blindUser = UserProfile(
-        userId = "user_blind_001",
-        account = BLIND_ACCOUNT,
-        displayName = "张明",
+        userId = "user_demo_001",
+        account = TEST_ACCOUNT,
+        displayName = "演示用户",
         role = UserRole.Blind,
         isDemo = true
     )
@@ -54,4 +55,3 @@ object DemoData {
         timeText = "刚刚更新"
     )
 }
-

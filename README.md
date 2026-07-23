@@ -54,7 +54,7 @@ docs/
 | TCA9548A | I2C multiplexer for four identical VL53L1X ToF sensors |
 | 4 x VL53L1X | Front, left, right, and down distance sensing |
 | MPR121 / HW-017 | Capacitive touch handle |
-| PCA9685 PWM/Servo Shield | Blue motor PWM board on root I2C, address `0x40` |
+| PCA9685 PWM/Servo Shield | Blue motor PWM board on TCA `CH6`, address `0x40` |
 | 3 x 1027 3V vibration motors | Left, right, and center tactile feedback through PCA9685 channels |
 | Active buzzer | High-risk, ground-drop, and SOS alert |
 | Physical button | Short press requests Android voice input; long press triggers SOS |
@@ -71,10 +71,10 @@ Recommended current bench wiring from the Arduino screenshots:
 | Right VL53L1X | TCA `CH4` |
 | Down VL53L1X | TCA `CH5` |
 | MPR121 | TCA `CH7`, address `0x5A` |
-| PCA9685 | root I2C, address `0x40` |
-| Left vibration signal | PCA9685 `CH8` PWM/SIG, red to `V+`, black/brown to `GND` |
-| Right vibration signal | PCA9685 `CH9` PWM/SIG, red to `V+`, black/brown to `GND` |
-| Center vibration signal | PCA9685 `CH10` PWM/SIG, red to `V+`, black/brown to `GND` |
+| PCA9685 | TCA `CH6`, address `0x40` |
+| Left vibration signal | PCA9685 `CH0` PWM/SIG, red to `V+`, black/brown to `GND` |
+| Right vibration signal | PCA9685 `CH1` PWM/SIG, red to `V+`, black/brown to `GND` |
+| Center vibration signal | PCA9685 `CH2` PWM/SIG, red to `V+`, black/brown to `GND` |
 | Buzzer | `GPIO4` |
 | Physical button | `GPIO5`, active low; short press `voice_request`, long press `sos` |
 
@@ -86,6 +86,7 @@ Power note for the standalone cane:
 - PCA9685 blue motor board: motor `V+` can use the separate 3.7V battery already wired for the vibration motors.
 - The ESP32 GND, PCA9685 logic GND, and motor battery GND must be common ground.
 - PCA9685 logic `VCC` should be tied to ESP32 3.3V logic power; do not power ESP32 logic from the motor `V+` rail.
+- The actual motor plugs are on blue PCA9685 positions `0/1/2`: left/right/center.
 
 ## Arduino Libraries
 
@@ -124,7 +125,7 @@ connect the PC, ESP32-C5, and Android test phone to the same hotspot and use
 the PC hotspot/LAN IPv4:
 
 ```cpp
-#define SMARTCANE_SERVER_BASE_URL "http://192.168.1.100:8000"
+#define SMARTCANE_SERVER_BASE_URL "http://118.31.221.165:8016"
 ```
 
 Do not use `127.0.0.1` on the ESP32.
@@ -137,13 +138,13 @@ py -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env
-uvicorn main:app --host 0.0.0.0 --port 8000
+uvicorn main:app --host 0.0.0.0 --port 8016
 ```
 
 Health check:
 
 ```text
-http://127.0.0.1:8000/api/health
+http://118.31.221.165:8016/api/health
 ```
 
 Useful operation endpoints:
@@ -171,10 +172,10 @@ Cloud LLM and speech services are optional. Put keys only in `backend/.env`; nev
 1. Start the backend.
 2. Flash the Arduino firmware with `SMARTCANE_DEVICE_ID="cane_001"`.
 3. Run `status` or `read` in Serial Monitor to print one ToF/risk snapshot.
-4. Put an obstacle in front. The firmware samples every `500 ms`, prints one changed risk event, vibrates the center motor, and high danger beeps.
+4. Put an obstacle in front. The firmware samples every `500 ms`, prints one changed risk event, and uses vibration to suggest slow/left/right handling. One-shot distance obstacles are low-risk map points.
 5. Keep the cane still with the same obstacle. The same place/same risk is not printed, vibrated, or uploaded repeatedly.
 6. Leave more space on the left or right, clear the risk and trigger it again, or move into another location grid. The matching motor suggests the safer bypass direction and a new event can be recorded.
-7. Raise the down-facing sensor. The firmware detects a ground-drop risk, vibrates strongly, beeps, and uploads `ground_drop` once for that place.
+7. Lower the down-facing distance below `20 cm` to simulate a curb/raised step, or aim the slanted lower sensor at a stair lower edge around `45-90 cm` (about `50 cm` on the current cane); the firmware uploads `ground_step` as medium risk. Raise it above about `150 cm` to simulate a pit/drop; the firmware uploads `ground_drop`.
 8. Long-press touch electrode E1 or run `mark`. The backend records `user_mark` at the current route point.
 9. Run `path` to print the local route/risk ring buffer.
 10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`. The second cane receives historical risk statistics and fuses them into local risk.
@@ -195,17 +196,17 @@ D:\smartcane\frontend\SmartCane
 The app backend address is configured in:
 
 ```text
-frontend\SmartCane\app\src\main\java\com\nankai\smartcane\data\network\SmartCaneApiClient.kt
+frontend\SmartCane\local.properties
 ```
 
 For a real phone on the same Wi-Fi, use the computer IPv4, for example:
 
-```kotlin
-const val BASE_URL = "http://10.136.53.207:8000"
+```properties
+BACKEND_BASE_URL=http://118.31.221.165:8016
 ```
 
 For the Android Emulator, use:
 
 ```kotlin
-const val BASE_URL = "http://10.0.2.2:8000"
+const val BASE_URL = "http://118.31.221.165:8016"
 ```

@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,8 +13,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -30,7 +33,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -65,8 +70,8 @@ fun BlindPairingScreen(
     onReject: () -> Unit,
     onUnlink: () -> Unit,
     onBack: () -> Unit,
-    onLogout: () -> Unit,
-    onClearDemoData: () -> Unit
+    onSwitchToCompanion: () -> Unit,
+    onLogout: () -> Unit
 ) {
     val context = LocalContext.current
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -133,7 +138,7 @@ fun BlindPairingScreen(
 
         Spacer(Modifier.height(4.dp))
         BigSecondaryButton("返回首页", onClick = onBack)
-        BigSecondaryButton("清除演示数据", onClick = onClearDemoData)
+        BigPrimaryButton("切换到陪护人界面", onClick = onSwitchToCompanion)
         BigSecondaryButton("退出登录", onClick = onLogout)
     }
 
@@ -164,10 +169,11 @@ fun CompanionPairingScreen(
     var localMessage by remember { mutableStateOf<String?>(null) }
     var showUnlinkConfirm by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(message) { if (!message.isNullOrBlank()) localMessage = message }
+    val matchedPreview = preview?.takeIf { it.code == code }
     val step = when {
         relationStatus == RelationStatus.Active || pairingStatus == PairingFlowStatus.Connected -> 3
         pairingStatus == PairingFlowStatus.Waiting -> 3
-        preview != null -> 2
+        matchedPreview != null -> 2
         else -> 1
     }
 
@@ -175,7 +181,7 @@ fun CompanionPairingScreen(
         modifier = Modifier.fillMaxSize().background(SmartCaneColors.Background).statusBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        ScreenTitle("添加陪护对象", "输入对方的邀请码完成关联")
+        ScreenTitle("\u901a\u8fc7\u9080\u8bf7\u7801\u6dfb\u52a0\u966a\u62a4\u5bf9\u8c61", "\u8f93\u5165\u5bf9\u65b9\u7684\u9080\u8bf7\u7801\u5b8c\u6210\u5173\u8054")
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StepPill("1 输入", step >= 1, Modifier.weight(1f))
             StepPill("2 确认", step >= 2, Modifier.weight(1f))
@@ -187,23 +193,31 @@ fun CompanionPairingScreen(
                 Text("六位邀请码", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = SmartCaneColors.TextPrimary)
                 OutlinedTextField(
                     value = code,
-                    onValueChange = { if (it.length <= 6 && it.all(Char::isDigit)) code = it; localMessage = null },
+                    onValueChange = { input -> code = input.filter(Char::isDigit).take(6); localMessage = null },
                     label = { Text("配对码") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                BigPrimaryButton(if (isBusy) "查询中…" else "查询", enabled = code.length == 6 && !isBusy, onClick = { onFindCode(code) })
+                BigPrimaryButton(if (isBusy) "\u67e5\u627e\u4e2d…" else "\u67e5\u627e\u7528\u6237", enabled = code.length == 6 && !isBusy && relationStatus != RelationStatus.Active, onClick = { onFindCode(code) })
             }
         }
 
-        if (preview != null) {
+        if (matchedPreview != null) {
             Card(shape = SmartCaneShapes.Card, colors = CardDefaults.cardColors(containerColor = SmartCaneColors.Surface), modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("确认对象", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = SmartCaneColors.TextPrimary)
-                    LabelValueRow("被陪护人", preview.blindUser.displayName)
-                    LabelValueRow("设备", "智能盲杖")
-                    BigPrimaryButton(if (isBusy) "发送中…" else "发送申请", enabled = !isBusy, onClick = { onSendRequest(code) })
+                    Text("\u786e\u8ba4\u5bf9\u8c61", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = SmartCaneColors.TextPrimary)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Surface(modifier = Modifier.size(46.dp), shape = CircleShape, color = SmartCaneColors.Primary) {
+                            Box(contentAlignment = Alignment.Center) { Text("\u76f2", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold) }
+                        }
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(matchedPreview.blindUser.displayName, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = SmartCaneColors.TextPrimary)
+                            Text("\u786e\u8ba4\u540e\u5c06\u5411\u5bf9\u65b9\u53d1\u9001\u5173\u8054\u7533\u8bf7\u3002", color = SmartCaneColors.TextSecondary, fontSize = 14.sp)
+                        }
+                    }
+                    LabelValueRow("\u8bbe\u5907", matchedPreview.caneDevice.name)
+                    BigPrimaryButton(if (isBusy) "\u63d0\u4ea4\u4e2d?" else "\u786e\u8ba4\u5173\u8054", enabled = !isBusy && relationStatus != RelationStatus.Active, onClick = { onSendRequest(matchedPreview.code) })
                 }
             }
         }

@@ -16,7 +16,7 @@ py -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env
-uvicorn main:app --host 0.0.0.0 --port 8000
+uvicorn main:app --host 0.0.0.0 --port 8016
 ```
 
 ## Environment
@@ -164,9 +164,9 @@ The `voice_prompt` field is LLM-enhanced when `ARK_API_KEY` or `OPENAI_API_KEY` 
   "device_id": "cane_001",
   "lat": 31.2304,
   "lng": 121.4737,
-  "risk_type": "ground_drop",
-  "level": "high",
-  "risk_level": "high",
+  "risk_type": "ground_step",
+  "level": "medium",
+  "risk_level": "medium",
   "direction": "stop",
   "sensor": "tof_down",
   "distance_mm": 950,
@@ -174,7 +174,7 @@ The `voice_prompt` field is LLM-enhanced when `ARK_API_KEY` or `OPENAI_API_KEY` 
   "front_cm": 180,
   "left_cm": 130,
   "right_cm": 120,
-  "down_cm": 95,
+  "down_cm": 50,
   "extra_json": "source=auto_detected"
 }
 ```
@@ -187,7 +187,7 @@ The `voice_prompt` field is LLM-enhanced when `ARK_API_KEY` or `OPENAI_API_KEY` 
   "lat": 31.2304,
   "lng": 121.4737,
   "risk_type": "front_obstacle",
-  "risk_level": "medium",
+  "risk_level": "low",
   "front_cm": 75,
   "left_cm": 130,
   "right_cm": 55,
@@ -198,7 +198,7 @@ The `voice_prompt` field is LLM-enhanced when `ARK_API_KEY` or `OPENAI_API_KEY` 
 }
 ```
 
-The model is `tiny-mlp-risk-v1`, implemented in `backend/deep_model.py`. It runs on the backend only; ESP32-C5 local obstacle avoidance remains rule-based and offline-safe.
+The model is `tiny-mlp-risk-tier-v2`, implemented in `backend/deep_model.py`. It runs on the backend only; ESP32-C5 local obstacle avoidance remains rule-based and offline-safe.
 
 ## Collaborative Run
 

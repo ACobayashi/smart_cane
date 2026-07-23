@@ -21,7 +21,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -35,7 +34,6 @@ import com.nankai.smartcane.data.network.EmergencyAlertDto
 import com.nankai.smartcane.ui.components.BigPrimaryButton
 import com.nankai.smartcane.ui.components.BigSecondaryButton
 import com.nankai.smartcane.ui.components.LabelValueRow
-import com.nankai.smartcane.ui.components.ScreenTitle
 import com.nankai.smartcane.ui.components.SmartBg
 import com.nankai.smartcane.ui.components.SmartDark
 import com.nankai.smartcane.ui.components.SmartMuted
@@ -43,6 +41,7 @@ import com.nankai.smartcane.ui.components.StatusPill
 
 @Composable
 fun CompanionHomeScreen(
+    userName: String,
     relation: CareRelation?,
     relationUpdateText: String,
     urgentAlert: EmergencyAlertDto?,
@@ -52,15 +51,14 @@ fun CompanionHomeScreen(
     onViewDevice: () -> Unit,
     onSwitchMode: () -> Unit,
     onLogout: () -> Unit,
-    onClearDemoData: () -> Unit,
     onDismissAlert: () -> Unit,
     onUnlink: () -> Unit
 ) {
     var showUnlink by rememberSaveable { mutableStateOf(false) }
-    val scenario = DemoData.navigationScenario
     val cane = relation?.caneDevice ?: DemoData.defaultCane
     val active = relation?.status == RelationStatus.Active
-    val blindName = if (active) relation?.blindUser?.displayName ?: DemoData.blindUser.displayName else "未关联"
+    val careTargetName = if (active) relation?.blindUser?.displayName ?: DemoData.blindUser.displayName else "未关联"
+    val latestRisk = urgentAlert?.message ?: if (active) DemoData.latestRiskAlert.message else "暂无"
 
     Column(
         modifier = Modifier
@@ -71,31 +69,38 @@ fun CompanionHomeScreen(
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        ScreenTitle("陪护", "状态、位置与风险总览")
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics { contentDescription = "陪护人$userName" },
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(userName, color = SmartDark, fontSize = 30.sp, fontWeight = FontWeight.Black)
+            Text("陪护人", color = SmartMuted, fontSize = 16.sp, lineHeight = 22.sp)
+        }
 
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .semantics { contentDescription = "被陪护人$blindName，${if (active) "正在导航" else "未关联"}" },
-            shape = androidx.compose.foundation.shape.RoundedCornerShape(30.dp),
-            colors = CardDefaults.cardColors(containerColor = Color.Transparent)
+                .semantics { contentDescription = "关联用户$careTargetName，${if (active) "已关联" else "未关联"}" },
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White)
         ) {
             Column(
-                modifier = Modifier
-                    .background(Brush.linearGradient(listOf(Color(0xFF0F766E), Color(0xFF2563EB))))
-                    .padding(22.dp),
+                modifier = Modifier.padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text(blindName, color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Black)
-                Text(if (active) "正在导航 · ${scenario.destination}" else "请先添加陪护对象", color = Color(0xFFE0F2FE), fontSize = 16.sp, lineHeight = 23.sp)
-                if (!active) BigPrimaryButton("添加陪护对象", onClick = onAddCareTarget, containerColor = Color.White, contentColor = Color(0xFF0F766E))
+                Text("关联用户", color = SmartMuted, fontSize = 15.sp)
+                Text(careTargetName, color = SmartDark, fontSize = 26.sp, fontWeight = FontWeight.Black)
+                Text(if (active) "可以查看位置、风险、SOS 和设备状态。" else "请先添加需要陪护的用户。", color = SmartMuted, fontSize = 16.sp, lineHeight = 23.sp)
+                if (!active) BigPrimaryButton("添加用户", onClick = onAddCareTarget)
             }
         }
 
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            CompactMetric("导航", if (active) "直行" else "暂无", Modifier.weight(1f))
-            CompactMetric("盲杖", if (cane.online) "在线" else "离线", Modifier.weight(1f))
-            CompactMetric("SOS", "未触发", Modifier.weight(1f))
+            CompactMetric("关联", if (active) "已建立" else "未关联", Modifier.weight(1f))
+            CompactMetric("设备", if (cane.online) "在线" else "离线", Modifier.weight(1f))
+            CompactMetric("SOS", if (urgentAlert != null) "有提醒" else "正常", Modifier.weight(1f))
         }
 
         Card(
@@ -104,7 +109,7 @@ fun CompanionHomeScreen(
             colors = CardDefaults.cardColors(containerColor = Color.White)
         ) {
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("当前重点", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = SmartDark)
+                Text("功能总览", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = SmartDark)
                 if (urgentAlert != null) {
                     LabelValueRow(urgentAlert.title, urgentAlert.message)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -112,9 +117,10 @@ fun CompanionHomeScreen(
                         TextButton(onClick = onDismissAlert) { Text("已知晓") }
                     }
                 }
-                LabelValueRow("下一条建议", if (active) scenario.nextInstruction else "暂无")
-                LabelValueRow("最近风险", urgentAlert?.message ?: if (active) DemoData.latestRiskAlert.message else "暂无")
-                LabelValueRow("盲杖", if (cane.online) "已连接" else "未连接")
+                LabelValueRow("位置", if (active) "查看用户当前位置" else "关联后可用")
+                LabelValueRow("风险", latestRisk)
+                LabelValueRow("设备", if (cane.online) "已连接" else "未连接")
+                LabelValueRow("SOS", if (urgentAlert != null) "收到紧急提醒" else "暂无紧急提醒")
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     StatusPill(if (cane.online) "在线" else "离线")
                     Text("最后更新 ${cane.lastSeenText}", color = SmartDark, fontSize = 16.sp, fontWeight = FontWeight.Bold)
@@ -132,8 +138,7 @@ fun CompanionHomeScreen(
             BigSecondaryButton("管理", onClick = onAddCareTarget, modifier = Modifier.weight(1f))
         }
         if (active) BigSecondaryButton("解除关联", onClick = { showUnlink = true })
-        BigSecondaryButton("切换到盲人模式", onClick = onSwitchMode)
-        BigSecondaryButton("清除演示数据", onClick = onClearDemoData)
+        BigSecondaryButton("切换到用户入口", onClick = onSwitchMode)
         BigSecondaryButton("退出登录", onClick = onLogout)
     }
 
@@ -157,5 +162,3 @@ private fun CompactMetric(title: String, value: String, modifier: Modifier = Mod
         }
     }
 }
-
-

@@ -1,7 +1,9 @@
 import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
 
@@ -29,7 +31,7 @@ android {
         buildConfigField(
             "String",
             "BACKEND_BASE_URL",
-            "\"${localProperties.getProperty("BACKEND_BASE_URL", "http://10.0.2.2:8000")}\""
+            "\"${localProperties.getProperty("BACKEND_BASE_URL", "http://118.31.221.165:8016")}\""
         )
     }
 
@@ -48,6 +50,12 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_11)
+    }
+}
+
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
@@ -57,6 +65,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation("com.amap.api:3dmap:10.0.600")
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

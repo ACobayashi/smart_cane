@@ -8,6 +8,38 @@ This document is the shared contract for team members A, B, and C.
 
 The firmware uses Arduino IDE / Arduino framework and builds from `firmware/smartcane_arduino/smartcane_arduino.ino`.
 
+## Software Functions
+
+SmartCane is split into four visible parts:
+
+- User app: shows live map, current position, nearby risk points, AI advice, SOS, and device status.
+- Companion app: shows the companion username, linked user status, user location, risk records, SOS alerts, and device status.
+- FastAPI backend: receives ESP32-C5 and Android uploads, writes SQLite, reads collaborative risk history, and calls the cloud LLM.
+- ESP32-C5 firmware: fuses ToF, touch/button, IMU, and location data, then uploads only meaningful risk events.
+
+## Required Team Interfaces
+
+These endpoints are the stable contract between B and C:
+
+| Function | Method | Path | Used By |
+| --- | --- | --- | --- |
+| Map risk points | `GET` | `/api/risk-events` | Android map |
+| Location upload | `POST` | `/api/locations` | ESP32-C5 / Android |
+| Latest location | `GET` | `/api/locations/latest?device_id=...` | Android map / companion |
+| Location history | `GET` | `/api/locations/history?device_id=...` | Android route line |
+| User risk mark | `POST` | `/api/risk-events` | Android user mark |
+| Nearby shared risks | `GET` | `/api/risks/nearby?lat=...&lng=...&radius=...` | ESP32-C5 / Android |
+| AI advice | `POST` | `/api/ai/advice` or `/api/ai-advice` | Android / ESP32-C5 integration test |
+| Backend status | `GET` | `/api/ai/status` | Demo check |
+
+Map point fields required by frontend:
+
+- `lat`
+- `lng`
+- `risk_type`
+- `level` or `risk_level`
+- `ai_message`
+
 ## Units
 
 | Field | Unit |
@@ -38,6 +70,7 @@ Recommended values:
 - `left_obstacle`
 - `right_obstacle`
 - `ground_drop`
+- `ground_step`
 - `history_risk`
 - `user_mark`
 - `sos`
@@ -88,8 +121,8 @@ Request:
   "lat": 31.2304,
   "lng": 121.4737,
   "risk_type": "front_obstacle",
-  "level": "high",
-  "risk_level": "high",
+  "level": "low",
+  "risk_level": "low",
   "direction": "turn_left",
   "sensor": "tof_front",
   "distance_mm": 450,
@@ -120,7 +153,7 @@ Response:
   "lat": 31.2304,
   "lng": 121.4737,
   "risk_type": "front_obstacle",
-  "risk_level": "high",
+  "risk_level": "low",
   "level": "high",
   "direction": "turn_left",
   "sensor": "tof_front",
@@ -244,11 +277,20 @@ Important values:
 - Touch: MPR121/HW-017 on `TCA CH7`
 - Buzzer: `GPIO4`, low-level trigger
 - Button: `GPIO5`, active low. Short press sends `voice_request` to blind Android app; long press sends `sos`.
-- Motors: blue PCA9685 PWM/Servo Shield at `0x40`, left `CH8`, right `CH9`, center `CH10`
+- Motors: blue PCA9685 PWM/Servo Shield at `0x40` on TCA `CH6`, left `CH0`, right `CH1`, center `CH2` for the actual bench wiring
 
 ## POST `/api/sensor-frames`
 
-Preferred full-chain frame upload from the ESP32-C5 or Android integration tools. The backend computes a hardware-aware risk score, stores medium/high risks, stores button `voice_request`, and returns frontend voice/feedback fields.
+Preferred full-chain frame upload from the ESP32-C5 or Android integration tools. The backend computes a hardware-aware immediate risk score, returns frontend voice/feedback fields, and separately computes `map_weight` for collaborative map storage.
+
+Current slanted-cane thresholds:
+
+- Front: low-risk distance warning below `110cm`; readings below `35cm` get stronger local buzzer/vibration but are still stored as low-risk distance events.
+- Left/right side: warning below `20cm`, danger below `12cm`, because normal sweeping can touch nearby objects.
+- Front sensor: `front_obstacle` is low risk below `110cm`; near-collision readings below `35cm` are urgent locally but low-weight on the shared map.
+- Down sensor: `ground_step` medium risk below `20cm`, or when the slanted lower sensor sees a stair lower edge around `45-90cm` (typical measured edge is about `50cm`); `ground_drop` medium risk above roughly `150cm` (`55cm` slanted ground baseline + `95cm` drop threshold).
+- Risk tier policy: SOS and `fall_detected` are `high`; `ground_drop` and `ground_step` are `medium`; ordinary ToF sweep risks (`front_obstacle`, `left_obstacle`, `right_obstacle`, `down_obstacle`) are `low`.
+- Ordinary one-shot ToF obstacles are useful for immediate phone feedback but have low `map_weight`; fall/SOS have the highest map weight, ground drop and user mark are stored as collaborative map points, and prolonged/approaching obstacle alerts use small map weights.
 
 ```json
 {
@@ -288,18 +330,25 @@ Response:
   "accepted": true,
   "risk": {
     "risk_type": "front_obstacle",
-    "risk_level": "high",
-    "risk_score": 89.5,
+    "risk_level": "low",
+    "risk_score": 34.0,
     "direction": "turn_left",
     "voice_prompt": "前方 42 厘米有障碍，左侧较空，请向左慢行。",
     "feedback": {
-      "buzzer": {"enabled": true, "beeps": 2, "pattern": "obstacle"},
-      "vibration": {"left": 80, "right": 0, "center": 100, "duration_ms": 650}
+      "buzzer": {"enabled": false, "beeps": 0, "pattern": "none"},
+      "vibration": {"left": 45, "right": 0, "center": 45, "duration_ms": 280}
     }
   },
   "stored_event": {}
 }
 ```
+
+Important returned risk fields for Android/frontend:
+
+- `risk.risk_reason` / `risk.riskReason`: human-readable reason, for example `前方距离 42cm 小于斜持盲杖前向阈值 110/35cm`.
+- `risk.map_weight` / `risk.mapWeight`: collaborative-map weight. Ordinary one-shot ToF obstacles are low weight; fall/SOS are highest, ground-drop/user-mark are stored as collaborative map points, prolonged/approaching obstacle alerts are companion hints.
+- `risk.voice_prompt`: Chinese voice text for the blind-side app.
+- `risk.feedback`: suggested buzzer/vibration action from backend.
 
 ## Amap / Gaode Backend Proxy
 
@@ -331,7 +380,7 @@ The route score combines walking cost with stored collaborative risk points near
 
 ## POST `/api/ai/advice`
 
-Backend AI advice endpoint. ESP32-C5 can call it for assisted text, but local obstacle avoidance must not depend on it. The response includes a lightweight deep-learning risk score from `tiny-mlp-risk-v1`.
+Backend AI advice endpoint. ESP32-C5 can call it for assisted text, but local obstacle avoidance must not depend on it. The response includes a lightweight deep-learning risk score from `tiny-mlp-risk-tier-v2`.
 
 ```json
 {
@@ -339,7 +388,7 @@ Backend AI advice endpoint. ESP32-C5 can call it for assisted text, but local ob
   "lat": 31.2304,
   "lng": 121.4737,
   "risk_type": "front_obstacle",
-  "risk_level": "high",
+  "risk_level": "low",
   "front_cm": 45,
   "left_cm": 130,
   "right_cm": 55,
@@ -381,7 +430,7 @@ Response:
   "lat": 31.2304,
   "lng": 121.4737,
   "deep_learning": {
-    "model": "tiny-mlp-risk-v1",
+    "model": "tiny-mlp-risk-tier-v2",
     "score": 0.61,
     "mlp_score": 0.61,
     "safety_floor": 0.48,
@@ -485,8 +534,9 @@ Optional simulator-compatible upload:
 
 A should upload:
 
-- `ground_drop` immediately when down-facing ToF detects a drop.
-- `front_obstacle` automatically when high risk persists.
+- `ground_drop` immediately when down-facing ToF detects a clear drop/pit.
+- `ground_step` immediately when down-facing ToF detects a close curb/step/protrusion or the lower stair edge around `45-90cm`.
+- `front_obstacle` / `left_obstacle` / `right_obstacle` as low-risk distance events after local de-duplication; they keep a small map weight.
 - `user_mark` when touch electrode 1 is long-pressed.
 - `sos` when the SOS button is held.
 

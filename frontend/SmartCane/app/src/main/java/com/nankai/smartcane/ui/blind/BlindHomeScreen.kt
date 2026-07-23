@@ -7,7 +7,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,14 +21,13 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,7 +35,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -51,15 +52,17 @@ import com.nankai.smartcane.data.network.EmergencyAlertDto
 import com.nankai.smartcane.ui.design.SmartCaneColors
 import com.nankai.smartcane.viewmodel.SosActionState
 import com.nankai.smartcane.viewmodel.VoiceState
+import kotlinx.coroutines.withTimeoutOrNull
 
 @Composable
 fun BlindHomeScreen(
     voiceState: VoiceState,
     sosState: SosActionState,
     message: String?,
+    voiceTranscript: String?,
     urgentAlert: EmergencyAlertDto?,
-    onVoiceToggle: () -> Unit,
-    onRepeat: () -> Unit,
+    onVoiceStart: () -> Unit,
+    onVoiceStop: () -> Unit,
     onSos: () -> Unit,
     onDismissAlert: () -> Unit,
     onOpenSettings: () -> Unit
@@ -107,33 +110,12 @@ fun BlindHomeScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                VoiceOrb(state = voiceState, onPressToggle = onVoiceToggle)
+                VoiceOrb(state = voiceState, onVoiceStart = onVoiceStart, onVoiceStop = onVoiceStop)
                 Spacer(Modifier.height(18.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(
-                        onClick = onRepeat,
-                        modifier = Modifier.weight(1f).height(58.dp),
-                        shape = RoundedCornerShape(18.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155))
-                    ) { Text("重复播报", fontSize = 17.sp, fontWeight = FontWeight.Bold) }
-                    Button(
-                        onClick = onVoiceToggle,
-                        modifier = Modifier.weight(1f).height(58.dp),
-                        shape = RoundedCornerShape(18.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5))
-                    ) { Text(if (voiceState == VoiceState.Listening) "结束" else "说话", fontSize = 17.sp, fontWeight = FontWeight.Bold) }
-                }
-                Text(
-                    text = when (voiceState) {
-                        VoiceState.Idle -> message?.takeIf { it.length <= 12 } ?: "按住说话，松开结束"
-                        VoiceState.Listening -> "正在听你说"
-                        VoiceState.Speaking -> "正在播报"
-                    },
-                    color = Color(0xFFE0E7FF),
-                    fontSize = 16.sp,
-                    lineHeight = 22.sp,
-                    modifier = Modifier.padding(top = 12.dp),
-                    maxLines = 1
+                VoiceCaption(
+                    voiceState = voiceState,
+                    transcript = voiceTranscript,
+                    message = message
                 )
             }
 
@@ -156,32 +138,42 @@ fun BlindHomeScreen(
 }
 
 @Composable
-private fun VoiceOrb(state: VoiceState, onPressToggle: () -> Unit) {
+private fun VoiceOrb(state: VoiceState, onVoiceStart: () -> Unit, onVoiceStop: () -> Unit) {
     val label = when (state) {
         VoiceState.Idle -> "按住说话"
         VoiceState.Listening -> "正在聆听"
         VoiceState.Speaking -> "正在播报"
     }
+    val currentState by rememberUpdatedState(state)
+    val currentOnVoiceStart by rememberUpdatedState(onVoiceStart)
+    val currentOnVoiceStop by rememberUpdatedState(onVoiceStop)
     Box(
         modifier = Modifier
             .size(218.dp)
             .shadow(28.dp, CircleShape)
             .clip(CircleShape)
             .background(Brush.radialGradient(listOf(Color(0xFFA5B4FC), Color(0xFF6366F1), Color(0xFF312E81))))
-            .pointerInput(state) {
-                detectTapGestures(
-                    onPress = {
-                        if (state != VoiceState.Speaking) {
-                            onPressToggle()
-                            tryAwaitRelease()
-                            if (state == VoiceState.Idle) onPressToggle()
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    val releasedBeforeLongPress = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                        waitForUpOrCancellation()
+                    }
+                    if (releasedBeforeLongPress == null && currentState == VoiceState.Idle) {
+                        var started = false
+                        try {
+                            currentOnVoiceStart()
+                            started = true
+                            waitForUpOrCancellation()
+                        } finally {
+                            if (started) currentOnVoiceStop()
                         }
                     }
-                )
+                }
             }
             .semantics {
                 role = Role.Button
-                contentDescription = "语音按钮，双击或按住开始说话"
+                contentDescription = "语音按钮，按住开始说话，松开立即停止"
                 stateDescription = label
             },
         contentAlignment = Alignment.Center
@@ -193,7 +185,6 @@ private fun VoiceOrb(state: VoiceState, onPressToggle: () -> Unit) {
         }
     }
 }
-
 @Composable
 private fun SoundWave(active: Boolean) {
     val transition = rememberInfiniteTransition(label = "voice-wave")
@@ -234,5 +225,38 @@ private fun SosButton(sosState: SosActionState, onClick: () -> Unit) {
             Text("SOS", color = Color.White, fontSize = 42.sp, fontWeight = FontWeight.Black, maxLines = 1)
             Text(statusText, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
+    }
+}
+
+@Composable
+private fun VoiceCaption(
+    voiceState: VoiceState,
+    transcript: String?,
+    message: String?
+) {
+    val caption = when {
+        !transcript.isNullOrBlank() -> transcript
+        voiceState == VoiceState.Listening -> "\u6b63\u5728\u542c\u4f60\u8bf4\u2026"
+        voiceState == VoiceState.Speaking -> "\u6b63\u5728\u64ad\u62a5\u5bfc\u822a\u63d0\u793a"
+        !message.isNullOrBlank() && message.length <= 24 -> message
+        else -> "\u6309\u4f4f\u4e0a\u65b9\u5927\u5706\u8bf4\u8bdd\uff0c\u8bc6\u522b\u6587\u5b57\u4f1a\u663e\u793a\u5728\u8fd9\u91cc"
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(Color.White.copy(alpha = 0.12f))
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text("\u5b9e\u65f6\u5b57\u5e55", color = Color(0xFFC7D2FE), fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+        Text(
+            text = caption,
+            color = Color.White,
+            fontSize = 17.sp,
+            lineHeight = 24.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 2
+        )
     }
 }

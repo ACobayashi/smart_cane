@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Debug only: allow local HTTP backend such as http://LAN-IP:8000. -->
+    <!-- Debug only: allow HTTP backend such as http://118.31.221.165:8016. -->
     <application android:usesCleartextTraffic="true" />
 
 </manifest>

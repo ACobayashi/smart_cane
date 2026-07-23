@@ -341,7 +341,7 @@ static bool readAccel() {
   bool abruptVertical = havePrevAccel &&
                         accelDeltaG >= SMARTCANE_FALL_JERK_G &&
                         verticalDeltaG >= SMARTCANE_FALL_VERTICAL_DELTA_G &&
-                        state.totalG >= 1.35f;
+                        state.totalG >= SMARTCANE_FALL_VERTICAL_TRIGGER_G;
   bool fallMotionCandidate = freefall || hardImpact || abruptVertical;
 
   if (state.fallActive) {
@@ -384,11 +384,12 @@ static bool readAccel() {
   } else if (impactMs != 0 && now - impactMs <= SMARTCANE_FALL_CONFIRM_WINDOW_MS) {
     candidatePeakG = state.totalG > candidatePeakG ? state.totalG : candidatePeakG;
     candidateMinG = state.totalG < candidateMinG ? state.totalG : candidateMinG;
+    bool diagonalDropSignature = candidateHadVerticalDrop &&
+                                 candidatePeakG >= SMARTCANE_FALL_VERTICAL_PEAK_G &&
+                                 candidateMinG <= SMARTCANE_FALL_VERTICAL_MIN_G;
     bool strongFallSignature = candidateHadFreefall ||
                                candidateHadImpact ||
-                               (candidateHadVerticalDrop &&
-                                candidatePeakG >= SMARTCANE_FALL_VERTICAL_PEAK_G &&
-                                candidateMinG <= SMARTCANE_FALL_VERTICAL_MIN_G);
+                               diagonalDropSignature;
 
     if (strongFallSignature && lying && stillNow) {
       if (lyingSinceMs == 0) {

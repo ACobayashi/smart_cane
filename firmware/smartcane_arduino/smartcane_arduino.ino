@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <WiFi.h>
 #include <math.h>
 
 #include "buttons.h"
@@ -43,6 +44,7 @@ static unsigned long lastLocationUploadMs = 0;
 static unsigned long lastNearbyFetchMs = 0;
 static unsigned long lastDeepRiskMs = 0;
 static unsigned long lastTelemetryUploadMs = 0;
+static unsigned long lastHeartbeatMs = 0;
 static String serialLine;
 static RiskState stableRisk;
 static RiskState pendingRisk;
@@ -67,6 +69,8 @@ static unsigned long obstacleStartedMs = 0;
 static const char *obstacleAlertType = "none";
 static unsigned long approachWindowStartMs = 0;
 static int approachStartFrontCm = 0;
+static unsigned long lastApproachFeedbackMs = 0;
+static unsigned long lastSerialCharMs = 0;
 
 #if SMARTCANE_GNSS_ENABLED
 static char gnssLine[128];
@@ -77,6 +81,7 @@ static void printHelp();
 static void printStatus();
 static void printVibrationStatus();
 static void printPcaProbe();
+static void printSerialHeartbeat();
 static void repeatLastCue();
 static void handleSos();
 static void handleVoiceRequest();
@@ -225,6 +230,18 @@ static bool sameRiskFingerprint(const RiskState &a, const RiskState &b) {
          sameText(a.direction, b.direction);
 }
 
+static bool hasConcreteRisk(const RiskState &risk) {
+  return strcmp(risk.riskType, "none") != 0 &&
+         strcmp(risk.riskType, "sensor_unreliable") != 0;
+}
+
+static bool isDistanceRiskType(const char *riskType) {
+  return strcmp(riskType, "front_obstacle") == 0 ||
+         strcmp(riskType, "left_obstacle") == 0 ||
+         strcmp(riskType, "right_obstacle") == 0 ||
+         strcmp(riskType, "down_obstacle") == 0;
+}
+
 static RiskState stabilizeRisk(const RiskState &measuredRisk) {
   if (!riskStabilizerReady) {
     stableRisk = measuredRisk;
@@ -276,7 +293,7 @@ static RiskState stabilizeRisk(const RiskState &measuredRisk) {
 }
 
 static unsigned long telemetryIntervalForRisk(const RiskState &risk) {
-  if (risk.level == RISK_LOW) {
+  if (risk.level == RISK_LOW && !hasConcreteRisk(risk)) {
     return SMARTCANE_TELEMETRY_LOW_RISK_INTERVAL_MS;
   }
   return SMARTCANE_TELEMETRY_RISK_INTERVAL_MS;
@@ -395,13 +412,13 @@ static void runCue(FeedbackCue cue, bool withBuzzer) {
 }
 
 static FeedbackCue cueForRisk(const RiskState &risk) {
-  if (risk.level == RISK_LOW) {
+  if (!hasConcreteRisk(risk)) {
     return CUE_NONE;
   }
   if (strcmp(risk.riskType, "fall_detected") == 0) {
     return CUE_NONE;
   }
-  if (strcmp(risk.riskType, "ground_drop") == 0) {
+  if (strcmp(risk.riskType, "ground_drop") == 0 || strcmp(risk.riskType, "ground_step") == 0) {
     return CUE_GROUND_DROP;
   }
   if (strcmp(risk.riskType, "down_obstacle") == 0) {
@@ -435,7 +452,7 @@ static FeedbackCue cueForRisk(const RiskState &risk) {
 }
 
 static void applyFeedbackForRisk(const RiskState &risk, bool force = false, bool allowBuzzer = true) {
-  if (risk.level == RISK_LOW) {
+  if (!hasConcreteRisk(risk)) {
     return;
   }
   unsigned long now = millis();
@@ -443,7 +460,10 @@ static void applyFeedbackForRisk(const RiskState &risk, bool force = false, bool
     return;
   }
   lastFeedbackMs = now;
-  runCue(cueForRisk(risk), allowBuzzer && risk.level == RISK_HIGH);
+  bool shouldBuzz = risk.level == RISK_HIGH ||
+                    strcmp(risk.riskType, "ground_drop") == 0 ||
+                    strcmp(risk.riskType, "ground_step") == 0;
+  runCue(cueForRisk(risk), allowBuzzer && shouldBuzz);
 }
 
 static void repeatLastCue() {
@@ -456,10 +476,13 @@ static void repeatLastCue() {
 }
 
 static void maybeAutoUploadRisk() {
-  if (!networkMode || currentRisk.level == RISK_LOW) {
+  if (!networkMode || !hasConcreteRisk(currentRisk)) {
     return;
   }
   if (strcmp(currentRisk.riskType, "history_risk") == 0) {
+    return;
+  }
+  if (currentRisk.level == RISK_LOW && !isDistanceRiskType(currentRisk.riskType)) {
     return;
   }
   uploadEvent(currentRisk, distances, location, "source=auto_detected_once_per_place");
@@ -468,7 +491,7 @@ static void maybeAutoUploadRisk() {
 static void uploadUserMark(const char *extra) {
   Serial.println(F("[UPLOAD] user_mark"));
   uploadRiskEvent("user_mark",
-                  riskLevelToString(currentRisk.level),
+                  "medium",
                   currentRisk.direction,
                   "touch",
                   currentRisk.distanceMm,
@@ -591,13 +614,13 @@ static bool isObstacleRisk(const RiskState &risk) {
 static void monitorCompanionAlerts(const RiskState &risk) {
   unsigned long now = millis();
 
-  if (risk.level != RISK_LOW && isObstacleRisk(risk)) {
+  if (isObstacleRisk(risk)) {
     if (strcmp(obstacleAlertType, risk.riskType) != 0) {
       obstacleAlertType = risk.riskType;
       obstacleStartedMs = now;
     } else if (obstacleStartedMs != 0 &&
                now - obstacleStartedMs >= SMARTCANE_COMPANION_OBSTACLE_HOLD_MS) {
-      uploadCompanionAlert("prolonged_obstacle", RISK_HIGH, "same_obstacle_persisted");
+      uploadCompanionAlert("prolonged_obstacle", RISK_LOW, "same_obstacle_persisted");
       obstacleStartedMs = now;
     }
   } else {
@@ -608,6 +631,7 @@ static void monitorCompanionAlerts(const RiskState &risk) {
   if (!distances.frontValid || distances.frontCm >= SMARTCANE_FRONT_WARN_CM) {
     approachWindowStartMs = 0;
     approachStartFrontCm = 0;
+    lastApproachFeedbackMs = 0;
     return;
   }
 
@@ -620,8 +644,21 @@ static void monitorCompanionAlerts(const RiskState &risk) {
   if (now - approachWindowStartMs >= SMARTCANE_COMPANION_APPROACH_WINDOW_MS) {
     int dropCm = approachStartFrontCm - distances.frontCm;
     if (dropCm >= SMARTCANE_COMPANION_APPROACH_DELTA_CM) {
+      Serial.print(F("[APPROACH] front decreasing "));
+      Serial.print(approachStartFrontCm);
+      Serial.print(F("->"));
+      Serial.print(distances.frontCm);
+      Serial.println(F("cm"));
+      if (now - lastApproachFeedbackMs >= SMARTCANE_COMPANION_APPROACH_WINDOW_MS) {
+        FeedbackCue approachCue = strcmp(risk.riskType, "front_obstacle") == 0 ? cueForRisk(risk) : CUE_FRONT_DANGER;
+        if (approachCue == CUE_OBSTACLE) {
+          approachCue = CUE_FRONT_DANGER;
+        }
+        runCue(approachCue, true);
+        lastApproachFeedbackMs = now;
+      }
       uploadCompanionAlert("approaching_obstacle",
-                           distances.frontCm < SMARTCANE_FRONT_DANGER_CM ? RISK_HIGH : RISK_MEDIUM,
+                           RISK_LOW,
                            "front_distance_decreasing");
     }
     approachWindowStartMs = now;
@@ -723,12 +760,12 @@ static void publishRiskEventIfNeeded(const RiskState &risk) {
 
   bool shouldPublish = false;
   if (!haveLastEventRisk) {
-    shouldPublish = risk.level != RISK_LOW;
-  } else if (risk.level == RISK_LOW) {
-    shouldPublish = lastEventRisk.level != RISK_LOW;
+    shouldPublish = hasConcreteRisk(risk);
+  } else if (!hasConcreteRisk(risk)) {
+    shouldPublish = hasConcreteRisk(lastEventRisk);
   } else {
     bool samePlace = latCell == lastEventLatCell && lngCell == lastEventLngCell;
-    shouldPublish = lastEventRisk.level == RISK_LOW ||
+    shouldPublish = !hasConcreteRisk(lastEventRisk) ||
                     !samePlace ||
                     !sameRiskFingerprint(risk, lastEventRisk);
   }
@@ -737,16 +774,29 @@ static void publishRiskEventIfNeeded(const RiskState &risk) {
     return;
   }
 
-  Serial.print(risk.level == RISK_MEDIUM ? F("[HINT] ") : F("[EVENT] "));
-  Serial.println(risk.level == RISK_LOW ? F("risk cleared") :
-                 (risk.level == RISK_MEDIUM ? F("caution hint once") : F("risk detected once")));
+  if (risk.level == RISK_HIGH) {
+    Serial.print(F("[EVENT] "));
+  } else if (risk.level == RISK_MEDIUM) {
+    Serial.print(F("[HINT] "));
+  } else {
+    Serial.print(F("[LOW] "));
+  }
+  if (!hasConcreteRisk(risk)) {
+    Serial.println(F("risk cleared"));
+  } else if (risk.level == RISK_LOW) {
+    Serial.println(F("distance risk low"));
+  } else if (risk.level == RISK_MEDIUM) {
+    Serial.println(F("step/drop caution"));
+  } else {
+    Serial.println(F("emergency risk detected"));
+  }
   printSensorRiskSnapshot();
 
-  if (risk.level != RISK_LOW) {
+  if (hasConcreteRisk(risk)) {
     applyFeedbackForRisk(risk, true);
   }
 
-  if (risk.level != RISK_LOW) {
+  if (hasConcreteRisk(risk)) {
     recordPathPoint(risk);
     maybeAutoUploadRisk();
     if (risk.level == RISK_HIGH && networkMode && networkAvailable()) {
@@ -809,9 +859,85 @@ static void printPcaProbe() {
   Serial.print(F("[PCA] addr=0x"));
   Serial.print(SMARTCANE_PCA9685_ADDR, HEX);
   Serial.print(F(" i2c_clock="));
-  Serial.print(SMARTCANE_I2C_CLOCK_HZ);
-  Serial.print(F(" result="));
-  Serial.println(i2cProbe(SMARTCANE_PCA9685_ADDR) ? F("found") : F("not_found"));
+  Serial.println(SMARTCANE_I2C_CLOCK_HZ);
+
+  auto printCandidateScan = [](const char *label) {
+    bool anySeen = false;
+    bool anyUsable = false;
+    Serial.print(F("[PCA] "));
+    Serial.print(label);
+    Serial.print(F(" candidates:"));
+    for (uint8_t addr = SMARTCANE_PCA9685_ADDR_AUTO_MIN; addr <= SMARTCANE_PCA9685_ADDR_AUTO_MAX; ++addr) {
+      if (i2cProbe(addr)) {
+        bool ignored = false;
+        anySeen = true;
+        Serial.print(F(" 0x"));
+        Serial.print(addr, HEX);
+        if (addr == SMARTCANE_MPR121_ADDR) {
+          Serial.print(F("(touch-ignore)"));
+          ignored = true;
+        } else if (addr == SMARTCANE_TCA9548A_ADDR) {
+          Serial.print(F("(tca-ignore)"));
+          ignored = true;
+        } else if (addr == SMARTCANE_BMI270_ADDR_PRIMARY || addr == SMARTCANE_BMI270_ADDR_SECONDARY) {
+          Serial.print(F("(imu-ignore)"));
+          ignored = true;
+        } else if (addr == 0x7E) {
+          Serial.print(F("(reserved-ignore)"));
+          ignored = true;
+        }
+        if (!ignored) {
+          anyUsable = true;
+        }
+      }
+    }
+    if (!anySeen) {
+      Serial.print(F(" none"));
+    } else if (!anyUsable) {
+      Serial.print(F(" no-usable-pca"));
+    }
+    Serial.println();
+    return anyUsable;
+  };
+
+  disableTcaChannels();
+  bool foundAny = printCandidateScan("root");
+
+  for (uint8_t ch = 0; ch < 8; ++ch) {
+    if (!selectTcaChannel(ch)) {
+      continue;
+    }
+    char label[12];
+    snprintf(label, sizeof(label), "TCA CH%u", ch);
+    foundAny = printCandidateScan(label) || foundAny;
+  }
+
+  if (!foundAny) {
+    Serial.println(F("[PCA] no usable PCA9685 address in 0x40-0x7E on root/TCA buses"));
+  }
+}
+
+static void printSerialHeartbeat() {
+  Serial.print(F("[SYS] alive build="));
+  Serial.print(F(SMARTCANE_BUILD_TAG));
+  Serial.print(F(" wifi="));
+  if (networkAvailable()) {
+    Serial.print(F("ok ip="));
+    Serial.print(WiFi.localIP());
+  } else {
+    Serial.print(F("off"));
+  }
+  Serial.print(F(" server="));
+  Serial.print(F(SMARTCANE_SERVER_BASE_URL));
+  Serial.print(F(" risk="));
+  Serial.print(riskLevelToString(currentRisk.level));
+  Serial.print(F(" type="));
+  Serial.print(currentRisk.riskType);
+  Serial.print(F(" imu="));
+  Serial.print(imuFallCurrent().available ? F("yes") : F("no"));
+  Serial.print(F(" vib="));
+  Serial.print(vibrationModeName());
+  Serial.println(F(" cmd=status/wifi/read"));
 }
 
 static void processCommand(String command) {
@@ -836,8 +962,14 @@ static void processCommand(String command) {
     delay(80);
     i2cScanRoot();
     i2cScanTcaChannels();
+  } else if (command == "wifi") {
+    printWifiDiagnostics();
+  } else if (command == "wifiscan") {
+    scanWifiNetworks();
   } else if (command == "pca" || command == "pca9685") {
     printPcaProbe();
+  } else if (command == "pca init" || command == "vib init" || command == "motor init") {
+    vibrationBegin();
   } else if (command == "touchraw") {
     touchPrintRaw();
   } else if (command == "imu") {
@@ -853,21 +985,23 @@ static void processCommand(String command) {
     imuFallSetStream(false);
   } else if (command == "vib" || command == "vibration" || command == "motor" || command == "vib status") {
     printVibrationStatus();
-  } else if (command == "vib left" || command == "motor 1" || command == "m1") {
-    Serial.println(F("[CMD] vibrate left"));
-    vibrateLeft(SMARTCANE_VIB_LEVEL_HIGH, 500);
-  } else if (command == "vib right" || command == "motor 2" || command == "m2") {
-    Serial.println(F("[CMD] vibrate right"));
-    vibrateRight(SMARTCANE_VIB_LEVEL_HIGH, 500);
-  } else if (command == "vib center" || command == "vib centre" || command == "motor 3" || command == "m3") {
-    Serial.println(F("[CMD] vibrate center"));
-    vibrateCenter(SMARTCANE_VIB_LEVEL_HIGH, 500);
-  } else if (command == "vib all" || command == "motor all" || command == "mall") {
-    Serial.println(F("[CMD] vibrate all"));
-    vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, 500);
+  } else if (command == "vib left" || command == "motor 1" || command == "m1" || command == "1") {
+    Serial.println(F("[CMD] PCA9685 IIC motor 1 / left"));
+    vibrationPcaIicMotor(0, 700);
+  } else if (command == "vib right" || command == "motor 2" || command == "m2" || command == "2") {
+    Serial.println(F("[CMD] PCA9685 IIC motor 2 / right"));
+    vibrationPcaIicMotor(1, 700);
+  } else if (command == "vib center" || command == "vib centre" || command == "motor 3" || command == "m3" || command == "3") {
+    Serial.println(F("[CMD] PCA9685 IIC motor 3 / center"));
+    vibrationPcaIicMotor(2, 700);
+  } else if (command == "vib all" || command == "motor all" || command == "mall" || command == "a") {
+    Serial.println(F("[CMD] PCA9685 IIC motor all"));
+    vibrationPcaIicMotor(0, 700);
+    vibrationPcaIicMotor(1, 700);
+    vibrationPcaIicMotor(2, 700);
   } else if (command == "vib stop" || command == "motor stop" || command == "mstop") {
-    Serial.println(F("[CMD] vibration stop"));
-    vibrationStopAll();
+    Serial.println(F("[CMD] PCA9685 IIC motor stop"));
+    vibrationPcaIicStop();
   } else if (command == "beep") {
     Serial.println(F("[CMD] beep short"));
     beep(160);
@@ -926,34 +1060,75 @@ static void processCommand(String command) {
   }
 }
 
+static bool isImmediateSerialCommand(const String &command) {
+  return command == "1" || command == "2" || command == "3" || command == "a" ||
+         command == "m1" || command == "m2" || command == "m3" ||
+         command == "mall" || command == "mstop" ||
+         command == "status" || command == "help" || command == "?" ||
+         command == "read" || command == "raw" || command == "scan" ||
+         command == "wifi" || command == "wifiscan" ||
+         command == "vib" || command == "pca" || command == "imu" ||
+         command == "imuraw" || command == "imurescan" ||
+         command == "beep" || command == "nearby" || command == "deep" ||
+         command == "mark" || command == "sos" || command == "btn" ||
+         command == "btndouble" || command == "btnlong" ||
+         command == "mode" || command == "path";
+}
+
+static void processBufferedSerialLine() {
+  serialLine.trim();
+  serialLine.toLowerCase();
+  if (serialLine.length() == 0) {
+    return;
+  }
+  Serial.print(F("[SERIAL] command="));
+  Serial.println(serialLine);
+  processCommand(serialLine);
+  serialLine = "";
+}
+
 static void handleSerialInput() {
 #if SMARTCANE_SERIAL_COMMANDS_ENABLED
   while (Serial.available() > 0) {
     char c = (char)Serial.read();
     if (c == '\n' || c == '\r') {
-      processCommand(serialLine);
-      serialLine = "";
+      processBufferedSerialLine();
     } else if (serialLine.length() < 80) {
       serialLine += c;
+      lastSerialCharMs = millis();
+      String command = serialLine;
+      command.trim();
+      command.toLowerCase();
+      if (isImmediateSerialCommand(command)) {
+        serialLine = command;
+        processBufferedSerialLine();
+      }
     }
+  }
+
+  if (serialLine.length() > 0 && millis() - lastSerialCharMs >= 500) {
+    processBufferedSerialLine();
   }
 #endif
 }
 
 static void printHelp() {
   Serial.println(F("[HELP] commands:"));
+  Serial.println(F("  Serial Monitor can use New Line or No line ending"));
   Serial.println(F("  status        print sensor, risk, location, nearby history"));
   Serial.println(F("  read          print one sensor/risk snapshot"));
   Serial.println(F("  raw           print raw VL53L1X millimeter readings"));
   Serial.println(F("  stream on/off print live sensor snapshots for bench testing"));
   Serial.println(F("  stream raw    print live raw VL53L1X millimeter readings"));
   Serial.println(F("  scan          scan root I2C and TCA channels"));
+  Serial.println(F("  wifi|wifiscan print Wi-Fi status or scan target hotspot"));
   Serial.println(F("  touchraw      print MPR121 touched/filter/baseline values"));
   Serial.println(F("  imu|imurescan print BMI270 fall detector status/rescan"));
   Serial.println(F("  imuraw        print one BMI270 raw accel sample"));
   Serial.println(F("  imustream on/off print brief BMI270 fall state"));
   Serial.println(F("  vib left|right|center|all|stop|status"));
-  Serial.println(F("  m1|m2|m3|mall|mstop drive PCA9685 motor channels 8/9/10"));
+  Serial.println(F("  pca|pca init  probe/reinitialize PCA9685 on configured TCA channel"));
+  Serial.println(F("  m1/m2/m3/mall or 1/2/3/a drive motors; works even without New Line"));
   Serial.println(F("  beep|beep danger|beep sos|buzzer on|buzzer off"));
   Serial.println(F("  nearby        fetch /api/risks/nearby"));
   Serial.println(F("  deep          call backend /api/ai/deep-risk"));
@@ -977,6 +1152,7 @@ void setup() {
   Serial.print(F("Build: "));
   Serial.println(F(SMARTCANE_BUILD_TAG));
   Serial.println(F("Board: ESP32C5 Dev Module, baud: 115200"));
+  Serial.println(F("[SERIAL] boot ok; wait init or type status/wifi/read after startup"));
   Serial.flush();
 
   initLocation();
@@ -1020,6 +1196,8 @@ void setup() {
   printHelp();
 #endif
   printStatus();
+  Serial.println(F("[SERIAL] ready; commands: status wifi wifiscan read beep m1 m2 m3"));
+  printSerialHeartbeat();
   publishRiskEventIfNeeded(currentRisk);
 }
 
@@ -1067,6 +1245,14 @@ void loop() {
     lastStatusMs = now;
     tofPrintRawReadings();
   }
+
+#if SMARTCANE_SERIAL_HEARTBEAT_ENABLED
+  if (!streamMode && !rawStreamMode &&
+      now - lastHeartbeatMs >= SMARTCANE_SERIAL_HEARTBEAT_INTERVAL_MS) {
+    lastHeartbeatMs = now;
+    printSerialHeartbeat();
+  }
+#endif
 
   if (now - lastLocationUploadMs >= SMARTCANE_LOCATION_UPLOAD_INTERVAL_MS) {
     lastLocationUploadMs = now;

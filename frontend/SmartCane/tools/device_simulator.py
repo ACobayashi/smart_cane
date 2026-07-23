@@ -2,7 +2,7 @@
 """SmartCane telemetry simulator.
 
 Example:
-    python tools/device_simulator.py --server http://127.0.0.1:8000 --device-id cane_001 --interval 3
+    python tools/device_simulator.py --server http://118.31.221.165:8016 --device-id cane_001 --interval 3
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ def post_telemetry(server: str, payload: dict[str, object]) -> tuple[int, str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="SmartCane telemetry simulator")
-    parser.add_argument("--server", default="http://127.0.0.1:8000", help="SmartCane server base URL")
+    parser.add_argument("--server", default="http://118.31.221.165:8016", help="SmartCane server base URL")
     parser.add_argument("--device-id", default="cane_001", help="device id to report")
     parser.add_argument("--interval", type=float, default=3.0, help="report interval in seconds")
     args = parser.parse_args()

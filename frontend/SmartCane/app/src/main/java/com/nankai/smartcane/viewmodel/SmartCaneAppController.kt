@@ -1,8 +1,16 @@
 ﻿package com.nankai.smartcane.viewmodel
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.media.MediaRecorder
+import android.os.Build
 import android.os.Bundle
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -19,12 +27,16 @@ import com.nankai.smartcane.data.model.RelationStatus
 import com.nankai.smartcane.data.model.UserProfile
 import com.nankai.smartcane.data.model.UserRole
 import com.nankai.smartcane.data.network.ApiResult
+import androidx.core.content.ContextCompat
 import com.nankai.smartcane.data.network.EmergencyAlertDto
+import com.nankai.smartcane.data.network.LocationUploadDto
+import com.nankai.smartcane.data.network.NearbyRiskWarningDto
 import com.nankai.smartcane.data.network.SmartCaneApiClient
 import com.nankai.smartcane.data.network.SosRequestDto
 import com.nankai.smartcane.data.repository.AuthRepository
 import com.nankai.smartcane.data.repository.DemoAuthRepository
 import com.nankai.smartcane.data.repository.PairingRepository
+import com.nankai.smartcane.data.repository.RemoteAuthRepository
 import com.nankai.smartcane.data.repository.RemotePairingRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,6 +49,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -52,10 +65,18 @@ class SmartCaneAppController private constructor(
     private var ttsReady = false
     private var speechRecognizer: SpeechRecognizer? = null
     private var voiceRecognitionActive = false
+    private var backendVoiceRecordingActive = false
+    private var backendVoiceRecorder: MediaRecorder? = null
+    private var backendVoiceFile: File? = null
     private var blindPollingJob: Job? = null
     private var companionPollingJob: Job? = null
     private var alertPollingJob: Job? = null
+    private var sosAlarmJob: Job? = null
+    private var blindRiskMonitorJob: Job? = null
+    private var locationListener: LocationListener? = null
+    private var latestContinuousLocation: Location? = null
     private var lastAlertId: Int = 0
+    private val nearbyRiskSpeechTimes: MutableMap<Int, Long> = mutableMapOf()
 
     private val _uiState = MutableStateFlow(AppUiState(storedState = preferences.state.value))
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
@@ -74,8 +95,20 @@ class SmartCaneAppController private constructor(
             _uiState.update { it.copy(isBusy = true, message = null) }
             val result = authRepository.login(account, password, rememberLogin)
             if (result.success && result.user != null) {
-                preferences.saveMode(result.user.role.defaultMode())
                 _uiState.update { it.copy(isBusy = false, message = "登录成功") }
+            } else {
+                _uiState.update { it.copy(isBusy = false, message = result.message) }
+            }
+        }
+    }
+
+    fun register(account: String, password: String, displayName: String, role: UserRole, rememberLogin: Boolean) {
+        if (_uiState.value.isBusy) return
+        scope.launch {
+            _uiState.update { it.copy(isBusy = true, message = null) }
+            val result = authRepository.register(account, password, displayName, role, rememberLogin)
+            if (result.success && result.user != null) {
+                _uiState.update { it.copy(isBusy = false, message = "注册成功") }
             } else {
                 _uiState.update { it.copy(isBusy = false, message = result.message) }
             }
@@ -221,8 +254,12 @@ class SmartCaneAppController private constructor(
         val user = _uiState.value.currentUser ?: return
         scope.launch {
             val result = pairingRepository.getCurrentRelation(user)
-            result.getOrNull()?.let { relation ->
-                _uiState.update { it.copy(currentRelation = relation, pairingStatus = PairingFlowStatus.Connected) }
+            val relation = result.getOrNull()
+            _uiState.update {
+                it.copy(
+                    currentRelation = relation,
+                    pairingStatus = if (relation != null) PairingFlowStatus.Connected else PairingFlowStatus.Idle
+                )
             }
         }
     }
@@ -236,6 +273,7 @@ class SmartCaneAppController private constructor(
                 if (relation != null) {
                     _uiState.update { it.copy(currentRelation = relation, pendingRequest = null, pairingStatus = PairingFlowStatus.Connected) }
                 } else {
+                    _uiState.update { it.copy(currentRelation = null) }
                     val requests = pairingRepository.getPendingRequests(user).getOrNull().orEmpty()
                     val pending = requests.firstOrNull()
                     _uiState.update {
@@ -264,6 +302,7 @@ class SmartCaneAppController private constructor(
                 if (relation != null) {
                     _uiState.update { it.copy(currentRelation = relation, pairingStatus = PairingFlowStatus.Connected, pendingRequest = null, message = "关联成功") }
                 } else {
+                    _uiState.update { it.copy(currentRelation = null) }
                     val requests = pairingRepository.getCompanionRequests(user).getOrNull().orEmpty()
                     val latest = requests.lastOrNull()
                     if (latest != null) {
@@ -289,6 +328,109 @@ class SmartCaneAppController private constructor(
         companionPollingJob?.cancel()
         blindPollingJob = null
         companionPollingJob = null
+    }
+
+    fun startBlindRiskProximityMonitoring() {
+        if (blindRiskMonitorJob?.isActive == true) return
+        startPhoneLocationUpdates()
+        blindRiskMonitorJob = scope.launch {
+            while (true) {
+                val state = _uiState.value
+                if (state.currentMode != AppMode.Blind) {
+                    delay(6_000L)
+                    continue
+                }
+
+                val location = latestPhoneLocation()
+                if (location == null) {
+                    _uiState.update {
+                        if (it.message.isNullOrBlank()) it.copy(message = "\u8bf7\u5f00\u542f\u5b9a\u4f4d\u6743\u9650\uff0c\u7528\u4e8e\u9644\u8fd1\u98ce\u9669\u70b9\u8bed\u97f3\u63d0\u9192") else it
+                    }
+                    delay(6_000L)
+                    continue
+                }
+
+                val deviceId = state.currentRelation?.caneDevice?.deviceId ?: DemoData.defaultCane.deviceId
+                SmartCaneApiClient.postLocation(
+                    LocationUploadDto(
+                        deviceId = deviceId,
+                        latitude = location.latitude,
+                        longitude = location.longitude,
+                        provider = location.provider,
+                        quality = if (location.isFromMockProvider) "mock" else "usable",
+                        accuracyM = location.accuracy.takeIf { it > 0f },
+                        bearingDeg = location.bearing.takeIf { location.hasBearing() }
+                    )
+                )
+
+                when (val result = SmartCaneApiClient.getNearbyRiskWarning(location.latitude, location.longitude, radiusM = 50, bearingDeg = location.bearing.takeIf { location.hasBearing() })) {
+                    is ApiResult.Success -> result.data?.let { maybeSpeakNearbyRiskWarning(it) }
+                    is ApiResult.Failure -> Unit
+                }
+                delay(6_000L)
+            }
+        }
+    }
+
+    fun stopBlindRiskProximityMonitoring() {
+        blindRiskMonitorJob?.cancel()
+        blindRiskMonitorJob = null
+        stopPhoneLocationUpdates()
+    }
+
+    private fun maybeSpeakNearbyRiskWarning(warning: NearbyRiskWarningDto) {
+        val now = System.currentTimeMillis()
+        val lastSpokenAt = nearbyRiskSpeechTimes[warning.eventId] ?: 0L
+        if (now - lastSpokenAt < 90_000L) return
+        if (_uiState.value.voiceState == VoiceState.Listening) return
+
+        nearbyRiskSpeechTimes[warning.eventId] = now
+        val distanceText = warning.distanceM.toInt().coerceAtLeast(1)
+        val text = warning.voicePrompt.ifBlank { "\u524d\u65b9\u7ea6 ${distanceText} \u7c73\u6709\u98ce\u9669\u70b9\uff0c\u8bf7\u6ce8\u610f" }
+        _uiState.update { it.copy(message = "\u9644\u8fd1\u98ce\u9669\u63d0\u9192\uff1a${distanceText}\u7c73", lastSpokenText = text) }
+        speakText(text)
+    }
+
+    @Suppress("MissingPermission")
+    private fun startPhoneLocationUpdates() {
+        val hasFine = ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val hasCoarse = ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!hasFine && !hasCoarse || locationListener != null) return
+
+        val manager = appContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
+        val listener = LocationListener { location -> latestContinuousLocation = location }
+        val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+            .filter { provider -> runCatching { manager.isProviderEnabled(provider) }.getOrDefault(false) }
+        providers.forEach { provider ->
+            runCatching { manager.requestLocationUpdates(provider, 3_000L, 3f, listener, Looper.getMainLooper()) }
+        }
+        if (providers.isNotEmpty()) locationListener = listener
+    }
+
+    @Suppress("MissingPermission")
+    private fun stopPhoneLocationUpdates() {
+        val listener = locationListener ?: return
+        val manager = appContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
+        runCatching { manager.removeUpdates(listener) }
+        locationListener = null
+    }
+
+    @Suppress("MissingPermission")
+    private fun latestPhoneLocation(): Location? {
+        val hasFine = ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val hasCoarse = ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!hasFine && !hasCoarse) return null
+
+        val manager = appContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
+        val providers = listOf(
+            LocationManager.GPS_PROVIDER,
+            LocationManager.NETWORK_PROVIDER,
+            LocationManager.PASSIVE_PROVIDER
+        ).filter { provider -> runCatching { manager.isProviderEnabled(provider) }.getOrDefault(false) }
+
+        return (providers
+            .mapNotNull { provider -> runCatching { manager.getLastKnownLocation(provider) }.getOrNull() } + listOfNotNull(latestContinuousLocation))
+            .maxWithOrNull(compareBy<Location> { it.time }.thenBy { -it.accuracy })
     }
 
     fun startAlertPolling() {
@@ -322,7 +464,7 @@ class SmartCaneAppController private constructor(
                                 speakText(newest.voicePrompt.ifBlank { newest.message }, listenAfter = true)
                             } else {
                                 _uiState.update { it.copy(urgentAlert = newest, message = newest.title) }
-                                if (role == "blind") {
+                                if (role == "blind" && sosAlarmJob?.isActive != true) {
                                     speakText(newest.voicePrompt.ifBlank { newest.message })
                                 }
                             }
@@ -342,6 +484,14 @@ class SmartCaneAppController private constructor(
 
     fun dismissUrgentAlert() {
         _uiState.update { it.copy(urgentAlert = null) }
+    }
+
+    fun startVoiceInput() {
+        if (_uiState.value.voiceState == VoiceState.Idle) startVoiceListening()
+    }
+
+    fun stopVoiceInput() {
+        if (_uiState.value.voiceState == VoiceState.Listening) stopVoiceListening("已收到")
     }
 
     fun toggleVoiceListening() {
@@ -392,100 +542,244 @@ class SmartCaneAppController private constructor(
 
     private fun startVoiceListening() {
         if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
-            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "手机不支持系统语音识别") }
+            startBackendVoiceRecording()
             return
         }
 
-        val recognizer = speechRecognizer ?: SpeechRecognizer.createSpeechRecognizer(appContext).also {
-            speechRecognizer = it
-            it.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {
-                    _uiState.update { state -> state.copy(voiceState = VoiceState.Listening, message = "正在听你说") }
-                }
-
-                override fun onBeginningOfSpeech() {
-                    _uiState.update { state -> state.copy(message = "正在识别") }
-                }
-
-                override fun onRmsChanged(rmsdB: Float) = Unit
-                override fun onBufferReceived(buffer: ByteArray?) = Unit
-
-                override fun onEndOfSpeech() {
-                    voiceRecognitionActive = false
-                    _uiState.update { state -> state.copy(message = "正在理解") }
-                }
-
-                override fun onError(error: Int) {
-                    voiceRecognitionActive = false
-                    val message = when (error) {
-                        SpeechRecognizer.ERROR_NO_MATCH -> "没听清，请再按一次按钮"
-                        SpeechRecognizer.ERROR_AUDIO -> "麦克风异常"
-                        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "语音网络不可用"
-                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "请给 App 开启麦克风权限"
-                        else -> "语音识别失败，请再试一次"
-                    }
-                    _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = message) }
-                }
-
-                override fun onResults(results: Bundle?) {
-                    voiceRecognitionActive = false
-                    val text = results
-                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        ?.firstOrNull()
-                        ?.trim()
-                    if (text.isNullOrBlank()) {
-                        _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = "没听清，请再试一次") }
-                        return
-                    }
-
-                    scope.launch {
-                        _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = "你说：$text") }
-                        when (val result = SmartCaneApiClient.postVoiceRoute(text, null, null)) {
-                            is ApiResult.Success -> speakText(result.data.voicePrompt.ifBlank { "已收到路线请求" })
-                            is ApiResult.Failure -> speakText("语音指令已收到，但后端暂时不可用")
-                        }
-                    }
-                }
-
-                override fun onPartialResults(partialResults: Bundle?) = Unit
-                override fun onEvent(eventType: Int, params: Bundle?) = Unit
-            })
+        val recognizer = runCatching {
+            speechRecognizer ?: SpeechRecognizer.createSpeechRecognizer(appContext).also {
+                speechRecognizer = it
+                it.setRecognitionListener(createRecognitionListener())
+            }
+        }.getOrElse {
+            startBackendVoiceRecording()
+            return
         }
 
+        startSystemRecognizer(recognizer)
+    }
+
+    private fun createRecognitionListener(): RecognitionListener = object : RecognitionListener {
+        override fun onReadyForSpeech(params: Bundle?) {
+            _uiState.update { state ->
+                state.copy(
+                    voiceState = VoiceState.Listening,
+                    message = "\u6b63\u5728\u542c\u4f60\u8bf4",
+                    voiceTranscript = null
+                )
+            }
+        }
+
+        override fun onBeginningOfSpeech() {
+            _uiState.update { state -> state.copy(message = "\u6b63\u5728\u8bc6\u522b", voiceTranscript = "\u6b63\u5728\u8bc6\u522b\u2026") }
+        }
+
+        override fun onRmsChanged(rmsdB: Float) = Unit
+        override fun onBufferReceived(buffer: ByteArray?) = Unit
+
+        override fun onEndOfSpeech() {
+            voiceRecognitionActive = false
+            _uiState.update { state -> state.copy(message = "\u6b63\u5728\u7406\u89e3", voiceTranscript = state.voiceTranscript ?: "\u6b63\u5728\u6574\u7406\u5b57\u5e55\u2026") }
+        }
+
+        override fun onError(error: Int) {
+            voiceRecognitionActive = false
+            val message = when (error) {
+                SpeechRecognizer.ERROR_NO_MATCH -> "\u6ca1\u542c\u6e05\uff0c\u8bf7\u518d\u6309\u4e00\u6b21\u6309\u94ae"
+                SpeechRecognizer.ERROR_AUDIO -> "\u9ea6\u514b\u98ce\u5f02\u5e38"
+                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "\u8bed\u97f3\u7f51\u7edc\u4e0d\u53ef\u7528\uff0c\u6b63\u5728\u5207\u6362\u5230\u540e\u7aef\u8bc6\u522b"
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "\u8bf7\u7ed9 App \u5f00\u542f\u9ea6\u514b\u98ce\u6743\u9650"
+                else -> "\u7cfb\u7edf\u8bed\u97f3\u8bc6\u522b\u5931\u8d25\uff0c\u6b63\u5728\u5207\u6362\u5230\u540e\u7aef\u8bc6\u522b"
+            }
+            _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = message, voiceTranscript = message) }
+            if (error == SpeechRecognizer.ERROR_NETWORK || error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT || error == SpeechRecognizer.ERROR_SERVER || error == SpeechRecognizer.ERROR_CLIENT) {
+                startBackendVoiceRecording()
+            }
+        }
+
+        override fun onResults(results: Bundle?) {
+            voiceRecognitionActive = false
+            val text = results
+                ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                ?.firstOrNull()
+                ?.trim()
+            if (text.isNullOrBlank()) {
+                _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = "\u6ca1\u542c\u6e05\uff0c\u8bf7\u518d\u8bd5\u4e00\u6b21", voiceTranscript = "\u6ca1\u542c\u6e05\uff0c\u8bf7\u518d\u8bd5\u4e00\u6b21") }
+                return
+            }
+
+            scope.launch {
+                _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = "\u4f60\u8bf4\uff1a$text", voiceTranscript = text) }
+                when (val result = SmartCaneApiClient.postVoiceRoute(text, null, null)) {
+                    is ApiResult.Success -> speakText(result.data.voicePrompt.ifBlank { "\u5df2\u6536\u5230\u8def\u7ebf\u8bf7\u6c42" })
+                    is ApiResult.Failure -> speakText("\u8bed\u97f3\u6307\u4ee4\u5df2\u6536\u5230\uff0c\u4f46\u540e\u7aef\u6682\u65f6\u4e0d\u53ef\u7528")
+                }
+            }
+        }
+
+        override fun onPartialResults(partialResults: Bundle?) {
+            val partialText = partialResults
+                ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                ?.firstOrNull()
+                ?.trim()
+            if (!partialText.isNullOrBlank()) {
+                _uiState.update { state -> state.copy(voiceTranscript = partialText, message = "\u6b63\u5728\u8bc6\u522b") }
+            }
+        }
+
+        override fun onEvent(eventType: Int, params: Bundle?) = Unit
+    }
+
+    private fun startSystemRecognizer(recognizer: SpeechRecognizer) {
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "请说出目的地或操作指令")
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "\u8bf7\u8bf4\u51fa\u76ee\u7684\u5730\u6216\u64cd\u4f5c\u6307\u4ee4")
         }
 
         try {
             voiceRecognitionActive = true
-            _uiState.update { it.copy(voiceState = VoiceState.Listening, message = "正在听你说") }
+            _uiState.update { it.copy(voiceState = VoiceState.Listening, message = "\u6b63\u5728\u542c\u4f60\u8bf4", voiceTranscript = null) }
             recognizer.startListening(intent)
         } catch (_: SecurityException) {
             voiceRecognitionActive = false
-            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "请在系统设置中开启麦克风权限") }
+            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "\u8bf7\u5728\u7cfb\u7edf\u8bbe\u7f6e\u4e2d\u5f00\u542f\u9ea6\u514b\u98ce\u6743\u9650", voiceTranscript = "\u8bf7\u5728\u7cfb\u7edf\u8bbe\u7f6e\u4e2d\u5f00\u542f\u9ea6\u514b\u98ce\u6743\u9650") }
+        } catch (_: Exception) {
+            voiceRecognitionActive = false
+            startBackendVoiceRecording()
+        }
+    }
+
+    private fun startBackendVoiceRecording() {
+        val hasAudioPermission = ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (!hasAudioPermission) {
+            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "\u8bf7\u5f00\u542f\u9ea6\u514b\u98ce\u6743\u9650\u540e\u518d\u8bf4\u8bdd", voiceTranscript = "\u8bf7\u5f00\u542f\u9ea6\u514b\u98ce\u6743\u9650\u540e\u518d\u8bf4\u8bdd") }
+            return
+        }
+        if (backendVoiceRecordingActive) return
+
+        val file = File(appContext.cacheDir, "smartcane_voice_${System.currentTimeMillis()}.m4a")
+        val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(appContext) else MediaRecorder()
+        try {
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            recorder.setAudioSamplingRate(16_000)
+            recorder.setAudioEncodingBitRate(64_000)
+            recorder.setOutputFile(file.absolutePath)
+            recorder.prepare()
+            recorder.start()
+            backendVoiceRecorder = recorder
+            backendVoiceFile = file
+            backendVoiceRecordingActive = true
+            _uiState.update {
+                it.copy(
+                    voiceState = VoiceState.Listening,
+                    message = "\u7cfb\u7edf\u8bed\u97f3\u4e0d\u53ef\u7528\uff0c\u5df2\u5207\u6362\u5230\u540e\u7aef\u5f55\u97f3\u8bc6\u522b",
+                    voiceTranscript = "\u6b63\u5728\u5f55\u97f3\uff0c\u677e\u5f00\u6309\u94ae\u540e\u8bc6\u522b"
+                )
+            }
+            scope.launch {
+                delay(7_000L)
+                if (backendVoiceRecordingActive) stopBackendVoiceRecordingAndUpload("\u6b63\u5728\u8bc6\u522b\u8bed\u97f3")
+            }
+        } catch (_: Exception) {
+            runCatching { recorder.release() }
+            backendVoiceRecorder = null
+            backendVoiceFile = null
+            backendVoiceRecordingActive = false
+            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "\u65e0\u6cd5\u542f\u52a8\u5f55\u97f3\uff0c\u8bf7\u68c0\u67e5\u9ea6\u514b\u98ce\u6743\u9650", voiceTranscript = "\u65e0\u6cd5\u542f\u52a8\u5f55\u97f3\uff0c\u8bf7\u68c0\u67e5\u9ea6\u514b\u98ce\u6743\u9650") }
+        }
+    }
+
+    private fun stopBackendVoiceRecordingAndUpload(message: String) {
+        val recorder = backendVoiceRecorder ?: return
+        val file = backendVoiceFile
+        backendVoiceRecorder = null
+        backendVoiceFile = null
+        backendVoiceRecordingActive = false
+        runCatching { recorder.stop() }
+        runCatching { recorder.release() }
+        if (file == null || !file.exists() || file.length() <= 0L) {
+            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "\u6ca1\u6709\u5f55\u5230\u58f0\u97f3\uff0c\u8bf7\u518d\u8bd5\u4e00\u6b21", voiceTranscript = "\u6ca1\u6709\u5f55\u5230\u58f0\u97f3\uff0c\u8bf7\u518d\u8bd5\u4e00\u6b21") }
+            return
+        }
+
+        scope.launch {
+            _uiState.update { it.copy(voiceState = VoiceState.Speaking, message = message, voiceTranscript = "\u6b63\u5728\u4e0a\u4f20\u5230\u540e\u7aef\u8bc6\u522b\u2026") }
+            val deviceId = _uiState.value.currentRelation?.caneDevice?.deviceId ?: DemoData.defaultCane.deviceId
+            when (val result = SmartCaneApiClient.postVoiceCommandAudio(deviceId, file)) {
+                is ApiResult.Success -> {
+                    val transcript = result.data.transcript.ifBlank { "\u5df2\u6536\u5230\u8bed\u97f3" }
+                    _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "\u4f60\u8bf4\uff1a$transcript", voiceTranscript = transcript) }
+                    speakText(result.data.reply.ifBlank { "\u5df2\u6536\u5230\u8bed\u97f3\u6307\u4ee4" })
+                }
+                is ApiResult.Failure -> {
+                    _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "\u8bed\u97f3\u8bc6\u522b\u6682\u65f6\u4e0d\u53ef\u7528", voiceTranscript = result.message) }
+                    speakText("\u8bed\u97f3\u8bc6\u522b\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002")
+                }
+            }
+            runCatching { file.delete() }
         }
     }
 
     private fun stopVoiceListening(message: String) {
+        if (backendVoiceRecordingActive) {
+            stopBackendVoiceRecordingAndUpload(message)
+            return
+        }
         if (voiceRecognitionActive) {
             speechRecognizer?.stopListening()
         }
         voiceRecognitionActive = false
-        _uiState.update { it.copy(voiceState = VoiceState.Idle, message = message) }
+        _uiState.update { it.copy(voiceState = VoiceState.Idle, message = message, voiceTranscript = it.voiceTranscript ?: message) }
+    }
+
+    private fun startLocalSosAlarm(durationMs: Long = 30_000L) {
+        sosAlarmJob?.cancel()
+        sosAlarmJob = scope.launch {
+            val alarmText = "\u5df2\u7ecf\u53d1\u51fa\u7d27\u6025\u4fe1\u606f\uff0c\u8bf7\u505c\u7559\u5728\u5b89\u5168\u5730\u5e26\u3002"
+            val endAt = System.currentTimeMillis() + durationMs
+            while (System.currentTimeMillis() < endAt) {
+                speakText(alarmText)
+                delay(6_500L)
+            }
+        }
     }
 
     fun sendBlindSos() {
         if (_uiState.value.sosState == SosActionState.Sending) return
         scope.launch {
-            _uiState.update { it.copy(sosState = SosActionState.Sending, message = null) }
-            val result = SmartCaneApiClient.postSos(SosRequestDto(DemoData.defaultCane.deviceId, null, null, "盲人端发起紧急求助"))
+            _uiState.update { it.copy(sosState = SosActionState.Sending, message = "正在发送 SOS，并持续呼救 30 秒") }
+            startLocalSosAlarm()
+            startPhoneLocationUpdates()
+            val location = latestPhoneLocation()
+            val deviceId = _uiState.value.currentRelation?.caneDevice?.deviceId ?: DemoData.defaultCane.deviceId
+            if (location != null) {
+                SmartCaneApiClient.postLocation(
+                    LocationUploadDto(
+                        deviceId = deviceId,
+                        latitude = location.latitude,
+                        longitude = location.longitude,
+                        provider = location.provider,
+                        quality = if (location.isFromMockProvider) "mock" else "usable",
+                        accuracyM = location.accuracy.takeIf { it > 0f },
+                        bearingDeg = location.bearing.takeIf { location.hasBearing() }
+                    )
+                )
+            }
+            val result = SmartCaneApiClient.postSos(
+                SosRequestDto(
+                    deviceId,
+                    location?.latitude,
+                    location?.longitude,
+                    "用户端发起 SOS 紧急求助，请立即联系并查看地图位置"
+                )
+            )
             when (result) {
                 is ApiResult.Success -> {
                     _uiState.update { it.copy(sosState = SosActionState.Success, message = "SOS 已发送") }
-                    speakText("紧急求助已发送")
                 }
                 is ApiResult.Failure -> _uiState.update { it.copy(sosState = SosActionState.Error, message = "发送失败") }
             }
@@ -495,25 +789,29 @@ class SmartCaneAppController private constructor(
     fun release() {
         stopPairingPolling()
         stopAlertPolling()
+        stopBlindRiskProximityMonitoring()
         tts?.stop()
         tts?.shutdown()
         tts = null
         ttsReady = false
+        if (backendVoiceRecordingActive) {
+            runCatching { backendVoiceRecorder?.stop() }
+            runCatching { backendVoiceRecorder?.release() }
+        }
+        backendVoiceRecorder = null
+        backendVoiceFile = null
+        backendVoiceRecordingActive = false
         speechRecognizer?.destroy()
         speechRecognizer = null
         voiceRecognitionActive = false
     }
 
-    fun relation(): CareRelation? {
-        _uiState.value.currentRelation?.let { return it }
-        val state = _uiState.value.storedState
-        if (state.relationStatus != RelationStatus.Active || state.relationId == null) return null
-        val now = state.relationUpdatedAtMillis ?: System.currentTimeMillis()
-        return CareRelation(state.relationId, DemoData.blindUser, state.companionUser ?: DemoData.companionUser, DemoData.defaultCane, RelationStatus.Active, now, now)
-    }
+    fun relation(): CareRelation? = _uiState.value.currentRelation
 
     fun relationUpdateText(): String {
-        val millis = _uiState.value.currentRelation?.updatedAtMillis ?: _uiState.value.storedState.relationUpdatedAtMillis ?: System.currentTimeMillis()
+        val millis = _uiState.value.currentRelation?.updatedAtMillis
+            ?: _uiState.value.storedState.relationUpdatedAtMillis
+            ?: return "??"
         return SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(millis))
     }
 
@@ -524,7 +822,7 @@ class SmartCaneAppController private constructor(
                 INSTANCE ?: run {
                     val prefs = LocalAppPreferences(context.applicationContext)
                     val controller = SmartCaneAppController(
-                        authRepository = DemoAuthRepository(prefs),
+                        authRepository = RemoteAuthRepository(prefs),
                         pairingRepository = RemotePairingRepository(prefs),
                         preferences = prefs,
                         appContext = context.applicationContext
@@ -552,6 +850,7 @@ data class AppUiState(
     val sosState: SosActionState = SosActionState.Idle,
     val isNavigationPaused: Boolean = false,
     val lastSpokenText: String? = null,
+    val voiceTranscript: String? = null,
     val urgentAlert: EmergencyAlertDto? = null
 ) {
     val isLoggedIn: Boolean get() = storedState.isLoggedIn
