@@ -129,16 +129,33 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
 
   bool downDropEvent = updateDownDropDisturbance(d);
 
-  if (downDropEvent) {
+  if (d.downValid && d.downCm > 0 && d.downCm <= SMARTCANE_DOWN_OBSTACLE_CM) {
+    risk = RiskState();
+    risk.detectedAtMs = millis();
+    risk.level = RISK_LOW;
+    risk.riskType = "down_obstacle";
+    risk.direction = "slow";
+    risk.sensor = "tof_down";
+    risk.reason = "down_distance_below_obstacle_threshold";
+    risk.distanceMm = d.downCm * 10;
+    risk.confidence = 0.65f;
+    risk.groundDrop = true;
+    chooseMoreSevere(best, risk);
+  }
+
+  bool downDropNow = d.downValid &&
+                     d.downCm > SMARTCANE_DOWN_DROP_CM &&
+                     d.downCm <= SMARTCANE_DOWN_NO_TARGET_CM;
+  if (downDropEvent || downDropNow) {
     risk = RiskState();
     risk.detectedAtMs = millis();
     risk.level = RISK_MEDIUM;
     risk.riskType = "ground_drop";
     risk.direction = "stop";
     risk.sensor = "tof_down";
-    risk.reason = "down_distance_jump_above_drop_threshold";
+    risk.reason = downDropNow ? "down_distance_above_drop_threshold" : "down_distance_jump_above_drop_threshold";
     risk.distanceMm = d.downCm * 10;
-    risk.confidence = 0.86f;
+    risk.confidence = downDropNow ? 0.78f : 0.86f;
     risk.groundDrop = true;
     risk.realtimeMedium = true;
     chooseMoreSevere(best, risk);

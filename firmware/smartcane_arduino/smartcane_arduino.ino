@@ -71,6 +71,7 @@ static unsigned long approachWindowStartMs = 0;
 static int approachStartFrontCm = 0;
 static unsigned long lastApproachFeedbackMs = 0;
 static unsigned long lastSerialCharMs = 0;
+static unsigned long fallRiskSuppressUntilMs = 0;
 
 #if SMARTCANE_GNSS_ENABLED
 static char gnssLine[128];
@@ -574,6 +575,10 @@ static void handleFallEvent(const ImuFallState &fall) {
   fallRisk.confidence = fall.confidence;
   fallRisk.detectedAtMs = millis();
   currentRisk = fallRisk;
+  stableRisk = fallRisk;
+  pendingRisk = fallRisk;
+  riskStabilizerReady = true;
+  fallRiskSuppressUntilMs = millis() + SMARTCANE_FALL_UPLOAD_COOLDOWN_MS;
 
   Serial.println();
   Serial.println(F("========================================"));
@@ -1259,10 +1264,14 @@ void loop() {
   if (now - lastSensorMs >= SMARTCANE_SENSOR_INTERVAL_MS) {
     lastSensorMs = now;
     tofRead(distances);
-    currentRisk = stabilizeRisk(calculateRisk(distances, nearby));
-    publishRiskEventIfNeeded(currentRisk);
-    monitorCompanionAlerts(currentRisk);
-    applyFeedbackForRisk(currentRisk, false, false);
+    if ((long)(fallRiskSuppressUntilMs - now) > 0) {
+      currentRisk.detectedAtMs = now;
+    } else {
+      currentRisk = stabilizeRisk(calculateRisk(distances, nearby));
+      publishRiskEventIfNeeded(currentRisk);
+      monitorCompanionAlerts(currentRisk);
+      applyFeedbackForRisk(currentRisk, false, false);
+    }
   }
 
 #if SMARTCANE_PERIODIC_SERIAL_STATUS_ENABLED

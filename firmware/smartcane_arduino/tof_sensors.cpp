@@ -172,7 +172,10 @@ bool tofRead(DistanceReadings &out) {
 
     uint16_t rawMm = readRawMm(i);
     bool ok = !sensors[i].timeoutOccurred();
-    int cm = ok ? mmToCm(rawMm) : -1;
+    bool downNoTarget = ok &&
+                        i == 3 &&
+                        (rawMm == 0 || rawMm > SMARTCANE_TOF_MAX_VALID_MM);
+    int cm = downNoTarget ? SMARTCANE_DOWN_NO_TARGET_CM : (ok ? mmToCm(rawMm) : -1);
     values[i] = filterCm(i, cm);
     valids[i] = (cm >= 0);
     anyValid = anyValid || valids[i];

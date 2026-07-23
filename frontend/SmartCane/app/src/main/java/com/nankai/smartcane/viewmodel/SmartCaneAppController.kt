@@ -93,6 +93,8 @@ class SmartCaneAppController private constructor(
     private var alertBaselineReady = false
     private var lastHardwareRiskSignature: String? = null
     private var lastHardwareRiskSpokenAt: Long = 0L
+    private var suppressHardwareRiskUntilAfterFall: Long = 0L
+    private val hardwareRiskSpeechTimes: MutableMap<String, Long> = mutableMapOf()
     private var lastNearbyRiskText: String? = null
     private var lastNearbyRiskTextSpokenAt: Long = 0L
     private val announcedNearbyRiskIds = mutableSetOf<Int>()
@@ -550,7 +552,6 @@ class SmartCaneAppController private constructor(
 
     private fun maybeSpeakHardwareRisk(state: DeviceStateDto) {
         if (!state.online) return
-        if (_uiState.value.voiceState != VoiceState.Idle) return
         if (isNonHardwareSource(state.source)) return
 
         val level = state.riskLevel.lowercase(Locale.US)
@@ -558,25 +559,26 @@ class SmartCaneAppController private constructor(
         val riskType = state.riskType.lowercase(Locale.US)
         if (riskType == "none" || riskType == "history_risk") return
 
-        val prompt = hardwareRiskPrompt(state) ?: state.voicePrompt.takeIf { it.isNotBlank() } ?: return
-        val signature = listOf(
-            state.source,
-            riskType,
-            level,
-            state.frontCm?.let { it / 10 },
-            state.leftCm?.let { it / 10 },
-            state.rightCm?.let { it / 10 },
-            state.downCm?.let { it / 10 }
-        ).joinToString("|")
         val now = System.currentTimeMillis()
-        val minIntervalMs = when (level) {
-            "high" -> 20_000L
-            "medium" -> 45_000L
-            else -> 120_000L
+        val isFall = riskType == "fall_detected"
+        if (!isFall) {
+            if (now < suppressHardwareRiskUntilAfterFall) return
+            if (_uiState.value.voiceState != VoiceState.Idle) return
         }
-        if (signature == lastHardwareRiskSignature && now - lastHardwareRiskSpokenAt < minIntervalMs) return
+
+        val prompt = hardwareRiskPrompt(state) ?: state.voicePrompt.takeIf { it.isNotBlank() } ?: return
+        val speechKey = hardwareRiskSpeechKey(riskType)
+        val lastKeySpokenAt = hardwareRiskSpeechTimes[speechKey] ?: 0L
+        if (now - lastKeySpokenAt < 10_000L) return
+
+        val signature = listOf(state.source, riskType, level).joinToString("|")
+        if (signature == lastHardwareRiskSignature && now - lastHardwareRiskSpokenAt < 10_000L) return
         lastHardwareRiskSignature = signature
         lastHardwareRiskSpokenAt = now
+        hardwareRiskSpeechTimes[speechKey] = now
+        if (isFall) {
+            suppressHardwareRiskUntilAfterFall = now + 30_000L
+        }
 
         _uiState.update { it.copy(message = "硬件实时风险：${riskLevelLabel(level)}", voiceTranscript = prompt) }
         speakText(prompt)
@@ -596,14 +598,24 @@ class SmartCaneAppController private constructor(
         val level = riskLevelLabel(state.riskLevel)
         val riskType = state.riskType.lowercase(Locale.US)
         return when {
-            riskType.contains("front") -> state.frontCm?.let { "注意${level}风险，前方${it}厘米有障碍。" }
-            riskType.contains("left") -> state.leftCm?.let { "注意${level}风险，左侧${it}厘米有障碍，请向右保持距离。" }
-            riskType.contains("right") -> state.rightCm?.let { "注意${level}风险，右侧${it}厘米有障碍，请向左保持距离。" }
+            riskType == "fall_detected" -> "检测到跌倒"
+            riskType.contains("front") -> state.frontCm?.let { "前方${it}厘米${level}风险" }
+            riskType.contains("left") -> state.leftCm?.let { "左侧${it}厘米${level}风险" }
+            riskType.contains("right") -> state.rightCm?.let { "右侧${it}厘米${level}风险" }
             riskType.contains("ground") || riskType.contains("down") || riskType.contains("drop") ->
-                state.downCm?.let { "注意${level}风险，下方${it}厘米可能有台阶或坑洼。" }
+                state.downCm?.let { "下方${it}厘米${level}风险" }
             riskType.contains("obstacle") -> nearestHardwareObstaclePrompt(state, level)
             else -> state.voicePrompt.takeIf { it.isNotBlank() }
         }
+    }
+
+    private fun hardwareRiskSpeechKey(riskType: String): String = when {
+        riskType == "fall_detected" -> "fall"
+        riskType.contains("front") -> "front"
+        riskType.contains("left") -> "left"
+        riskType.contains("right") -> "right"
+        riskType.contains("ground") || riskType.contains("down") || riskType.contains("drop") -> "down"
+        else -> riskType
     }
 
     private fun nearestHardwareObstaclePrompt(state: DeviceStateDto, level: String): String? {
@@ -614,7 +626,7 @@ class SmartCaneAppController private constructor(
             state.downCm?.let { "下方" to it }
         )
         val nearest = candidates.minByOrNull { it.second } ?: return null
-        return "注意${level}风险，${nearest.first}${nearest.second}厘米有障碍。"
+        return "${nearest.first}${nearest.second}厘米${level}风险"
     }
 
     private fun startNearbyRiskPolling() {

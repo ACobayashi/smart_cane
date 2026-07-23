@@ -7,7 +7,7 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-down90-no-close-step-20260723"
+#define SMARTCANE_BUILD_TAG "arduino-risk-voice-step-fall-20260723"
 #define SMARTCANE_DEVICE_ID "cane_001"
 #ifndef SMARTCANE_DEVICE_NAME
 #define SMARTCANE_DEVICE_NAME "÷«ƒ‹√§’»01"
@@ -141,7 +141,7 @@
 // The cane is normally held at an angle, so front/down warnings need a little
 // more reach, while side warnings are moderate to stay responsive without
 // marking every sweep as a map risk.
-#define SMARTCANE_FRONT_WARN_CM 110
+#define SMARTCANE_FRONT_WARN_CM 70
 #define SMARTCANE_FRONT_DANGER_CM 35
 #define SMARTCANE_SIDE_SAFE_CM 80
 #define SMARTCANE_SIDE_NEAR_CM 50
@@ -157,7 +157,7 @@
 #define SMARTCANE_DOWN_NO_TARGET_CM 390
 #define SMARTCANE_DOWN_DISTURBANCE_CM 25
 #define SMARTCANE_DOWN_EVENT_HOLD_MS 600
-#define SMARTCANE_FRONT_BUZZ_CM 80
+#define SMARTCANE_FRONT_BUZZ_CM 70
 #define SMARTCANE_SIDE_BUZZ_CM SMARTCANE_SIDE_NEAR_CM
 
 // Sensor limitations and filtering.
@@ -187,9 +187,9 @@
 #define SMARTCANE_IMU_SAMPLE_INTERVAL_MS 50
 #define SMARTCANE_IMU_STREAM_INTERVAL_MS 500
 #define SMARTCANE_IMU_RAW_PRINT_REGS 0
-#define SMARTCANE_FALL_IMPACT_G 1.90f
+#define SMARTCANE_FALL_IMPACT_G 1.65f
 #define SMARTCANE_FALL_FREEFALL_G 0.45f
-#define SMARTCANE_FALL_JERK_G 0.78f
+#define SMARTCANE_FALL_JERK_G 0.68f
 #define SMARTCANE_FALL_VERTICAL_DELTA_G 0.34f
 #define SMARTCANE_FALL_VERTICAL_TRIGGER_G 1.15f
 #define SMARTCANE_FALL_VERTICAL_PEAK_G 1.30f
