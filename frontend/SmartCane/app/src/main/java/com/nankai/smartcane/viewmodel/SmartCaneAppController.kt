@@ -93,6 +93,8 @@ class SmartCaneAppController private constructor(
     private var alertBaselineReady = false
     private var lastHardwareRiskSignature: String? = null
     private var lastHardwareRiskSpokenAt: Long = 0L
+    private var lastNearbyRiskText: String? = null
+    private var lastNearbyRiskTextSpokenAt: Long = 0L
     private val announcedNearbyRiskIds = mutableSetOf<Int>()
     private val nearbyRiskSpeechTimes: MutableMap<Int, Long> = mutableMapOf()
 
@@ -403,14 +405,18 @@ class SmartCaneAppController private constructor(
 
     private fun maybeSpeakNearbyRiskWarning(warning: NearbyRiskWarningDto) {
         if (isFromCurrentCane(warning.deviceId)) return
+        if (warning.riskType.lowercase(Locale.US) == "history_risk") return
         val now = System.currentTimeMillis()
         val lastSpokenAt = nearbyRiskSpeechTimes[warning.eventId] ?: 0L
         if (now - lastSpokenAt < 300_000L) return
         if (_uiState.value.voiceState == VoiceState.Listening) return
 
-        nearbyRiskSpeechTimes[warning.eventId] = now
         val distanceText = warning.distanceM.toInt().coerceAtLeast(1)
         val text = warning.voicePrompt.ifBlank { "\u524d\u65b9\u7ea6 ${distanceText} \u7c73\u6709\u98ce\u9669\u70b9\uff0c\u8bf7\u6ce8\u610f" }
+        if (text == lastNearbyRiskText && now - lastNearbyRiskTextSpokenAt < 600_000L) return
+        nearbyRiskSpeechTimes[warning.eventId] = now
+        lastNearbyRiskText = text
+        lastNearbyRiskTextSpokenAt = now
         _uiState.update { it.copy(message = "\u9644\u8fd1\u98ce\u9669\u63d0\u9192\uff1a${distanceText}\u7c73", lastSpokenText = text) }
         speakText(text)
     }
@@ -550,7 +556,7 @@ class SmartCaneAppController private constructor(
         val level = state.riskLevel.lowercase(Locale.US)
         if (level !in setOf("low", "medium", "high")) return
         val riskType = state.riskType.lowercase(Locale.US)
-        if (riskType == "none") return
+        if (riskType == "none" || riskType == "history_risk") return
 
         val prompt = hardwareRiskPrompt(state) ?: state.voicePrompt.takeIf { it.isNotBlank() } ?: return
         val signature = listOf(
@@ -581,6 +587,7 @@ class SmartCaneAppController private constructor(
         return normalized.contains("mock") ||
             normalized.contains("simulator") ||
             normalized.contains("simulation") ||
+            normalized.contains("history") ||
             normalized.contains("fake") ||
             normalized.contains("demo")
     }
@@ -641,11 +648,17 @@ class SmartCaneAppController private constructor(
                 val point = result.data
                     .filterNot { announcedNearbyRiskIds.contains(it.id) }
                     .filterNot { isFromCurrentCane(it.deviceId) }
+                    .filterNot { it.riskType.lowercase(Locale.US) == "history_risk" }
                     .filter { isWithinFiveMeters(location, it.latitude, it.longitude, it.distanceMeters) }
                     .maxWithOrNull(compareBy({ riskLevelRank(it.riskLevel) }, { it.id }))
                     ?: return
+                val text = "注意${riskLevelLabel(point.riskLevel)}风险区域"
+                val now = System.currentTimeMillis()
+                if (text == lastNearbyRiskText && now - lastNearbyRiskTextSpokenAt < 600_000L) return
                 announcedNearbyRiskIds += point.id
-                speakText("注意${riskLevelLabel(point.riskLevel)}风险区域")
+                lastNearbyRiskText = text
+                lastNearbyRiskTextSpokenAt = now
+                speakText(text)
             }
             is ApiResult.Failure -> Unit
         }
