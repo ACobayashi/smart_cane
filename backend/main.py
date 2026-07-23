@@ -41,8 +41,8 @@ SIDE_BLOCKED_CM = 18
 GROUND_BASE_CM = 55
 GROUND_DROP_THRESHOLD_CM = 95
 DOWN_OBSTACLE_CM = 20
-DOWN_STEP_EDGE_MIN_CM = 45
-DOWN_STEP_EDGE_MAX_CM = 55
+DOWN_STEP_EDGE_MIN_CM = 90
+DOWN_STEP_EDGE_MAX_CM = 389
 DEFAULT_NEARBY_RADIUS_M = 80.0
 ROUTE_RISK_BUFFER_M = 8.0
 WALKING_NAVIGATION_MAX_DISTANCE_M = 3000.0
@@ -761,6 +761,8 @@ def nearby_summary(lat: float, lng: float, radius: float) -> dict[str, Any]:
     nearby: list[dict[str, Any]] = []
     for row in rows:
         item = event_to_dict(row)
+        if is_legacy_sim_point(float(item["lat"]), float(item["lng"])):
+            continue
         distance_m = haversine_m(lat, lng, float(item["lat"]), float(item["lng"]))
         if distance_m <= radius:
             item["distance_m"] = round(distance_m, 2)
@@ -1323,6 +1325,8 @@ def active_risk_points(lat: Optional[float] = None, lng: Optional[float] = None,
         rows = conn.execute("SELECT * FROM risk_points WHERE status = 'active' ORDER BY last_reported_at DESC LIMIT ?", (max(limit * 5, limit),)).fetchall()
     points: list[dict[str, Any]] = []
     for row in rows:
+        if is_legacy_sim_point(float(row["lat"]), float(row["lng"])):
+            continue
         distance_m = None
         if lat is not None and lng is not None:
             distance_m = haversine_m(lat, lng, float(row["lat"]), float(row["lng"]))
@@ -1611,11 +1615,6 @@ def side_score(side_cm: Optional[int]) -> float:
 
 
 def ground_score(down_cm: Optional[int]) -> float:
-    if down_cm is None:
-        return 0.0
-    drop_threshold = GROUND_BASE_CM + GROUND_DROP_THRESHOLD_CM
-    if down_cm > drop_threshold:
-        return clamp(48 + (down_cm - drop_threshold) * 0.12, 48, 68)
     return 0.0
 
 
@@ -1628,12 +1627,6 @@ def down_obstacle_score(down_cm: Optional[int]) -> float:
 
 
 def ground_step_score(down_cm: Optional[int]) -> float:
-    if down_cm is None:
-        return 0.0
-    if down_cm < DOWN_OBSTACLE_CM:
-        return clamp(45 + (DOWN_OBSTACLE_CM - down_cm) * 1.00, 45, 62)
-    if DOWN_STEP_EDGE_MIN_CM <= down_cm <= DOWN_STEP_EDGE_MAX_CM:
-        return clamp(56 - abs(down_cm - 50) * 0.30, 45, 56)
     return 0.0
 
 
@@ -1858,6 +1851,12 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
     elif frame.manual_risk_type in {"fall_detected", "prolonged_obstacle", "approaching_obstacle"}:
         risk_type = frame.manual_risk_type
         score = 100.0 if risk_type == "fall_detected" else (34.0 if risk_type == "prolonged_obstacle" else 30.0)
+    elif frame.manual_risk_type in {"ground_drop", "ground_step"}:
+        risk_type = frame.manual_risk_type
+        score = 58.0
+    elif frame.manual_risk_type == "down_obstacle":
+        risk_type = "down_obstacle"
+        score = 12.0
     elif frame.alert_type in {"fall_detected", "prolonged_obstacle", "approaching_obstacle"}:
         risk_type = frame.alert_type
         score = 100.0 if risk_type == "fall_detected" else (34.0 if risk_type == "prolonged_obstacle" else 30.0)
@@ -1877,10 +1876,7 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
         }
         risk_type, score = max(scores.items(), key=lambda item: item[1])
         hist_score = history_score(history)
-        if score <= 0 and history.get("high_count", 0) >= 2:
-            risk_type = "history_risk"
-            score = 18 + min(history.get("high_count", 0) * 1.5, 10)
-        elif score > 0:
+        if score > 0:
             score = max(score, min(100.0, score + hist_score * 0.12))
 
     public_risk_type = risk_type if score > 0 else "none"
@@ -3800,12 +3796,11 @@ def nearby_risks(
 def nearby_warning_text(distance_m: float, risk_level: str, direction: str, event: dict[str, Any]) -> str:
     level_text = {"high": "\u9ad8", "medium": "\u4e2d", "low": "\u4f4e"}.get(risk_level, "\u9ad8")
     direction_text = relative_direction_label(direction)
-    base = f"{direction_text}约 {max(1, int(round(distance_m)))} 米有{level_text}风险，请注意避让"
+    base = f"{direction_text}\u7ea6 {max(1, int(round(distance_m)))} \u7c73\u6709{level_text}\u98ce\u9669\uff0c\u8bf7\u6ce8\u610f\u907f\u8ba9\u3002"
     detail = str(event.get("voicePrompt") or event.get("message") or "").strip()
     if detail and detail not in base:
         return f"{base}{detail}"
     return base
-
 
 @app.get("/api/risks/nearby-warning")
 def nearby_risk_warning(

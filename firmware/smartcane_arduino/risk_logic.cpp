@@ -109,12 +109,12 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
 
   if (!d.valid) {
     risk.level = RISK_LOW;
-    risk.riskType = nearby.highCount >= 2 ? "history_risk" : "sensor_unreliable";
-    risk.direction = nearby.highCount >= 2 ? "slow" : "none";
+    risk.riskType = "sensor_unreliable";
+    risk.direction = "none";
     risk.sensor = "tof";
     risk.reason = "tof_unavailable";
-    risk.confidence = nearby.highCount >= 2 ? 0.35f : 0.15f;
-    risk.historyInfluenced = nearby.highCount >= 2;
+    risk.confidence = 0.15f;
+    risk.historyInfluenced = false;
     return risk;
   }
 
@@ -217,17 +217,6 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
 
   if (strcmp(best.riskType, "none") != 0) {
       return best;
-  }
-
-  if (nearby.available && nearby.highCount >= 2) {
-    risk.level = RISK_LOW;
-    risk.riskType = "history_risk";
-    risk.direction = "slow";
-    risk.sensor = "backend_history";
-    risk.reason = "nearby_history_high_count";
-    risk.confidence = 0.35f;
-    risk.historyInfluenced = true;
-    return risk;
   }
 
   risk.level = RISK_LOW;
