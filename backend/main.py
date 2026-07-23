@@ -1829,12 +1829,23 @@ def amap_location(lng: float, lat: float) -> str:
     return f"{lng:.6f},{lat:.6f}"
 
 
+def parse_amap_location(value: Any) -> Optional[tuple[float, float]]:
+    text = str(value or "")
+    if "," not in text:
+        return None
+    try:
+        lng_text, lat_text = text.split(",", 1)
+        return float(lat_text), float(lng_text)
+    except ValueError:
+        return None
+
+
 async def amap_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
     key = amap_key()
     if not key:
         raise HTTPException(status_code=503, detail="AMAP_WEB_KEY is not configured")
     payload = {**params, "key": key, "output": "JSON"}
-    async with httpx.AsyncClient(timeout=12.0) as client:
+    async with httpx.AsyncClient(timeout=12.0, trust_env=False) as client:
         response = await client.get(f"{AMAP_BASE_URL}{path}", params=payload)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
@@ -1887,6 +1898,94 @@ async def geocode_address(address: str, city: Optional[str] = None) -> dict[str,
         "coordsys": "amap",
         "raw": item,
     }
+
+
+async def search_pois_around(
+    keyword: str,
+    origin_lat: float,
+    origin_lng: float,
+    origin_coordsys: str,
+    city: Optional[str] = None,
+    radius_m: float = WALKING_NAVIGATION_MAX_DISTANCE_M,
+) -> list[dict[str, Any]]:
+    origin_amap_lat, origin_amap_lng = await convert_to_amap_coord(origin_lat, origin_lng, origin_coordsys)
+    params: dict[str, Any] = {
+        "location": amap_location(origin_amap_lng, origin_amap_lat),
+        "keywords": keyword,
+        "radius": int(radius_m),
+        "offset": 10,
+        "page": 1,
+        "extensions": "base",
+        "sortrule": "distance",
+    }
+    if city:
+        params["city"] = city
+        params["citylimit"] = "true"
+    data = await amap_get("/place/around", params)
+    candidates: list[dict[str, Any]] = []
+    for poi in data.get("pois") or []:
+        location = parse_amap_location(poi.get("location"))
+        if not location:
+            continue
+        lat, lng = location
+        try:
+            distance_m = float(poi.get("distance") or haversine_m(origin_amap_lat, origin_amap_lng, lat, lng))
+        except (TypeError, ValueError):
+            distance_m = haversine_m(origin_amap_lat, origin_amap_lng, lat, lng)
+        candidates.append(
+            {
+                "id": poi.get("id"),
+                "name": poi.get("name") or keyword,
+                "address": poi.get("address") or "",
+                "province": poi.get("pname"),
+                "city": poi.get("cityname"),
+                "district": poi.get("adname"),
+                "lat": lat,
+                "lng": lng,
+                "coordsys": "amap",
+                "distance_m": round(distance_m, 1),
+                "raw": poi,
+            }
+        )
+    candidates.sort(key=lambda item: item["distance_m"])
+    return candidates
+
+
+async def resolve_destination_address(
+    address: str,
+    city: Optional[str],
+    origin_lat: Optional[float],
+    origin_lng: Optional[float],
+    origin_coordsys: str,
+) -> dict[str, Any]:
+    nearby_candidates: list[dict[str, Any]] = []
+    if origin_lat is not None and origin_lng is not None:
+        try:
+            nearby_candidates = await search_pois_around(address, origin_lat, origin_lng, origin_coordsys, city)
+        except HTTPException:
+            nearby_candidates = []
+        if nearby_candidates:
+            best = nearby_candidates[0]
+            return {
+                "address": address,
+                "formatted_address": best["name"],
+                "province": best.get("province"),
+                "city": best.get("city"),
+                "district": best.get("district"),
+                "lat": best["lat"],
+                "lng": best["lng"],
+                "coordsys": "amap",
+                "source": "amap_place_around",
+                "distance_m": best["distance_m"],
+                "candidates": nearby_candidates[:5],
+                "raw": best.get("raw"),
+            }
+
+    geocoded = await geocode_address(address, city)
+    geocoded["source"] = "amap_geocode"
+    if nearby_candidates:
+        geocoded["candidates"] = nearby_candidates[:5]
+    return geocoded
 
 
 async def reverse_geocode(lat: float, lng: float, coordsys: str = "gps") -> dict[str, Any]:
@@ -2392,11 +2491,6 @@ async def resolve_route_endpoint(request: MapRouteRequest) -> tuple[float, float
         origin_lat, origin_lng = origin_meta["lat"], origin_meta["lng"]
     elif origin_lat is not None and origin_lng is not None:
         origin_meta = {"source": "request_coordinate", "coordsys": request.coordsys}
-    if (dest_lat is None or dest_lng is None) and request.destination_text:
-        dest_meta = await geocode_address(request.destination_text, request.city)
-        dest_lat, dest_lng = dest_meta["lat"], dest_meta["lng"]
-    elif dest_lat is not None and dest_lng is not None:
-        dest_meta = {"source": "request_coordinate", "coordsys": request.coordsys}
     if (origin_lat is None or origin_lng is None) and request.device_id:
         latest = latest_location_for_device(request.device_id)
         if latest:
@@ -2404,6 +2498,19 @@ async def resolve_route_endpoint(request: MapRouteRequest) -> tuple[float, float
             origin_meta = {"source": "latest_device_location", "device_id": request.device_id, "coordsys": request.coordsys}
     if origin_lat is None or origin_lng is None:
         raise HTTPException(status_code=400, detail="origin coordinate, origin_text, or device latest location is required")
+
+    origin_coordsys = str(origin_meta.get("coordsys") or request.coordsys)
+    if (dest_lat is None or dest_lng is None) and request.destination_text:
+        dest_meta = await resolve_destination_address(
+            request.destination_text,
+            request.city,
+            origin_lat,
+            origin_lng,
+            origin_coordsys,
+        )
+        dest_lat, dest_lng = dest_meta["lat"], dest_meta["lng"]
+    elif dest_lat is not None and dest_lng is not None:
+        dest_meta = {"source": "request_coordinate", "coordsys": request.coordsys}
     if dest_lat is None or dest_lng is None:
         raise HTTPException(status_code=400, detail="destination coordinate or destination_text is required")
     return origin_lat, origin_lng, dest_lat, dest_lng, {"origin": origin_meta, "destination": dest_meta}
