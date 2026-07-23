@@ -7,8 +7,11 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-risk-thresholds-step50-20260723"
+#define SMARTCANE_BUILD_TAG "arduino-down90-no-close-step-20260723"
 #define SMARTCANE_DEVICE_ID "cane_001"
+#ifndef SMARTCANE_DEVICE_NAME
+#define SMARTCANE_DEVICE_NAME "智能盲杖01"
+#endif
 #define SMARTCANE_WIFI_SSID "xin"
 #define SMARTCANE_WIFI_PASSWORD "22222222"
 #define SMARTCANE_SERVER_BASE_URL "http://118.31.221.165:8016"
@@ -104,7 +107,7 @@
 #define SMARTCANE_PCA9685_MAX_PWM 2048
 
 // Timing.
-#define SMARTCANE_SENSOR_INTERVAL_MS 500
+#define SMARTCANE_SENSOR_INTERVAL_MS 100
 #define SMARTCANE_STATUS_INTERVAL_MS 1000
 #define SMARTCANE_STREAM_INTERVAL_MS 3000
 #define SMARTCANE_PERIODIC_SERIAL_STATUS_ENABLED 0
@@ -136,19 +139,26 @@
 
 // Risk thresholds, centimeters.
 // The cane is normally held at an angle, so front/down warnings need a little
-// more reach, while side warnings must be tighter to avoid ground/leg false
-// positives during the left-right sweeping motion.
+// more reach, while side warnings are moderate to stay responsive without
+// marking every sweep as a map risk.
 #define SMARTCANE_FRONT_WARN_CM 110
 #define SMARTCANE_FRONT_DANGER_CM 35
-#define SMARTCANE_SIDE_SAFE_CM 60
-#define SMARTCANE_SIDE_NEAR_CM 20
-#define SMARTCANE_SIDE_DANGER_CM 12
-#define SMARTCANE_SIDE_BLOCKED_CM 18
+#define SMARTCANE_SIDE_SAFE_CM 80
+#define SMARTCANE_SIDE_NEAR_CM 50
+#define SMARTCANE_SIDE_DANGER_CM 35
+#define SMARTCANE_SIDE_BLOCKED_CM 28
 #define SMARTCANE_GROUND_BASE_CM 55
-#define SMARTCANE_GROUND_DROP_THRESHOLD_CM 95
+
+// 下视距离低于 20 cm：下方近距离障碍物、凸起或上台阶
 #define SMARTCANE_DOWN_OBSTACLE_CM 20
-#define SMARTCANE_DOWN_STEP_EDGE_MIN_CM 45
-#define SMARTCANE_DOWN_STEP_EDGE_MAX_CM 90
+
+// 下视有效距离严格大于 90 cm：下台阶、坑洞或悬空
+#define SMARTCANE_DOWN_DROP_CM 90
+#define SMARTCANE_DOWN_NO_TARGET_CM 390
+#define SMARTCANE_DOWN_DISTURBANCE_CM 25
+#define SMARTCANE_DOWN_EVENT_HOLD_MS 600
+#define SMARTCANE_FRONT_BUZZ_CM 80
+#define SMARTCANE_SIDE_BUZZ_CM SMARTCANE_SIDE_NEAR_CM
 
 // Sensor limitations and filtering.
 #define SMARTCANE_TOF_MIN_VALID_MM 20

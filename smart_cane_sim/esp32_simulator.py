@@ -8,7 +8,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = "http://118.31.221.165:8016"
 DEVICE_ID = "cane_001"
 
 

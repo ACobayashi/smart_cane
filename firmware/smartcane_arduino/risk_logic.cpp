@@ -32,11 +32,18 @@ static void applyBestSide(RiskState &risk, const DistanceReadings &d) {
   risk.direction = "slow";
 }
 
-static void chooseMoreSevere(RiskState &best, const RiskState &candidate) {
-  if (candidate.level > best.level) {
-    best = candidate;
-    return;
-  }
+static void chooseMoreSevere(RiskState& best, const RiskState& candidate) {
+    // 当前还没有风险时，即使候选风险是 LOW，也要保存下来。
+    if (strcmp(best.riskType, "none") == 0 &&
+        strcmp(candidate.riskType, "none") != 0) {
+        best = candidate;
+        return;
+    }
+
+    if (candidate.level > best.level) {
+        best = candidate;
+        return;
+    }
   if (candidate.level < best.level) {
     return;
   }
@@ -53,6 +60,47 @@ static void chooseMoreSevere(RiskState &best, const RiskState &candidate) {
   if (strcmp(candidate.riskType, "front_obstacle") == 0 && strcmp(best.riskType, "front_obstacle") != 0) {
     best = candidate;
   }
+}
+
+static bool isDownNoTargetCm(int cm) {
+  return cm >= SMARTCANE_DOWN_NO_TARGET_CM;
+}
+
+static bool updateDownDropDisturbance(const DistanceReadings &d) {
+  static int lastUsableDownCm = 0;
+  static bool hasLastUsableDown = false;
+  static unsigned long dropHoldUntilMs = 0;
+
+  unsigned long now = millis();
+  if (!d.downValid || d.downCm <= 0 || isDownNoTargetCm(d.downCm)) {
+    hasLastUsableDown = false;
+    dropHoldUntilMs = 0;
+    return false;
+  }
+
+  if (d.downCm <= SMARTCANE_DOWN_DROP_CM) {
+    lastUsableDownCm = d.downCm;
+    hasLastUsableDown = true;
+    dropHoldUntilMs = 0;
+    return false;
+  }
+
+  bool jumpedFromNormalGround =
+      hasLastUsableDown &&
+      lastUsableDownCm <= SMARTCANE_DOWN_DROP_CM &&
+      d.downCm > SMARTCANE_DOWN_DROP_CM &&
+      d.downCm - lastUsableDownCm >= SMARTCANE_DOWN_DISTURBANCE_CM;
+
+  if (jumpedFromNormalGround) {
+    dropHoldUntilMs = now + SMARTCANE_DOWN_EVENT_HOLD_MS;
+  }
+
+  bool holdActive = d.downCm > SMARTCANE_DOWN_DROP_CM &&
+                    (long)(dropHoldUntilMs - now) > 0;
+
+  lastUsableDownCm = d.downCm;
+  hasLastUsableDown = true;
+  return jumpedFromNormalGround || holdActive;
 }
 
 RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &nearby) {
@@ -79,46 +127,18 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
   best.reason = "clear";
   best.confidence = d.valid ? 0.7f : 0.2f;
 
-  if (d.downValid && d.downCm > SMARTCANE_GROUND_BASE_CM + SMARTCANE_GROUND_DROP_THRESHOLD_CM) {
+  bool downDropEvent = updateDownDropDisturbance(d);
+
+  if (downDropEvent) {
+    risk = RiskState();
+    risk.detectedAtMs = millis();
     risk.level = RISK_MEDIUM;
     risk.riskType = "ground_drop";
     risk.direction = "stop";
     risk.sensor = "tof_down";
-    risk.reason = "down_distance_exceeds_ground_baseline";
+    risk.reason = "down_distance_jump_above_drop_threshold";
     risk.distanceMm = d.downCm * 10;
-    risk.confidence = 0.88f;
-    risk.groundDrop = true;
-    risk.realtimeMedium = true;
-    chooseMoreSevere(best, risk);
-  }
-
-  if (d.downValid && d.downCm < SMARTCANE_DOWN_OBSTACLE_CM) {
-    risk = RiskState();
-    risk.detectedAtMs = millis();
-    risk.level = RISK_MEDIUM;
-    risk.riskType = "ground_step";
-    risk.direction = "stop";
-    risk.sensor = "tof_down";
-    risk.reason = "down_distance_too_close_step_or_curb";
-    risk.distanceMm = d.downCm * 10;
-    risk.confidence = 0.82f;
-    risk.groundDrop = true;
-    risk.realtimeMedium = true;
-    chooseMoreSevere(best, risk);
-  }
-
-  if (d.downValid &&
-      d.downCm >= SMARTCANE_DOWN_STEP_EDGE_MIN_CM &&
-      d.downCm <= SMARTCANE_DOWN_STEP_EDGE_MAX_CM) {
-    risk = RiskState();
-    risk.detectedAtMs = millis();
-    risk.level = RISK_MEDIUM;
-    risk.riskType = "ground_step";
-    risk.direction = "stop";
-    risk.sensor = "tof_down";
-    risk.reason = "down_distance_near_step_lower_edge";
-    risk.distanceMm = d.downCm * 10;
-    risk.confidence = 0.80f;
+    risk.confidence = 0.86f;
     risk.groundDrop = true;
     risk.realtimeMedium = true;
     chooseMoreSevere(best, risk);
@@ -195,8 +215,8 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
     chooseMoreSevere(best, risk);
   }
 
-  if (best.level != RISK_LOW) {
-    return best;
+  if (strcmp(best.riskType, "none") != 0) {
+      return best;
   }
 
   if (nearby.available && nearby.highCount >= 2) {

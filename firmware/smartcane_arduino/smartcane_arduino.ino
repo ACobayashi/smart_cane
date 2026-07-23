@@ -230,6 +230,29 @@ static bool sameRiskFingerprint(const RiskState &a, const RiskState &b) {
          sameText(a.direction, b.direction);
 }
 
+static bool isCloseBuzzRisk(const RiskState &risk) {
+  if (strcmp(risk.riskType, "front_obstacle") == 0) {
+    return risk.distanceMm > 0 && risk.distanceMm <= SMARTCANE_FRONT_BUZZ_CM * 10;
+  }
+  if (strcmp(risk.riskType, "left_obstacle") == 0 ||
+      strcmp(risk.riskType, "right_obstacle") == 0) {
+    return risk.distanceMm > 0 && risk.distanceMm <= SMARTCANE_SIDE_BUZZ_CM * 10;
+  }
+  return false;
+}
+
+static bool distanceCueNeedsRefresh(const RiskState &risk, const RiskState &previous) {
+  if (!isCloseBuzzRisk(risk)) {
+    return false;
+  }
+  if (!isCloseBuzzRisk(previous)) {
+    return true;
+  }
+  return previous.distanceMm > 0 &&
+         risk.distanceMm > 0 &&
+         previous.distanceMm - risk.distanceMm >= 150;
+}
+
 static bool hasConcreteRisk(const RiskState &risk) {
   return strcmp(risk.riskType, "none") != 0 &&
          strcmp(risk.riskType, "sensor_unreliable") != 0;
@@ -259,9 +282,9 @@ static RiskState stabilizeRisk(const RiskState &measuredRisk) {
     return stableRisk;
   }
 
-  if (measuredRisk.level == RISK_LOW) {
+  if (!hasConcreteRisk(measuredRisk)) {
     pendingRiskFrames = 0;
-    if (stableRisk.level == RISK_LOW) {
+    if (!hasConcreteRisk(stableRisk)) {
       stableRisk = measuredRisk;
       clearRiskFrames = 0;
       return stableRisk;
@@ -373,9 +396,11 @@ static void runCue(FeedbackCue cue, bool withBuzzer) {
       break;
     case CUE_TURN_LEFT:
       patternTurnLeft();
+      if (withBuzzer) beep(SMARTCANE_BEEP_SHORT_MS);
       break;
     case CUE_TURN_RIGHT:
       patternTurnRight();
+      if (withBuzzer) beep(SMARTCANE_BEEP_SHORT_MS);
       break;
     case CUE_STOP:
       patternStop();
@@ -401,6 +426,7 @@ static void runCue(FeedbackCue cue, bool withBuzzer) {
       break;
     case CUE_OBSTACLE:
       patternObstacle();
+      if (withBuzzer) beep(SMARTCANE_BEEP_SHORT_MS);
       break;
     case CUE_NONE:
     default:
@@ -425,10 +451,10 @@ static FeedbackCue cueForRisk(const RiskState &risk) {
     return risk.level == RISK_HIGH ? CUE_STOP : CUE_OBSTACLE;
   }
   if (strcmp(risk.riskType, "left_obstacle") == 0) {
-    return CUE_TURN_LEFT;
+    return CUE_TURN_RIGHT;
   }
   if (strcmp(risk.riskType, "right_obstacle") == 0) {
-    return CUE_TURN_RIGHT;
+    return CUE_TURN_LEFT;
   }
   if (strcmp(risk.riskType, "front_obstacle") == 0) {
     if (strcmp(risk.direction, "stop") == 0) {
@@ -460,9 +486,18 @@ static void applyFeedbackForRisk(const RiskState &risk, bool force = false, bool
     return;
   }
   lastFeedbackMs = now;
+  bool closeObstacleBuzz =
+      (strcmp(risk.riskType, "front_obstacle") == 0 &&
+       risk.distanceMm > 0 &&
+       risk.distanceMm <= SMARTCANE_FRONT_BUZZ_CM * 10) ||
+      ((strcmp(risk.riskType, "left_obstacle") == 0 ||
+        strcmp(risk.riskType, "right_obstacle") == 0) &&
+       risk.distanceMm > 0 &&
+       risk.distanceMm <= SMARTCANE_SIDE_BUZZ_CM * 10);
   bool shouldBuzz = risk.level == RISK_HIGH ||
                     strcmp(risk.riskType, "ground_drop") == 0 ||
-                    strcmp(risk.riskType, "ground_step") == 0;
+                    strcmp(risk.riskType, "ground_step") == 0 ||
+                    closeObstacleBuzz;
   runCue(cueForRisk(risk), allowBuzzer && shouldBuzz);
 }
 
@@ -767,7 +802,8 @@ static void publishRiskEventIfNeeded(const RiskState &risk) {
     bool samePlace = latCell == lastEventLatCell && lngCell == lastEventLngCell;
     shouldPublish = !hasConcreteRisk(lastEventRisk) ||
                     !samePlace ||
-                    !sameRiskFingerprint(risk, lastEventRisk);
+                    !sameRiskFingerprint(risk, lastEventRisk) ||
+                    distanceCueNeedsRefresh(risk, lastEventRisk);
   }
 
   if (!shouldPublish) {
@@ -785,8 +821,11 @@ static void publishRiskEventIfNeeded(const RiskState &risk) {
     Serial.println(F("risk cleared"));
   } else if (risk.level == RISK_LOW) {
     Serial.println(F("distance risk low"));
-  } else if (risk.level == RISK_MEDIUM) {
+  } else if (strcmp(risk.riskType, "ground_drop") == 0 ||
+             strcmp(risk.riskType, "ground_step") == 0) {
     Serial.println(F("step/drop caution"));
+  } else if (risk.level == RISK_MEDIUM) {
+    Serial.println(F("medium risk detected"));
   } else {
     Serial.println(F("emergency risk detected"));
   }

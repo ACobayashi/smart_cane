@@ -96,6 +96,10 @@ class SmartCaneAppController private constructor(
     private val announcedNearbyRiskIds = mutableSetOf<Int>()
     private val nearbyRiskSpeechTimes: MutableMap<Int, Long> = mutableMapOf()
 
+    private fun currentCaneDeviceId(): String = _uiState.value.currentRelation?.caneDevice?.deviceId ?: DemoData.defaultCane.deviceId
+
+    private fun isFromCurrentCane(deviceId: String): Boolean =
+        deviceId.split(",").map { it.trim() }.contains(currentCaneDeviceId())
 
     private val _uiState = MutableStateFlow(AppUiState(storedState = preferences.state.value))
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
@@ -398,9 +402,10 @@ class SmartCaneAppController private constructor(
     }
 
     private fun maybeSpeakNearbyRiskWarning(warning: NearbyRiskWarningDto) {
+        if (isFromCurrentCane(warning.deviceId)) return
         val now = System.currentTimeMillis()
         val lastSpokenAt = nearbyRiskSpeechTimes[warning.eventId] ?: 0L
-        if (now - lastSpokenAt < 90_000L) return
+        if (now - lastSpokenAt < 300_000L) return
         if (_uiState.value.voiceState == VoiceState.Listening) return
 
         nearbyRiskSpeechTimes[warning.eventId] = now
@@ -522,9 +527,7 @@ class SmartCaneAppController private constructor(
                     continue
                 }
 
-                val deviceId = state.currentRelation?.caneDevice?.deviceId
-                    ?: state.storedState.relationId?.let { DemoData.defaultCane.deviceId }
-                    ?: DemoData.defaultCane.deviceId
+                val deviceId = currentCaneDeviceId()
                 when (val result = SmartCaneApiClient.getLatestDeviceState(deviceId)) {
                     is ApiResult.Success -> result.data.state?.let { maybeSpeakHardwareRisk(it) }
                     is ApiResult.Failure -> Unit
@@ -551,17 +554,20 @@ class SmartCaneAppController private constructor(
 
         val prompt = hardwareRiskPrompt(state) ?: state.voicePrompt.takeIf { it.isNotBlank() } ?: return
         val signature = listOf(
-            state.updatedAt,
             state.source,
             riskType,
             level,
-            state.frontCm,
-            state.leftCm,
-            state.rightCm,
-            state.downCm
+            state.frontCm?.let { it / 10 },
+            state.leftCm?.let { it / 10 },
+            state.rightCm?.let { it / 10 },
+            state.downCm?.let { it / 10 }
         ).joinToString("|")
         val now = System.currentTimeMillis()
-        val minIntervalMs = if (level == "low") 10_000L else 4_000L
+        val minIntervalMs = when (level) {
+            "high" -> 20_000L
+            "medium" -> 45_000L
+            else -> 120_000L
+        }
         if (signature == lastHardwareRiskSignature && now - lastHardwareRiskSpokenAt < minIntervalMs) return
         lastHardwareRiskSignature = signature
         lastHardwareRiskSpokenAt = now
@@ -634,6 +640,7 @@ class SmartCaneAppController private constructor(
             is ApiResult.Success -> {
                 val point = result.data
                     .filterNot { announcedNearbyRiskIds.contains(it.id) }
+                    .filterNot { isFromCurrentCane(it.deviceId) }
                     .filter { isWithinFiveMeters(location, it.latitude, it.longitude, it.distanceMeters) }
                     .maxWithOrNull(compareBy({ riskLevelRank(it.riskLevel) }, { it.id }))
                     ?: return
