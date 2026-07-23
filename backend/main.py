@@ -32,7 +32,7 @@ LEVEL_RANK = {"low": 0, "medium": 1, "high": 2}
 DEVICE_OFFLINE_SECONDS = 60
 AMAP_BASE_URL = "https://restapi.amap.com/v3"
 
-FRONT_WARN_CM = 110
+FRONT_WARN_CM = 70
 FRONT_DANGER_CM = 35
 SIDE_SAFE_CM = 60
 SIDE_NEAR_CM = 20
@@ -1615,6 +1615,10 @@ def side_score(side_cm: Optional[int]) -> float:
 
 
 def ground_score(down_cm: Optional[int]) -> float:
+    if down_cm is None:
+        return 0.0
+    if GROUND_DROP_THRESHOLD_CM < down_cm <= DOWN_STEP_EDGE_MAX_CM:
+        return 58.0
     return 0.0
 
 
@@ -1871,6 +1875,7 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
             "front_obstacle": front_score(frame.front_cm),
             "left_obstacle": side_score(frame.left_cm),
             "right_obstacle": side_score(frame.right_cm),
+            "down_obstacle": down_obstacle_score(frame.down_cm),
             "ground_drop": ground_score(frame.down_cm),
             "ground_step": ground_step_score(frame.down_cm),
         }
