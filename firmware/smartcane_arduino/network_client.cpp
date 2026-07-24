@@ -82,6 +82,8 @@ static const char* publicRiskLevelForBackend(const char* riskType, RiskLevel loc
     }
     if (strcmp(riskType, "ground_drop") == 0 ||
         strcmp(riskType, "ground_step") == 0 ||
+        strcmp(riskType, "down_no_target") == 0 ||
+        strcmp(riskType, "down_sensor_unavailable") == 0 ||
         strcmp(riskType, "user_mark") == 0) {
         return "medium";
     }
@@ -99,16 +101,18 @@ static const char* publicRiskLevelForBackend(const char* riskType, RiskLevel loc
 }
 
 static bool isGroundRiskType(const char* riskType) {
-    return strcmp(riskType, "ground_drop") == 0 || strcmp(riskType, "ground_step") == 0;
+    return strcmp(riskType, "ground_drop") == 0 ||
+        strcmp(riskType, "ground_step") == 0 ||
+        strcmp(riskType, "down_obstacle") == 0 ||
+        strcmp(riskType, "down_no_target") == 0 ||
+        strcmp(riskType, "down_sensor_unavailable") == 0;
 }
 
 static int downCmForUpload(const char* riskType, const DistanceReadings& distances) {
     if (isGroundRiskType(riskType)) {
         return distances.downCm;
     }
-    if (!distances.downValid ||
-        distances.downCm > SMARTCANE_DOWN_DROP_CM ||
-        distances.downCm >= SMARTCANE_DOWN_NO_TARGET_CM) {
+    if (!distances.downValid) {
         return SMARTCANE_GROUND_BASE_CM;
     }
     return distances.downCm;
@@ -351,6 +355,33 @@ bool networkAvailable() {
     return wifiConfigured() && WiFi.status() == WL_CONNECTED;
 }
 
+bool fetchDeviceCommand(String &command) {
+    command = "";
+    if (!networkAvailable()) {
+        return false;
+    }
+    HTTPClient http;
+    String path = String("/api/device-commands/next?device_id=") + SMARTCANE_DEVICE_ID;
+    http.setConnectTimeout(SMARTCANE_HTTP_TIMEOUT_MS);
+    http.setTimeout(SMARTCANE_HTTP_TIMEOUT_MS);
+    if (!http.begin(makeUrl(path.c_str()))) {
+        return false;
+    }
+    int code = http.GET();
+    if (code < 200 || code >= 300) {
+        http.end();
+        return false;
+    }
+    DynamicJsonDocument doc(512);
+    DeserializationError error = deserializeJson(doc, http.getString());
+    http.end();
+    if (error || doc["command"].isNull()) {
+        return false;
+    }
+    command = doc["command"]["command"].as<String>();
+    return command.length() > 0;
+}
+
 void networkClientUpdate() {
     if (!wifiConfigured()) {
         return;
@@ -419,7 +450,10 @@ bool uploadRiskEvent(const char* riskType,
     int distanceMm,
     const DistanceReadings& distances,
     const LocationData& location,
-    const char* extra) {
+    const char* extra,
+    const char* fallEventId,
+    bool fallDetected,
+    const char* fallStage) {
     DynamicJsonDocument doc(768);
     doc["device_id"] = SMARTCANE_DEVICE_ID;
     doc["lat"] = location.lat;
@@ -435,6 +469,13 @@ bool uploadRiskEvent(const char* riskType,
     doc["left_cm"] = distances.leftCm;
     doc["right_cm"] = distances.rightCm;
     doc["down_cm"] = downCmForUpload(riskType, distances);
+    doc["down_raw_cm"] = distances.downRawCm;
+    doc["down_valid"] = distances.downValid;
+    doc["down_status"] = distances.downStatus;
+    if (fallEventId != nullptr) doc["fall_event_id"] = fallEventId;
+    doc["fall_pending"] = false;
+    doc["fall_detected"] = fallDetected;
+    if (fallStage != nullptr) doc["fall_stage"] = fallStage;
     doc["extra_json"] = extra;
 
     String body;
@@ -454,7 +495,10 @@ bool uploadEvent(const RiskState& risk,
         risk.distanceMm,
         distances,
         location,
-        extra);
+        extra,
+        nullptr,
+        false,
+        nullptr);
 }
 
 bool uploadSensorFrame(const RiskState& risk,
@@ -463,7 +507,11 @@ bool uploadSensorFrame(const RiskState& risk,
     const ImuFallState& fall,
     const char* alertType,
     const char* extra,
-    const char* buttonEvent) {
+    const char* buttonEvent,
+    const char* fallEventId,
+    bool fallPending,
+    bool fallDetected,
+    const char* explicitFallStage) {
     DynamicJsonDocument doc(1280);
     doc["device_id"] = SMARTCANE_DEVICE_ID;
     doc["lat"] = location.lat;
@@ -472,6 +520,9 @@ bool uploadSensorFrame(const RiskState& risk,
     doc["left_cm"] = distances.leftCm;
     doc["right_cm"] = distances.rightCm;
     doc["down_cm"] = downCmForUpload(risk.riskType, distances);
+    doc["down_raw_cm"] = distances.downRawCm;
+    doc["down_valid"] = distances.downValid;
+    doc["down_status"] = distances.downStatus;
     doc["battery"] = SMARTCANE_BATTERY_PERCENT_UNKNOWN;
     doc["source"] = "esp32c5";
     doc["location_provider"] = location.provider;
@@ -493,9 +544,14 @@ bool uploadSensorFrame(const RiskState& risk,
     doc["accel_y_g"] = fall.ayG;
     doc["accel_z_g"] = fall.azG;
     doc["accel_total_g"] = fall.totalG;
-    bool fallAlert = alertType != nullptr && strcmp(alertType, "fall_detected") == 0;
-    doc["fall_detected"] = fallAlert || strcmp(risk.riskType, "fall_detected") == 0;
-    doc["fall_stage"] = fall.stage;
+    doc["pitch_deg"] = fall.pitchDeg;
+    doc["roll_deg"] = fall.rollDeg;
+    bool fallAlert = fallDetected ||
+        (alertType != nullptr && strcmp(alertType, "fall_detected") == 0);
+    doc["fall_event_id"] = fallEventId != nullptr ? fallEventId : nullptr;
+    doc["fall_pending"] = fallPending;
+    doc["fall_detected"] = fallAlert;
+    doc["fall_stage"] = explicitFallStage != nullptr ? explicitFallStage : fall.stage;
     doc["fall_confidence"] = fall.confidence;
 
     if (extra != nullptr && extra[0] != '\0') {

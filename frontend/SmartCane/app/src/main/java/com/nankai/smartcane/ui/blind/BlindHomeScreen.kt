@@ -70,11 +70,15 @@ fun BlindHomeScreen(
     message: String?,
     voiceTranscript: String?,
     urgentAlert: EmergencyAlertDto?,
+    fallPending: Boolean,
+    navigationPreference: String,
     onVoicePressStart: () -> Unit,
     onVoicePressEnd: () -> Unit,
     onRepeat: () -> Unit,
     onSos: () -> Unit,
     onDismissAlert: () -> Unit,
+    onCancelFall: () -> Unit,
+    onNavigationPreference: (String) -> Unit,
     onOpenSettings: () -> Unit
 ) {
     var showSosConfirm by rememberSaveable { mutableStateOf(false) }
@@ -165,6 +169,27 @@ fun BlindHomeScreen(
             }
 
             Spacer(Modifier.height(18.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { onNavigationPreference("safe") },
+                    modifier = Modifier.weight(1f)
+                ) { Text(if (navigationPreference == "safe") "✓ 安全优先" else "安全优先") }
+                OutlinedButton(
+                    onClick = { onNavigationPreference("distance") },
+                    modifier = Modifier.weight(1f)
+                ) { Text(if (navigationPreference == "distance") "✓ 距离优先" else "距离优先") }
+            }
+            Spacer(Modifier.height(10.dp))
+            if (fallPending) {
+                OutlinedButton(
+                    onClick = onCancelFall,
+                    modifier = Modifier.fillMaxWidth().height(58.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFECACA))
+                ) {
+                    Text("取消疑似跌倒", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                }
+                Spacer(Modifier.height(10.dp))
+            }
             Box(modifier = Modifier.fillMaxWidth().weight(0.28f), contentAlignment = Alignment.Center) {
                 SosButton(sosState = sosState, onClick = { if (sosState != SosActionState.Sending) showSosConfirm = true })
             }

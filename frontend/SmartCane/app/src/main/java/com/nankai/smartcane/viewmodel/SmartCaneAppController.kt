@@ -3,7 +3,9 @@
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.BroadcastReceiver
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
@@ -36,6 +38,7 @@ import com.nankai.smartcane.data.network.DeviceStateDto
 import com.nankai.smartcane.data.network.EmergencyAlertDto
 import com.nankai.smartcane.data.network.LocationUploadDto
 import com.nankai.smartcane.data.network.NearbyRiskWarningDto
+import com.nankai.smartcane.data.network.NavigationRouteDto
 import com.nankai.smartcane.data.network.SmartCaneApiClient
 import com.nankai.smartcane.data.network.SosRequestDto
 import com.nankai.smartcane.data.repository.AuthRepository
@@ -43,6 +46,7 @@ import com.nankai.smartcane.data.repository.DemoAuthRepository
 import com.nankai.smartcane.data.repository.PairingRepository
 import com.nankai.smartcane.data.repository.RemoteAuthRepository
 import com.nankai.smartcane.data.repository.RemotePairingRepository
+import com.nankai.smartcane.navigation.NavigationLocationService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -89,6 +93,9 @@ class SmartCaneAppController private constructor(
     private var lastKnownPhoneLocation: Location? = null
     private var latestContinuousLocation: Location? = null
     private var activeTtsUtteranceId: String? = null
+    private var activeTtsPriority: TtsPriority? = null
+    private val pendingSpeech = mutableListOf<QueuedSpeech>()
+    private val speechCooldowns = mutableMapOf<String, Long>()
     private var lastAlertId: Int = 0
     private var alertBaselineReady = false
     private var lastHardwareRiskSignature: String? = null
@@ -99,8 +106,60 @@ class SmartCaneAppController private constructor(
     private var lastNearbyRiskTextSpokenAt: Long = 0L
     private val announcedNearbyRiskIds = mutableSetOf<Int>()
     private val nearbyRiskSpeechTimes: MutableMap<Int, Long> = mutableMapOf()
+    private var navigationReceiverRegistered = false
+    private val navigationReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                NavigationLocationService.ACTION_STATE_CHANGED -> {
+                    val arrived = intent.getBooleanExtra(NavigationLocationService.EXTRA_ARRIVED, false)
+                    val offRoute = intent.getBooleanExtra(NavigationLocationService.EXTRA_OFF_ROUTE, false)
+                    val stepIndex = intent.getIntExtra(NavigationLocationService.EXTRA_STEP_INDEX, 0)
+                    val instruction = intent.getStringExtra(NavigationLocationService.EXTRA_INSTRUCTION).orEmpty()
+                    val distanceToRoute = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_ROUTE_M, 0.0)
+                    val distanceToDestination = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_DESTINATION_M, 0.0)
+                    val distanceToNextAction = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_NEXT_ACTION_M, Double.MAX_VALUE)
+                    _uiState.update {
+                        it.copy(
+                            navigationStatus = if (arrived) "arrived" else if (offRoute) "off_route" else "active",
+                            currentStepIndex = stepIndex,
+                            currentNavigationInstruction = instruction,
+                            distanceToRouteM = distanceToRoute,
+                            distanceToDestinationM = distanceToDestination,
+                            navigationArrived = arrived
+                        )
+                    }
+                    if (arrived) speakText("已到达目的地。", priority = TtsPriority.NAVIGATION)
+                    else maybeSpeakNavigationStep(stepIndex, instruction, distanceToNextAction, distanceToDestination)
+                }
+                NavigationLocationService.ACTION_REPLANNING -> {
+                    _uiState.update { it.copy(navigationStatus = "replanning") }
+                    speakText("检测到持续偏航，正在重新规划。", priority = TtsPriority.NAVIGATION)
+                }
+                NavigationLocationService.ACTION_REPLANNED -> {
+                    val success = intent.getBooleanExtra(NavigationLocationService.EXTRA_REPLAN_SUCCESS, false)
+                    _uiState.update {
+                        it.copy(
+                            navigationStatus = if (success) "active" else "replan_failed",
+                            activeNavigationRoute = NavigationLocationService.latestRoute?.bestRoute ?: it.activeNavigationRoute,
+                            alternativeNavigationRoutes = NavigationLocationService.latestRoute?.routes ?: it.alternativeNavigationRoutes
+                        )
+                    }
+                    speakText(if (success) "重新规划完成。" else "重新规划失败，请停在安全位置。", priority = TtsPriority.NAVIGATION)
+                }
+                NavigationLocationService.ACTION_LOCATION_FAILED -> {
+                    val error = intent.getStringExtra(NavigationLocationService.EXTRA_ERROR) ?: "定位不可用，导航已停止。"
+                    _uiState.update { it.copy(navigationStatus = "location_failed", message = error) }
+                    speakText(error, priority = TtsPriority.NAVIGATION)
+                }
+            }
+        }
+    }
+    private val announcedNavigationSteps = mutableSetOf<String>()
 
-    private fun currentCaneDeviceId(): String = _uiState.value.currentRelation?.caneDevice?.deviceId ?: DemoData.defaultCane.deviceId
+    private fun currentCaneDeviceId(): String =
+        _uiState.value.currentRelation?.caneDevice?.deviceId
+            ?: DemoData.defaultCane.deviceId.takeIf { _uiState.value.currentUser?.isDemo == true }
+            ?: ""
 
     private fun isFromCurrentCane(deviceId: String): Boolean =
         deviceId.split(",").map { it.trim() }.contains(currentCaneDeviceId())
@@ -109,11 +168,37 @@ class SmartCaneAppController private constructor(
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
 
     init {
+        val filter = IntentFilter().apply {
+            addAction(NavigationLocationService.ACTION_STATE_CHANGED)
+            addAction(NavigationLocationService.ACTION_REPLANNING)
+            addAction(NavigationLocationService.ACTION_REPLANNED)
+            addAction(NavigationLocationService.ACTION_LOCATION_FAILED)
+        }
+        ContextCompat.registerReceiver(appContext, navigationReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        navigationReceiverRegistered = true
         scope.launch {
             preferences.state.collectLatest { stored ->
                 _uiState.update { current -> current.copy(storedState = stored) }
             }
         }
+    }
+
+    private fun maybeSpeakNavigationStep(
+        stepIndex: Int,
+        instruction: String,
+        distanceToNextActionM: Double,
+        distanceToDestinationM: Double
+    ) {
+        if (instruction.isBlank()) return
+        if (distanceToDestinationM <= 20.0) return
+        val threshold = when {
+            distanceToNextActionM <= 10.0 -> 10
+            distanceToNextActionM <= 30.0 -> 30
+            else -> return
+        }
+        if (!announcedNavigationSteps.add("$stepIndex:$threshold")) return
+        val conciseInstruction = instruction.replace(Regex("[。；;].*"), "").trim()
+        speakText("${threshold}米后，$conciseInstruction", priority = TtsPriority.NAVIGATION)
     }
 
     fun login(account: String, password: String, rememberLogin: Boolean) {
@@ -377,7 +462,11 @@ class SmartCaneAppController private constructor(
                     continue
                 }
 
-                val deviceId = state.currentRelation?.caneDevice?.deviceId ?: DemoData.defaultCane.deviceId
+                val deviceId = currentCaneDeviceId()
+                if (deviceId.isBlank()) {
+                    delay(6_000L)
+                    continue
+                }
                 SmartCaneApiClient.postLocation(
                     LocationUploadDto(
                         deviceId = deviceId,
@@ -407,19 +496,19 @@ class SmartCaneAppController private constructor(
 
     private fun maybeSpeakNearbyRiskWarning(warning: NearbyRiskWarningDto) {
         if (isFromCurrentCane(warning.deviceId)) return
-        if (warning.riskType.lowercase(Locale.US) == "history_risk") return
         val now = System.currentTimeMillis()
         val lastSpokenAt = nearbyRiskSpeechTimes[warning.eventId] ?: 0L
         if (now - lastSpokenAt < 300_000L) return
         if (_uiState.value.voiceState == VoiceState.Listening) return
 
-        val distanceText = warning.distanceM.toInt().coerceAtLeast(1)
-        val text = warning.voicePrompt.ifBlank { "\u524d\u65b9\u7ea6 ${distanceText} \u7c73\u6709\u98ce\u9669\u70b9\uff0c\u8bf7\u6ce8\u610f" }
+        val distanceCm = (warning.distanceM * 100).toInt().coerceAtLeast(1)
+        val directionText = warning.relativeDirectionText.ifBlank { "前方" }
+        val text = "${directionText}${distanceCm}厘米${riskLevelLabel(warning.riskLevel)}风险"
         if (text == lastNearbyRiskText && now - lastNearbyRiskTextSpokenAt < 600_000L) return
         nearbyRiskSpeechTimes[warning.eventId] = now
         lastNearbyRiskText = text
         lastNearbyRiskTextSpokenAt = now
-        _uiState.update { it.copy(message = "\u9644\u8fd1\u98ce\u9669\u63d0\u9192\uff1a${distanceText}\u7c73", lastSpokenText = text) }
+        _uiState.update { it.copy(message = "附近历史风险：${distanceCm}厘米", lastSpokenText = text) }
         speakText(text)
     }
 
@@ -480,9 +569,7 @@ class SmartCaneAppController private constructor(
                     null -> state.currentUser?.role?.apiValue ?: "blind"
                 }
                 val userId = state.currentUser?.account ?: state.currentUser?.userId
-                val deviceId = state.currentRelation?.caneDevice?.deviceId
-                    ?: state.storedState.relationId?.let { DemoData.defaultCane.deviceId }
-                    ?: DemoData.defaultCane.deviceId
+                val deviceId = currentCaneDeviceId().ifBlank { null }
                 when (val result = SmartCaneApiClient.getLatestAlerts(role, userId, deviceId, lastAlertId)) {
                     is ApiResult.Success -> {
                         val newest = result.data.maxByOrNull { it.id }
@@ -505,7 +592,8 @@ class SmartCaneAppController private constructor(
                             } else {
                                 _uiState.update { it.copy(urgentAlert = newest, message = newest.title) }
                                 if (role == "blind" && sosAlarmJob?.isActive != true) {
-                                    speakText(newest.voicePrompt.ifBlank { newest.message })
+                                    val alertPrompt = if (newest.riskType == "fall_detected") "检测到跌倒" else newest.voicePrompt.ifBlank { newest.message }
+                                    speakText(alertPrompt)
                                 }
                             }
                         }
@@ -536,8 +624,19 @@ class SmartCaneAppController private constructor(
                 }
 
                 val deviceId = currentCaneDeviceId()
+                if (deviceId.isBlank()) {
+                    delay(1_000L)
+                    continue
+                }
                 when (val result = SmartCaneApiClient.getLatestDeviceState(deviceId)) {
-                    is ApiResult.Success -> result.data.state?.let { maybeSpeakHardwareRisk(it) }
+                    is ApiResult.Success -> result.data.state?.let {
+                        val wasPending = _uiState.value.fallPending
+                        _uiState.update { state -> state.copy(fallPending = it.fallPending, fallStage = it.fallStage) }
+                        if (it.fallPending && !wasPending) {
+                            speakText("疑似跌倒，按键可取消。", priority = TtsPriority.EMERGENCY)
+                        }
+                        maybeSpeakHardwareRisk(it)
+                    }
                     is ApiResult.Failure -> Unit
                 }
                 delay(1_000L)
@@ -558,9 +657,15 @@ class SmartCaneAppController private constructor(
         if (level !in setOf("low", "medium", "high")) return
         val riskType = state.riskType.lowercase(Locale.US)
         if (riskType == "none" || riskType == "history_risk") return
+        val isFall = riskType == "fall_detected"
+        if (!isFall) {
+            if (level == "low") return
+            if (riskType.contains("left") && level != "high" && (state.leftCm == null || state.leftCm > 35)) return
+            if (riskType.contains("right") && level != "high" && (state.rightCm == null || state.rightCm > 35)) return
+            if (riskType.contains("front") && level != "high" && (state.frontCm == null || state.frontCm > 40)) return
+        }
 
         val now = System.currentTimeMillis()
-        val isFall = riskType == "fall_detected"
         if (!isFall) {
             if (now < suppressHardwareRiskUntilAfterFall) return
             if (_uiState.value.voiceState != VoiceState.Idle) return
@@ -581,7 +686,7 @@ class SmartCaneAppController private constructor(
         }
 
         _uiState.update { it.copy(message = "硬件实时风险：${riskLevelLabel(level)}", voiceTranscript = prompt) }
-        speakText(prompt)
+        speakText(prompt, priority = if (isFall) TtsPriority.EMERGENCY else inferTtsPriority(prompt))
     }
 
     private fun isNonHardwareSource(source: String): Boolean {
@@ -595,16 +700,15 @@ class SmartCaneAppController private constructor(
     }
 
     private fun hardwareRiskPrompt(state: DeviceStateDto): String? {
-        val level = riskLevelLabel(state.riskLevel)
         val riskType = state.riskType.lowercase(Locale.US)
         return when {
             riskType == "fall_detected" -> "检测到跌倒"
-            riskType.contains("front") -> state.frontCm?.let { "前方${it}厘米${level}风险" }
-            riskType.contains("left") -> state.leftCm?.let { "左侧${it}厘米${level}风险" }
-            riskType.contains("right") -> state.rightCm?.let { "右侧${it}厘米${level}风险" }
-            riskType.contains("ground") || riskType.contains("down") || riskType.contains("drop") ->
-                state.downCm?.let { "下方${it}厘米${level}风险" }
-            riskType.contains("obstacle") -> nearestHardwareObstaclePrompt(state, level)
+            riskType.contains("front") -> state.frontCm?.let { "前方${it}厘米有障碍" }
+            riskType.contains("left") -> state.leftCm?.let { "左侧${it}厘米有障碍，请向右保持距离" }
+            riskType.contains("right") -> state.rightCm?.let { "右侧${it}厘米有障碍，请向左保持距离" }
+            riskType.contains("ground") || riskType.contains("drop") -> "前方存在落差，请立即停下并探测台阶"
+            riskType.contains("down_sensor") -> "下视传感器异常，请停下检查"
+            riskType.contains("obstacle") -> nearestHardwareObstaclePrompt(state)
             else -> state.voicePrompt.takeIf { it.isNotBlank() }
         }
     }
@@ -618,7 +722,7 @@ class SmartCaneAppController private constructor(
         else -> riskType
     }
 
-    private fun nearestHardwareObstaclePrompt(state: DeviceStateDto, level: String): String? {
+    private fun nearestHardwareObstaclePrompt(state: DeviceStateDto): String? {
         val candidates = listOfNotNull(
             state.frontCm?.let { "前方" to it },
             state.leftCm?.let { "左侧" to it },
@@ -626,7 +730,7 @@ class SmartCaneAppController private constructor(
             state.downCm?.let { "下方" to it }
         )
         val nearest = candidates.minByOrNull { it.second } ?: return null
-        return "${nearest.first}${nearest.second}厘米${level}风险"
+        return "${nearest.first}${nearest.second}厘米有障碍"
     }
 
     private fun startNearbyRiskPolling() {
@@ -660,11 +764,11 @@ class SmartCaneAppController private constructor(
                 val point = result.data
                     .filterNot { announcedNearbyRiskIds.contains(it.id) }
                     .filterNot { isFromCurrentCane(it.deviceId) }
-                    .filterNot { it.riskType.lowercase(Locale.US) == "history_risk" }
+                    .filter { riskLevelRank(it.riskLevel) >= riskLevelRank("medium") }
                     .filter { isWithinFiveMeters(location, it.latitude, it.longitude, it.distanceMeters) }
                     .maxWithOrNull(compareBy({ riskLevelRank(it.riskLevel) }, { it.id }))
                     ?: return
-                val text = "注意${riskLevelLabel(point.riskLevel)}风险区域"
+                val text = "接近道路风险点，请减速确认"
                 val now = System.currentTimeMillis()
                 if (text == lastNearbyRiskText && now - lastNearbyRiskTextSpokenAt < 600_000L) return
                 announcedNearbyRiskIds += point.id
@@ -809,22 +913,80 @@ class SmartCaneAppController private constructor(
     }
 
     fun speakText(text: String) {
-        speakText(text, listenAfter = false)
+        speakText(text, listenAfter = false, priority = inferTtsPriority(text))
     }
 
-    private fun speakText(text: String, listenAfter: Boolean) {
+    fun cancelPendingFall() {
+        if (!_uiState.value.fallPending) return
+        val deviceId = currentCaneDeviceId()
+        if (deviceId.isBlank()) {
+            _uiState.update { it.copy(message = "未绑定真实盲杖，无法发送取消指令") }
+            return
+        }
+        scope.launch {
+            when (val result = SmartCaneApiClient.cancelPendingFall(deviceId)) {
+                is ApiResult.Success -> if (result.data) {
+                    _uiState.update { it.copy(fallPending = false, fallStage = "slow_fall_cancel_requested", message = "已发送跌倒取消请求") }
+                    speakText("已取消。", priority = TtsPriority.EMERGENCY)
+                }
+                is ApiResult.Failure -> _uiState.update { it.copy(message = "取消失败：${result.message}") }
+            }
+        }
+    }
+
+    private fun speakText(text: String, priority: TtsPriority) {
+        speakText(text, listenAfter = false, priority = priority)
+    }
+
+    private fun inferTtsPriority(text: String): TtsPriority = when {
+        text.contains("SOS", ignoreCase = true) || text.contains("跌倒") || text.contains("告警") -> TtsPriority.EMERGENCY
+        text.contains("台阶") || text.contains("坑") || text.contains("下视") -> TtsPriority.STEP
+        text.contains("请停") || text.contains("停止") -> TtsPriority.OBSTACLE_STOP
+        text.contains("导航") || text.contains("转") || text.contains("到达") || text.contains("规划") || text.contains("偏航") -> TtsPriority.NAVIGATION
+        text.contains("风险") -> TtsPriority.ROAD_RISK
+        else -> TtsPriority.NORMAL
+    }
+
+    private fun speechKey(text: String): String = text.trim().lowercase(Locale.CHINA)
+
+    private fun speakText(
+        text: String,
+        listenAfter: Boolean,
+        priority: TtsPriority = inferTtsPriority(text),
+        fromQueue: Boolean = false
+    ) {
+        val cleanText = text.trim()
+        if (cleanText.isBlank()) return
+        val now = System.currentTimeMillis()
+        val key = speechKey(cleanText)
+        if (!fromQueue && now - (speechCooldowns[key] ?: 0L) < 12_000L) return
+        if (!fromQueue && pendingSpeech.any { speechKey(it.text) == key }) return
+        val currentPriority = activeTtsPriority
+        if (activeTtsUtteranceId != null && currentPriority != null) {
+            if (priority.rank <= currentPriority.rank) {
+                pendingSpeech += QueuedSpeech(cleanText, listenAfter, priority)
+                pendingSpeech.sortByDescending { it.priority.rank }
+                return
+            }
+            pendingSpeech.removeAll { it.priority.rank < priority.rank }
+            tts?.stop()
+            activeTtsUtteranceId = null
+        }
+        speechCooldowns[key] = now
         if (voiceRecognitionActive) {
             speechRecognizer?.cancel()
             voiceRecognitionActive = false
         }
         val utteranceId = "smartcane_${System.currentTimeMillis()}"
         activeTtsUtteranceId = utteranceId
-        _uiState.update { it.copy(lastSpokenText = text, voiceState = VoiceState.Speaking, message = "正在播报") }
+        activeTtsPriority = priority
+        _uiState.update { it.copy(lastSpokenText = cleanText, voiceState = VoiceState.Speaking, message = "正在播报") }
 
         fun finishSpeaking() {
             scope.launch {
                 if (activeTtsUtteranceId != utteranceId) return@launch
                 activeTtsUtteranceId = null
+                activeTtsPriority = null
                 if (listenAfter) {
                     _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "请按住说话", voiceTranscript = "请按住说话") }
                 } else {
@@ -835,6 +997,10 @@ class SmartCaneAppController private constructor(
                             it
                         }
                     }
+                }
+                val next = pendingSpeech.removeFirstOrNull()
+                if (next != null) {
+                    speakText(next.text, next.listenAfter, next.priority, fromQueue = true)
                 }
             }
         }
@@ -851,7 +1017,7 @@ class SmartCaneAppController private constructor(
                     if (errorUtteranceId == utteranceId) finishSpeaking()
                 }
             })
-            val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+            val result = engine.speak(cleanText, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
             if (result == TextToSpeech.ERROR) {
                 finishSpeaking()
             }
@@ -944,7 +1110,12 @@ class SmartCaneAppController private constructor(
             _uiState.update { it.copy(voiceState = VoiceState.Processing, message = "正在识别语音", voiceTranscript = "正在识别语音…") }
             ensureLocationUpdates()
             val location = currentPhoneLocation()
-            when (val result = SmartCaneApiClient.postVoiceCommand(DemoData.defaultCane.deviceId, file, location?.latitude, location?.longitude)) {
+            val deviceId = currentCaneDeviceId()
+            if (deviceId.isBlank()) {
+                _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "请先绑定真实盲杖设备") }
+                return@launch
+            }
+            when (val result = SmartCaneApiClient.postVoiceCommand(deviceId, file, location?.latitude, location?.longitude)) {
                 is ApiResult.Success -> {
                     _uiState.update {
                         it.copy(
@@ -1037,8 +1208,29 @@ class SmartCaneAppController private constructor(
 
             scope.launch {
                 _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = "\u4f60\u8bf4\uff1a$text", voiceTranscript = text) }
-                when (val result = SmartCaneApiClient.postVoiceRoute(text, null, null)) {
-                    is ApiResult.Success -> speakText(result.data.voicePrompt.ifBlank { "\u5df2\u6536\u5230\u8def\u7ebf\u8bf7\u6c42" })
+                startPhoneLocationUpdates()
+                val location = latestPhoneLocation()
+                val deviceId = currentCaneDeviceId()
+                when (val result = SmartCaneApiClient.postVoiceRoute(
+                    text, location?.latitude, location?.longitude,
+                    deviceId = deviceId, routePreference = _uiState.value.navigationPreference
+                )) {
+                    is ApiResult.Success -> {
+                        result.data.sessionId?.let {
+                            NavigationLocationService.latestRoute = result.data
+                            NavigationLocationService.start(appContext, it, deviceId)
+                            announcedNavigationSteps.clear()
+                            _uiState.update { state ->
+                                state.copy(
+                                    navigationStatus = "active",
+                                    activeNavigationRoute = result.data.bestRoute,
+                                    alternativeNavigationRoutes = result.data.routes,
+                                    selectedRouteIndex = result.data.selectedRouteIndex
+                                )
+                            }
+                        }
+                        speakText(result.data.voicePrompt.ifBlank { "\u5df2\u6536\u5230\u8def\u7ebf\u8bf7\u6c42" })
+                    }
                     is ApiResult.Failure -> speakText("\u8bed\u97f3\u6307\u4ee4\u5df2\u6536\u5230\uff0c\u4f46\u540e\u7aef\u6682\u65f6\u4e0d\u53ef\u7528")
                 }
             }
@@ -1135,7 +1327,11 @@ class SmartCaneAppController private constructor(
 
         scope.launch {
             _uiState.update { it.copy(voiceState = VoiceState.Speaking, message = message, voiceTranscript = "\u6b63\u5728\u4e0a\u4f20\u5230\u540e\u7aef\u8bc6\u522b\u2026") }
-            val deviceId = _uiState.value.currentRelation?.caneDevice?.deviceId ?: DemoData.defaultCane.deviceId
+            val deviceId = currentCaneDeviceId()
+            if (deviceId.isBlank()) {
+                _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "请先绑定真实盲杖设备") }
+                return@launch
+            }
             val location = currentNavigationLocation()
             if (location == null) {
                 _uiState.update {
@@ -1195,7 +1391,12 @@ class SmartCaneAppController private constructor(
             startLocalSosAlarm()
             startPhoneLocationUpdates()
             val location = latestPhoneLocation()
-            val deviceId = _uiState.value.currentRelation?.caneDevice?.deviceId ?: DemoData.defaultCane.deviceId
+            val deviceId = currentCaneDeviceId()
+            if (deviceId.isBlank()) {
+                sosAlarmJob?.cancel()
+                _uiState.update { it.copy(sosState = SosActionState.Error, message = "请先绑定真实盲杖设备") }
+                return@launch
+            }
             if (location != null) {
                 SmartCaneApiClient.postLocation(
                     LocationUploadDto(
@@ -1226,6 +1427,25 @@ class SmartCaneAppController private constructor(
         }
     }
 
+    fun stopNavigation() {
+        NavigationLocationService.stop(appContext)
+        announcedNavigationSteps.clear()
+        _uiState.update {
+            it.copy(
+                navigationStatus = "idle",
+                activeNavigationRoute = null,
+                alternativeNavigationRoutes = emptyList(),
+                navigationArrived = false
+            )
+        }
+    }
+
+    fun setNavigationPreference(preference: String) {
+        if (preference !in setOf("safe", "distance")) return
+        _uiState.update { it.copy(navigationPreference = preference) }
+        speakText(if (preference == "safe") "已选择安全优先。" else "已选择距离优先。", priority = TtsPriority.NORMAL)
+    }
+
     fun release() {
         stopPairingPolling()
         stopAlertPolling()
@@ -1235,6 +1455,8 @@ class SmartCaneAppController private constructor(
         tts = null
         ttsReady = false
         activeTtsUtteranceId = null
+        activeTtsPriority = null
+        pendingSpeech.clear()
         voiceRecognitionActive = false
         voiceRecordingJob?.cancel()
         voiceRecordingJob = null
@@ -1252,6 +1474,10 @@ class SmartCaneAppController private constructor(
         backendVoiceRecordingActive = false
         speechRecognizer?.destroy()
         speechRecognizer = null
+        if (navigationReceiverRegistered) {
+            runCatching { appContext.unregisterReceiver(navigationReceiver) }
+            navigationReceiverRegistered = false
+        }
     }
 
     fun relation(): CareRelation? = _uiState.value.currentRelation
@@ -1290,6 +1516,10 @@ class SmartCaneAppController private constructor(
 
 enum class VoiceState(val label: String) { Idle("按住说话"), Listening("正在录音"), Processing("正在识别"), Speaking("正在播报") }
 enum class SosActionState { Idle, Sending, Success, Error }
+enum class TtsPriority(val rank: Int) {
+    NORMAL(1), ROAD_RISK(2), NAVIGATION(3), OBSTACLE_STOP(4), STEP(5), EMERGENCY(6)
+}
+data class QueuedSpeech(val text: String, val listenAfter: Boolean, val priority: TtsPriority)
 
 data class AppUiState(
     val storedState: StoredAppState,
@@ -1305,6 +1535,22 @@ data class AppUiState(
     val lastSpokenText: String? = null,
     val voiceTranscript: String? = null,
     val urgentAlert: EmergencyAlertDto? = null
+    ,
+    val navigationStatus: String = "idle",
+    val currentStepIndex: Int = 0,
+    val currentNavigationInstruction: String = "",
+    val distanceToRouteM: Double = 0.0,
+    val distanceToDestinationM: Double = 0.0,
+    val navigationArrived: Boolean = false
+    ,
+    val fallPending: Boolean = false,
+    val fallStage: String? = null
+    ,
+    val activeNavigationRoute: NavigationRouteDto? = null,
+    val alternativeNavigationRoutes: List<NavigationRouteDto> = emptyList(),
+    val selectedRouteIndex: Int? = null
+    ,
+    val navigationPreference: String = "safe"
 ) {
     val isLoggedIn: Boolean get() = storedState.isLoggedIn
     val currentUser: UserProfile? get() = storedState.currentUser

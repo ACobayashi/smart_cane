@@ -72,6 +72,20 @@ static int approachStartFrontCm = 0;
 static unsigned long lastApproachFeedbackMs = 0;
 static unsigned long lastSerialCharMs = 0;
 static unsigned long fallRiskSuppressUntilMs = 0;
+static bool pendingSlowFallUpload = false;
+static unsigned long lastDeviceCommandPollMs = 0;
+static unsigned long pendingSlowFallUntilMs = 0;
+static RiskState pendingSlowFallRisk;
+static ImuFallState pendingSlowFallState;
+static String activeFallEventId;
+
+static String newFallEventId() {
+  uint64_t chip = ESP.getEfuseMac();
+  char value[48];
+  snprintf(value, sizeof(value), "%04X%08lX-%lu",
+           (uint16_t)(chip >> 32), (unsigned long)chip, millis());
+  return String(value);
+}
 
 #if SMARTCANE_GNSS_ENABLED
 static char gnssLine[128];
@@ -87,6 +101,8 @@ static void repeatLastCue();
 static void handleSos();
 static void handleVoiceRequest();
 static void handleFallEvent(const ImuFallState &fall);
+static void checkPendingSlowFallUpload();
+static bool cancelPendingSlowFall(const char *source);
 static void monitorCompanionAlerts(const RiskState &risk);
 static void uploadCompanionAlert(const char *riskType, RiskLevel level, const char *reason);
 static void handleButtonEvent(ButtonEventType type);
@@ -445,7 +461,10 @@ static FeedbackCue cueForRisk(const RiskState &risk) {
   if (strcmp(risk.riskType, "fall_detected") == 0) {
     return CUE_NONE;
   }
-  if (strcmp(risk.riskType, "ground_drop") == 0 || strcmp(risk.riskType, "ground_step") == 0) {
+  if (strcmp(risk.riskType, "ground_drop") == 0 ||
+      strcmp(risk.riskType, "ground_step") == 0 ||
+      strcmp(risk.riskType, "down_no_target") == 0 ||
+      strcmp(risk.riskType, "down_sensor_unavailable") == 0) {
     return CUE_GROUND_DROP;
   }
   if (strcmp(risk.riskType, "down_obstacle") == 0) {
@@ -498,6 +517,8 @@ static void applyFeedbackForRisk(const RiskState &risk, bool force = false, bool
   bool shouldBuzz = risk.level == RISK_HIGH ||
                     strcmp(risk.riskType, "ground_drop") == 0 ||
                     strcmp(risk.riskType, "ground_step") == 0 ||
+                    strcmp(risk.riskType, "down_no_target") == 0 ||
+                    strcmp(risk.riskType, "down_sensor_unavailable") == 0 ||
                     closeObstacleBuzz;
   runCue(cueForRisk(risk), allowBuzzer && shouldBuzz);
 }
@@ -566,6 +587,7 @@ static void handleVoiceRequest() {
 }
 
 static void handleFallEvent(const ImuFallState &fall) {
+  activeFallEventId = newFallEventId();
   RiskState fallRisk;
   fallRisk.level = RISK_HIGH;
   fallRisk.riskType = "fall_detected";
@@ -601,7 +623,27 @@ static void handleFallEvent(const ImuFallState &fall) {
   beepPatternSos();
   recordPathPoint(fallRisk);
 
-  String extra = String("{\"source\":\"bmi270_imu\",\"notify\":\"blind_and_companion\",\"fall_stage\":\"") +
+  if (strcmp(fall.reason, "confirmed_slow_fall") == 0 ||
+      strcmp(fall.stage, "slow_lying_candidate") == 0) {
+    pendingSlowFallUpload = true;
+    pendingSlowFallUntilMs = millis() + SMARTCANE_FALL_SLOW_CANCEL_MS;
+    pendingSlowFallRisk = fallRisk;
+    pendingSlowFallState = fall;
+    currentRisk.level = RISK_HIGH;
+    currentRisk.riskType = "fall_pending";
+    currentRisk.direction = "stop";
+    currentRisk.reason = "slow_fall_cancel_pending";
+    stableRisk = currentRisk;
+    pendingRisk = currentRisk;
+    uploadSensorFrame(currentRisk, distances, location, fall, nullptr,
+                      "source=slow_fall_cancel_window", nullptr,
+                      activeFallEventId.c_str(), true, false,
+                      "slow_fall_cancel_pending");
+    Serial.println(F("[FALL] slow fall pending; short press or touch E2 cancels before companion upload"));
+    return;
+  }
+
+  String extra = String("{\"source\":\"bmi270_imu\",\"notify\":\"blind_and_companion\",\"fall_stage\":\"fall_fast\",\"imu_stage\":\"") +
                  fall.stage + "\",\"total_g\":" + String(fall.totalG, 2) +
                  ",\"pitch_deg\":" + String(fall.pitchDeg, 1) +
                  ",\"roll_deg\":" + String(fall.rollDeg, 1) + "}";
@@ -612,7 +654,69 @@ static void handleFallEvent(const ImuFallState &fall) {
                   -1,
                   distances,
                   location,
-                  extra.c_str());
+                  extra.c_str(),
+                  activeFallEventId.c_str(),
+                  true,
+                  "fast_fall_confirmed");
+}
+
+static void checkPendingSlowFallUpload() {
+  if (!pendingSlowFallUpload) {
+    return;
+  }
+  if ((long)(pendingSlowFallUntilMs - millis()) > 0) {
+    return;
+  }
+  pendingSlowFallUpload = false;
+  currentRisk = pendingSlowFallRisk;
+  stableRisk = pendingSlowFallRisk;
+  pendingRisk = pendingSlowFallRisk;
+  fallRiskSuppressUntilMs = millis() + SMARTCANE_FALL_UPLOAD_COOLDOWN_MS;
+  String extra = String("{\"source\":\"bmi270_imu\",\"notify\":\"blind_and_companion\",\"fall_stage\":\"fall_slow\",\"imu_stage\":\"") +
+                 pendingSlowFallState.stage + "\",\"total_g\":" + String(pendingSlowFallState.totalG, 2) +
+                 ",\"pitch_deg\":" + String(pendingSlowFallState.pitchDeg, 1) +
+                 ",\"roll_deg\":" + String(pendingSlowFallState.rollDeg, 1) + "}";
+  uploadRiskEvent("fall_detected",
+                  "high",
+                  "stop",
+                  "bmi270_imu",
+                  -1,
+                  distances,
+                  location,
+                  extra.c_str(),
+                  activeFallEventId.c_str(),
+                  true,
+                  "slow_fall_confirmed");
+}
+
+static bool cancelPendingSlowFall(const char *source) {
+  if (!pendingSlowFallUpload) {
+    return false;
+  }
+  pendingSlowFallUpload = false;
+  fallRiskSuppressUntilMs = 0;
+  imuFallClear();
+  currentRisk.level = RISK_LOW;
+  currentRisk.riskType = "fall_cancelled";
+  currentRisk.direction = "none";
+  currentRisk.sensor = "bmi270_imu";
+  currentRisk.reason = source;
+  currentRisk.confidence = 0.4f;
+  Serial.print(F("[FALL] slow fall cancelled by "));
+  Serial.println(source);
+  uploadRiskEvent("fall_cancelled",
+                  "low",
+                  "none",
+                  "bmi270_imu",
+                  -1,
+                  distances,
+                  location,
+                  "{\"source\":\"bmi270_imu\",\"fall_stage\":\"slow_fall_cancelled\"}",
+                  activeFallEventId.c_str(),
+                  false,
+                  "slow_fall_cancelled");
+  activeFallEventId = "";
+  return true;
 }
 
 static void uploadCompanionAlert(const char *riskType, RiskLevel level, const char *reason) {
@@ -715,6 +819,10 @@ static void handleButtonEvent(ButtonEventType type) {
     return;
   }
 
+  if (cancelPendingSlowFall("button_press")) {
+    return;
+  }
+
   if (type == BUTTON_EVENT_DOUBLE_CLICK) {
     handleVoiceRequest();
     return;
@@ -748,6 +856,9 @@ static void handleTouchEvent(uint8_t electrode, TouchEventType type) {
   }
 
   if (electrode == 2 && type == TOUCH_EVENT_TAP) {
+    if (cancelPendingSlowFall("touch_e2")) {
+      return;
+    }
     repeatLastCue();
     return;
   }
@@ -827,8 +938,10 @@ static void publishRiskEventIfNeeded(const RiskState &risk) {
   } else if (risk.level == RISK_LOW) {
     Serial.println(F("distance risk low"));
   } else if (strcmp(risk.riskType, "ground_drop") == 0 ||
-             strcmp(risk.riskType, "ground_step") == 0) {
-    Serial.println(F("step/drop caution"));
+             strcmp(risk.riskType, "ground_step") == 0 ||
+             strcmp(risk.riskType, "down_no_target") == 0 ||
+             strcmp(risk.riskType, "down_sensor_unavailable") == 0) {
+    Serial.println(F("down step/drop caution"));
   } else if (risk.level == RISK_MEDIUM) {
     Serial.println(F("medium risk detected"));
   } else {
@@ -997,7 +1110,7 @@ static void processCommand(String command) {
     printStatus();
   } else if (command == "read") {
     tofRead(distances);
-    currentRisk = stabilizeRisk(calculateRisk(distances, nearby));
+    currentRisk = stabilizeRisk(calculateRisk(distances, nearby, imuFallCurrent()));
     printSensorRiskSnapshot();
   } else if (command == "raw" || command == "tofraw") {
     tofPrintRawReadings();
@@ -1234,7 +1347,7 @@ void setup() {
   }
 
   tofRead(distances);
-  currentRisk = stabilizeRisk(calculateRisk(distances, nearby));
+  currentRisk = stabilizeRisk(calculateRisk(distances, nearby, imuFallCurrent()));
   recordPathPointIfMoved(currentRisk);
 #if !SMARTCANE_PRODUCT_MODE
   printHelp();
@@ -1258,6 +1371,14 @@ void loop() {
   if (imuFallConsumeEvent(fall)) {
     handleFallEvent(fall);
   }
+  checkPendingSlowFallUpload();
+  if (networkAvailable() && now - lastDeviceCommandPollMs >= SMARTCANE_STATUS_INTERVAL_MS) {
+    lastDeviceCommandPollMs = now;
+    String deviceCommand;
+    if (fetchDeviceCommand(deviceCommand) && deviceCommand == "cancel_fall") {
+      cancelPendingSlowFall("android_app");
+    }
+  }
   updateGnssLocation();
   networkClientUpdate();
 
@@ -1267,7 +1388,7 @@ void loop() {
     if ((long)(fallRiskSuppressUntilMs - now) > 0) {
       currentRisk.detectedAtMs = now;
     } else {
-      currentRisk = stabilizeRisk(calculateRisk(distances, nearby));
+      currentRisk = stabilizeRisk(calculateRisk(distances, nearby, imuFallCurrent()));
       publishRiskEventIfNeeded(currentRisk);
       monitorCompanionAlerts(currentRisk);
       applyFeedbackForRisk(currentRisk, false, false);
@@ -1319,7 +1440,12 @@ void loop() {
                       location,
                       imuFallCurrent(),
                       nullptr,
-                      "source=periodic_real_frame");
+                      "source=periodic_real_frame",
+                      nullptr,
+                      activeFallEventId.length() ? activeFallEventId.c_str() : nullptr,
+                      pendingSlowFallUpload,
+                      !pendingSlowFallUpload && strcmp(currentRisk.riskType, "fall_detected") == 0,
+                      pendingSlowFallUpload ? "slow_fall_cancel_pending" : nullptr);
   }
 
   if (networkMode && networkAvailable() && now - lastNearbyFetchMs >= SMARTCANE_NEARBY_FETCH_INTERVAL_MS) {

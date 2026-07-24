@@ -17,7 +17,10 @@ bool uploadRiskEvent(const char *riskType,
                      int distanceMm,
                      const DistanceReadings &distances,
                      const LocationData &location,
-                     const char *extra);
+                     const char *extra,
+                     const char *fallEventId = nullptr,
+                     bool fallDetected = false,
+                     const char *fallStage = nullptr);
 bool uploadEvent(const RiskState &risk,
                  const DistanceReadings &distances,
                  const LocationData &location,
@@ -28,7 +31,11 @@ bool uploadSensorFrame(const RiskState &risk,
                        const ImuFallState &fall,
                        const char *alertType,
                        const char *extra,
-                       const char *buttonEvent = nullptr);
+                       const char *buttonEvent = nullptr,
+                       const char *fallEventId = nullptr,
+                       bool fallPending = false,
+                       bool fallDetected = false,
+                       const char *fallStage = nullptr);
 
 bool fetchNearbyRisks(double lat, double lng, NearbyRiskSummary &out);
 bool fetchDeepRisk(const RiskState &risk,
@@ -38,3 +45,4 @@ bool fetchDeepRisk(const RiskState &risk,
 
 void printNearbySummary(const NearbyRiskSummary &summary);
 void printDeepRisk(const DeepRiskResult &result);
+bool fetchDeviceCommand(String &command);

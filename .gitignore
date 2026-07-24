@@ -40,3 +40,53 @@ build/
 build_arduino_check/
 sdkconfig
 sdkconfig.old
+# Android build files
+frontend/SmartCane/.gradle/
+frontend/SmartCane/build/
+frontend/SmartCane/app/build/
+frontend/SmartCane/local.properties/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+backend/.venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment and secrets
+.env
+*.key
+# Android build files
+frontend/SmartCane/.gradle/
+frontend/SmartCane/build/
+frontend/SmartCane/app/build/
+frontend/SmartCane/local.properties/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+backend/.venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment and secrets
+.env
+*.key
+frontend/SmartCane/.kotlin/
+frontend/SmartCane/.gradle/
+frontend/SmartCane/build/
+frontend/SmartCane/app/build/
+frontend/SmartCane/local.properties
+__pycache__/
+*.pyc
+.pytest_cache/
+backend/.venv/
+.env

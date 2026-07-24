@@ -28,6 +28,10 @@ static ImuFallState state;
 static unsigned long lastSampleMs = 0;
 static unsigned long impactMs = 0;
 static unsigned long lyingSinceMs = 0;
+static unsigned long slowLyingSinceMs = 0;
+static unsigned long uprightStableSinceMs = 0;
+static unsigned long slowTiltStartedMs = 0;
+static bool slowTiltCandidate = false;
 static unsigned long lastFallEventMs = 0;
 static unsigned long lastRawStreamPrintMs = 0;
 static unsigned long recoverySinceMs = 0;
@@ -50,6 +54,10 @@ static void printStreamSample();
 static void resetFallCandidate() {
   impactMs = 0;
   lyingSinceMs = 0;
+  slowLyingSinceMs = 0;
+  uprightStableSinceMs = 0;
+  slowTiltStartedMs = 0;
+  slowTiltCandidate = false;
   candidatePeakG = 0.0f;
   candidateMinG = 10.0f;
   candidateHadFreefall = false;
@@ -336,6 +344,30 @@ static bool readAccel() {
   bool lying = stableGravity &&
                (tiltDeg >= SMARTCANE_FALL_LIE_TILT_DEG ||
                 postureDeg >= SMARTCANE_FALL_POSTURE_DEG);
+  bool uprightUsage = stillNow && postureDeg <= 35.0f;
+  if (uprightUsage) {
+    if (uprightStableSinceMs == 0) {
+      uprightStableSinceMs = now;
+    }
+  }
+  bool wasUprightStable = uprightStableSinceMs != 0 &&
+                           now - uprightStableSinceMs >= SMARTCANE_FALL_SLOW_UPRIGHT_MS;
+  bool slowTiltMotion = wasUprightStable &&
+                        postureDeg >= 45.0f &&
+                        havePrevAccel &&
+                        accelDeltaG >= SMARTCANE_FALL_SLOW_MIN_MOTION_G;
+  if (slowTiltMotion) {
+    slowTiltCandidate = true;
+    slowTiltStartedMs = now;
+  }
+  if (slowTiltCandidate &&
+      slowTiltStartedMs != 0 &&
+      now - slowTiltStartedMs > SMARTCANE_FALL_SLOW_TILT_WINDOW_MS) {
+    slowTiltCandidate = false;
+    slowTiltStartedMs = 0;
+    slowLyingSinceMs = 0;
+  }
+
   bool freefall = state.totalG <= SMARTCANE_FALL_FREEFALL_G;
   bool hardImpact = state.totalG >= SMARTCANE_FALL_IMPACT_G;
   bool abruptVertical = havePrevAccel &&
@@ -372,6 +404,7 @@ static bool readAccel() {
     }
     impactMs = now;
     lyingSinceMs = 0;
+    slowLyingSinceMs = 0;
     candidatePeakG = state.totalG > candidatePeakG ? state.totalG : candidatePeakG;
     candidateMinG = state.totalG < candidateMinG ? state.totalG : candidateMinG;
     candidateHadFreefall = candidateHadFreefall || freefall;
@@ -421,9 +454,31 @@ static bool readAccel() {
     if (impactMs != 0) {
       resetFallCandidate();
     }
-    state.stage = "normal";
-    state.reason = "normal_motion";
-    state.confidence = 0.2f;
+    if (slowTiltCandidate && lying && stillNow && now - lastFallEventMs >= SMARTCANE_FALL_UPLOAD_COOLDOWN_MS) {
+      if (slowLyingSinceMs == 0) {
+        slowLyingSinceMs = now;
+      }
+      state.stage = "slow_lying_candidate";
+      state.reason = "slow_tilt_then_still_lying";
+      state.confidence = 0.62f;
+      if (now - slowLyingSinceMs >= SMARTCANE_FALL_SLOW_LIE_MS) {
+        state.fallActive = true;
+        state.eventPending = true;
+        state.stage = "confirmed";
+        state.reason = "confirmed_slow_fall";
+        state.confidence = 0.86f;
+        lastFallEventMs = now;
+        recoverySinceMs = 0;
+        resetFallCandidate();
+      }
+    } else {
+      if (!slowTiltCandidate) {
+        slowLyingSinceMs = 0;
+      }
+      state.stage = "normal";
+      state.reason = "normal_motion";
+      state.confidence = 0.2f;
+    }
   }
 
   rememberAccel();
@@ -544,6 +599,16 @@ void imuFallClear() {
   state.reason = state.available ? "manual_clear" : state.reason;
   impactMs = 0;
   lyingSinceMs = 0;
+  slowLyingSinceMs = 0;
+  uprightStableSinceMs = 0;
+  slowTiltStartedMs = 0;
+  slowTiltCandidate = false;
+  recoverySinceMs = 0;
+  candidatePeakG = 0.0f;
+  candidateMinG = 10.0f;
+  candidateHadFreefall = false;
+  candidateHadImpact = false;
+  candidateHadVerticalDrop = false;
 }
 
 void imuFallPrintStatus() {

@@ -54,7 +54,12 @@ data class DeviceStateDto(
     val riskScore: Double,
     val voicePrompt: String,
     val source: String,
-    val deviceName: String = ""
+    val deviceName: String = "",
+    val fallEventId: String? = null,
+    val fallPending: Boolean = false,
+    val fallDetected: Boolean = false,
+    val fallStage: String? = null,
+    val fallConfidence: Double? = null
 )
 
 data class DeviceStateResponseDto(val success: Boolean, val found: Boolean, val state: DeviceStateDto?)
@@ -246,7 +251,63 @@ data class RouteAdviceDto(
     val routeCount: Int,
     val distanceM: Int?,
     val durationS: Int?,
-    val riskScore: Double?
+    val riskScore: Double?,
+    val sessionId: String? = null,
+    val selectedRouteIndex: Int? = null,
+    val navigationStatus: String = "ready",
+    val routes: List<NavigationRouteDto> = emptyList(),
+    val bestRoute: NavigationRouteDto? = null
+)
+
+data class NavigationPointDto(val latitude: Double, val longitude: Double)
+
+data class NavigationStepDto(
+    val stepIndex: Int,
+    val instruction: String,
+    val roadName: String,
+    val distanceM: Int,
+    val roadSegmentId: Int?,
+    val riskScore: Double,
+    val confidenceScore: Double,
+    val polyline: String
+)
+
+data class MatchedRiskPointDto(
+    val riskPointId: String,
+    val riskType: String,
+    val riskLevel: String,
+    val latitude: Double?,
+    val longitude: Double?,
+    val distanceToRouteM: Double
+)
+
+data class NavigationRouteDto(
+    val index: Int,
+    val distanceM: Int,
+    val durationS: Int,
+    val riskScore: Double,
+    val highRiskCount: Int,
+    val mediumRiskCount: Int,
+    val lowRiskCount: Int,
+    val polyline: List<NavigationPointDto>,
+    val steps: List<NavigationStepDto>,
+    val matchedRiskPoints: List<MatchedRiskPointDto>
+)
+
+data class NavigationUpdateDto(
+    val success: Boolean,
+    val sessionId: String,
+    val status: String,
+    val currentStepIndex: Int,
+    val distanceToRouteM: Double,
+    val distanceToDestinationM: Double,
+    val distanceToNextActionM: Double,
+    val offRoute: Boolean,
+    val offRouteCount: Int,
+    val arrived: Boolean,
+    val arrivalCount: Int,
+    val shouldReplan: Boolean,
+    val currentStep: NavigationStepDto?
 )
 
 data class VoiceCommandDto(
@@ -527,18 +588,69 @@ object SmartCaneApiClient {
         text: String,
         currentLatitude: Double?,
         currentLongitude: Double?,
-        city: String? = null
+        city: String? = null,
+        deviceId: String,
+        routePreference: String = "safe"
     ): ApiResult<RouteAdviceDto> = withContext(Dispatchers.IO) {
         try {
             val payload = JSONObject().apply {
-                put("device_id", "cane_001")
+                put("device_id", deviceId)
                 put("text", text)
                 put("current_lat", currentLatitude ?: JSONObject.NULL)
                 put("current_lng", currentLongitude ?: JSONObject.NULL)
                 put("city", city ?: JSONObject.NULL)
                 put("coordsys", "gps")
+                put("route_preference", routePreference)
             }
             ApiResult.Success(postJson("/api/navigation/voice-route", payload).toRouteAdviceDto())
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
+    fun updateNavigationSession(
+        sessionId: String,
+        latitude: Double,
+        longitude: Double,
+        accuracyM: Double,
+        distanceDeltaM: Double
+    ): NavigationUpdateDto? = try {
+        postJson(
+            "/api/navigation/sessions/${sessionId.urlEncode()}/update",
+            JSONObject().put("lat", latitude).put("lng", longitude)
+                .put("accuracy_m", accuracyM).put("distance_delta_m", distanceDeltaM)
+        ).toNavigationUpdateDto()
+    } catch (_: Exception) {
+        null
+    }
+
+    fun uploadNavigationLocation(request: LocationUploadDto): Boolean = try {
+        postJson("/api/locations", request.toJson())
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    fun replanNavigationSession(sessionId: String): RouteAdviceDto? = try {
+        postJson("/api/navigation/sessions/${sessionId.urlEncode()}/replan", JSONObject()).toRouteAdviceDto()
+    } catch (_: Exception) {
+        null
+    }
+
+    fun stopNavigationSession(sessionId: String): Boolean = try {
+        postJson("/api/navigation/sessions/${sessionId.urlEncode()}/stop", JSONObject())
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    suspend fun cancelPendingFall(deviceId: String): ApiResult<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            val response = postJson(
+                "/api/device-commands",
+                JSONObject().put("device_id", deviceId).put("command", "cancel_fall").put("source", "android")
+            )
+            ApiResult.Success(response.optBoolean("success"))
         } catch (exception: Exception) {
             ApiResult.Failure(exception.toUserMessage())
         }
@@ -778,7 +890,12 @@ object SmartCaneApiClient {
         riskScore = optDouble("riskScore", optDouble("risk_score", 0.0)),
         voicePrompt = optString("voicePrompt", optString("voice_prompt", "")),
         source = optString("source", "unknown"),
-        deviceName = optString("deviceName", optString("device_name", optString("name", "")))
+        deviceName = optString("deviceName", optString("device_name", optString("name", ""))),
+        fallEventId = optString("fallEventId", optString("fall_event_id", "")).ifBlank { null },
+        fallPending = optBoolean("fallPending", optBoolean("fall_pending")),
+        fallDetected = optBoolean("fallDetected", optBoolean("fall_detected")),
+        fallStage = optString("fallStage", optString("fall_stage", "")).ifBlank { null },
+        fallConfidence = nullableDouble("fallConfidence") ?: nullableDouble("fall_confidence")
     )
 
     private fun JSONObject.toDeviceStateResponseDto(): DeviceStateResponseDto = DeviceStateResponseDto(
@@ -997,14 +1114,80 @@ object SmartCaneApiClient {
 
     private fun JSONObject.toRouteAdviceDto(): RouteAdviceDto {
         val bestRoute = optJSONObject("best_route") ?: optJSONObject("bestRoute")
+        val routeArray = optJSONArray("routes") ?: JSONArray()
+        val routes = List(routeArray.length()) { routeArray.getJSONObject(it).toNavigationRouteDto() }
         return RouteAdviceDto(
             voicePrompt = optString("voice_prompt", optString("voicePrompt", "暂无路线建议")),
             routeCount = optInt("route_count", optInt("routeCount")),
             distanceM = bestRoute?.nullableInt("distance_m") ?: bestRoute?.nullableInt("distanceM"),
             durationS = bestRoute?.nullableInt("duration_s") ?: bestRoute?.nullableInt("durationS"),
-            riskScore = bestRoute?.nullableDouble("risk_score") ?: bestRoute?.nullableDouble("riskScore")
+            riskScore = bestRoute?.nullableDouble("risk_score") ?: bestRoute?.nullableDouble("riskScore"),
+            sessionId = optString("session_id", optString("sessionId", "")).ifBlank { null },
+            selectedRouteIndex = nullableInt("selected_route_index") ?: nullableInt("selectedRouteIndex"),
+            navigationStatus = optString("navigation_status", optString("navigationStatus", "ready")),
+            routes = routes,
+            bestRoute = bestRoute?.toNavigationRouteDto()
         )
     }
+
+    private fun JSONObject.toNavigationRouteDto(): NavigationRouteDto {
+        val risk = optJSONObject("risk") ?: JSONObject()
+        val points = optJSONArray("polyline") ?: JSONArray()
+        val stepsArray = optJSONArray("steps") ?: JSONArray()
+        val risks = risk.optJSONArray("risk_points") ?: optJSONArray("matched_risk_points") ?: JSONArray()
+        return NavigationRouteDto(
+            index = optInt("index"),
+            distanceM = optInt("distance_m", optInt("distance")),
+            durationS = optInt("duration_s", optInt("duration")),
+            riskScore = optDouble("risk_score", risk.optDouble("route_risk_score", risk.optDouble("risk_score"))),
+            highRiskCount = risk.optInt("high_count"),
+            mediumRiskCount = risk.optInt("medium_count"),
+            lowRiskCount = risk.optInt("low_count"),
+            polyline = List(points.length()) { index ->
+                val point = points.getJSONObject(index)
+                NavigationPointDto(point.optDouble("lat"), point.optDouble("lng"))
+            },
+            steps = List(stepsArray.length()) { index -> stepsArray.getJSONObject(index).toNavigationStepDto() },
+            matchedRiskPoints = List(risks.length()) { index ->
+                val point = risks.getJSONObject(index)
+                MatchedRiskPointDto(
+                    riskPointId = point.optString("risk_point_id", point.optString("riskPointId", point.optString("id"))),
+                    riskType = point.optString("risk_type", point.optString("riskType")),
+                    riskLevel = point.optString("risk_level", point.optString("riskLevel", "low")),
+                    latitude = point.nullableDouble("route_lat") ?: point.nullableDouble("lat") ?: point.nullableDouble("latitude"),
+                    longitude = point.nullableDouble("route_lng") ?: point.nullableDouble("lng") ?: point.nullableDouble("longitude"),
+                    distanceToRouteM = point.optDouble("distance_to_route_m", point.optDouble("distanceToRouteM"))
+                )
+            }
+        )
+    }
+
+    private fun JSONObject.toNavigationStepDto() = NavigationStepDto(
+        stepIndex = optInt("step_index"),
+        instruction = optString("instruction"),
+        roadName = optString("road_name", optString("road")),
+        distanceM = optInt("distance_m", optInt("distance")),
+        roadSegmentId = nullableInt("road_segment_id"),
+        riskScore = optDouble("risk_score"),
+        confidenceScore = optDouble("confidence_score"),
+        polyline = optString("polyline")
+    )
+
+    private fun JSONObject.toNavigationUpdateDto() = NavigationUpdateDto(
+        success = optBoolean("success"),
+        sessionId = optString("session_id"),
+        status = optString("status"),
+        currentStepIndex = optInt("current_step_index"),
+        distanceToRouteM = optDouble("distance_to_route_m"),
+        distanceToDestinationM = optDouble("distance_to_destination_m"),
+        distanceToNextActionM = optDouble("distance_to_next_action_m"),
+        offRoute = optBoolean("off_route"),
+        offRouteCount = optInt("off_route_count"),
+        arrived = optBoolean("arrived"),
+        arrivalCount = optInt("arrival_count"),
+        shouldReplan = optBoolean("should_replan"),
+        currentStep = optJSONObject("current_step")?.toNavigationStepDto()
+    )
 
     private fun JSONObject.toVoiceCommandDto(): VoiceCommandDto {
         val bestRoute = optJSONObject("best_route") ?: optJSONObject("bestRoute")
@@ -1033,11 +1216,11 @@ object SmartCaneApiClient {
                 .ifBlank { json.optString("detail") }
                 .ifBlank { json.optString("message") }
             when {
-                code == 404 || raw.equals("Not Found", ignoreCase = true) -> "?????????????????????"
+                code == 404 || raw.equals("Not Found", ignoreCase = true) -> "服务器未提供该接口，请检查后端版本。"
                 raw.isNotBlank() -> raw
                 else -> "HTTP $code"
             }
-        }.getOrDefault(if (code == 404) "?????????????????????" else "HTTP $code")
+        }.getOrDefault(if (code == 404) "服务器未提供该接口，请检查后端版本。" else "HTTP $code")
     }
 
     private fun String.urlEncode(): String = URLEncoder.encode(this, Charsets.UTF_8.name())

@@ -614,7 +614,7 @@ fun DeviceStatusFromServer() {
 fun DeviceStatusDataCard(status: ServerStatusDto, devices: List<DeviceDto>) {
     val total = devices.size.coerceAtLeast(status.deviceCount)
     val online = devices.count { it.online }
-    val primary = devices.firstOrNull { it.deviceId == "cane_001" } ?: devices.firstOrNull()
+    val primary = devices.firstOrNull { it.online } ?: devices.firstOrNull()
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -965,14 +965,6 @@ private fun AmapRiskMap(points: List<LatestRiskEventDto>, showMyLocation: Boolea
             amap.isMyLocationEnabled = showMyLocation
             amap.clear()
             amap.moveCamera(CameraUpdateFactory.newLatLngZoom(center, if (markers.isEmpty()) 16f else 17f))
-            if (markers.size >= 2) {
-                amap.addPolyline(
-                    PolylineOptions()
-                        .addAll(markers.map { it.position })
-                        .color(android.graphics.Color.rgb(37, 99, 235))
-                        .width(8f)
-                )
-            }
             markers.forEach { marker ->
                 amap.addMarker(
                     MarkerOptions()
@@ -1076,7 +1068,12 @@ fun SosPage() {
         if (state == SosUiState.Sending) return
         scope.launch {
             state = SosUiState.Sending
-            state = when (val result = SmartCaneApiClient.postSos(SosRequestDto("cane_001", null, null, "用户通过 Android App 发起紧急求助（位置不可用）"))) {
+            val deviceId = (SmartCaneApiClient.getDevices() as? ApiResult.Success)?.data?.firstOrNull()?.deviceId
+            if (deviceId.isNullOrBlank()) {
+                state = SosUiState.Error("尚未绑定或发现真实盲杖设备")
+                return@launch
+            }
+            state = when (val result = SmartCaneApiClient.postSos(SosRequestDto(deviceId, null, null, "用户通过 Android App 发起紧急求助（位置不可用）"))) {
                 is ApiResult.Success -> if (result.data.success) {
                     SosUiState.Success(result.data.message.ifBlank { "SOS 已发送" }, currentTimeText())
                 } else {

@@ -19,10 +19,15 @@ struct DistanceReadings {
   int leftCm = 400;
   int rightCm = 400;
   int downCm = 45;
+  int downRawCm = 45;
   bool frontValid = false;
   bool leftValid = false;
   bool rightValid = false;
   bool downValid = false;
+  bool downNoTarget = false;
+  const char *downStatus = "uninitialized";
+  uint8_t downFailCount = 0;
+  uint8_t downStableFrames = 0;
   bool valid = false;
   unsigned long timestampMs = 0;
 };

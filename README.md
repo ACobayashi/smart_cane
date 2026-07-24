@@ -175,7 +175,7 @@ Cloud LLM and speech services are optional. Put keys only in `backend/.env`; nev
 4. Put an obstacle in front. The firmware samples every `500 ms`, prints one changed risk event, and uses vibration to suggest slow/left/right handling. One-shot distance obstacles are low-risk map points.
 5. Keep the cane still with the same obstacle. The same place/same risk is not printed, vibrated, or uploaded repeatedly.
 6. Leave more space on the left or right, clear the risk and trigger it again, or move into another location grid. The matching motor suggests the safer bypass direction and a new event can be recorded.
-7. Lower the down-facing distance below `20 cm` to simulate a curb/raised step, or aim the slanted lower sensor at a stair lower edge around `45-90 cm` (about `50 cm` on the current cane); the firmware uploads `ground_step` as medium risk. Raise it above about `150 cm` to simulate a pit/drop; the firmware uploads `ground_drop`.
+7. Lower the down-facing distance below `20 cm` to simulate a close curb/protrusion; the firmware uploads `down_obstacle` as low risk. Keep the down-facing distance from `20-90 cm` for normal ground/no step alert. Raise the valid down-facing distance strictly above `90 cm` for two confirmed frames to simulate a pit/drop; the firmware uploads `ground_drop`. No-target readings are reported separately as `down_no_target`.
 8. Long-press touch electrode E1 or run `mark`. The backend records `user_mark` at the current route point.
 9. Run `path` to print the local route/risk ring buffer.
 10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`. The second cane receives historical risk statistics and fuses them into local risk.

@@ -10,7 +10,9 @@ static bool sensorReady[4] = {false, false, false, false};
 static bool mockActive = false;
 static MockScenario mockScenario = SMARTCANE_MOCK_DEFAULT_SCENARIO;
 static int filteredCm[4] = {400, 400, 400, SMARTCANE_GROUND_BASE_CM};
+static bool filterInitialized[4] = {false, false, false, false};
 static uint8_t failCount[4] = {0, 0, 0, 0};
+static uint8_t stableFrames[4] = {0, 0, 0, 0};
 
 static const uint8_t tofChannels[4] = {
   SMARTCANE_TCA_CH_TOF_FRONT,
@@ -38,6 +40,11 @@ static int filterCm(uint8_t index, int cm) {
   }
 
   failCount[index] = 0;
+  if (!filterInitialized[index]) {
+    filteredCm[index] = cm;
+    filterInitialized[index] = true;
+    return filteredCm[index];
+  }
   int alpha = SMARTCANE_TOF_FILTER_ALPHA_PERCENT;
   filteredCm[index] = (filteredCm[index] * (100 - alpha) + cm * alpha) / 100;
   return filteredCm[index];
@@ -114,7 +121,7 @@ static void fillMock(DistanceReadings &out) {
       out.rightCm = 140;
       break;
     case MOCK_SCENARIO_GROUND_DROP:
-      out.downCm = SMARTCANE_DOWN_DROP_CM + 25;
+      out.downCm = SMARTCANE_GROUND_BASE_CM + SMARTCANE_DOWN_DROP_DELTA_CM + 5;
       break;
     case MOCK_SCENARIO_BLOCKED:
       out.frontCm = 42;
@@ -141,6 +148,10 @@ static void fillMock(DistanceReadings &out) {
   out.leftValid = true;
   out.rightValid = true;
   out.downValid = true;
+  out.downRawCm = out.downCm;
+  out.downStatus = "valid";
+  out.downFailCount = 0;
+  out.downStableFrames = SMARTCANE_DOWN_BASELINE_STABLE_FRAMES;
   out.valid = true;
   out.timestampMs = millis();
 }
@@ -161,34 +172,58 @@ bool tofRead(DistanceReadings &out) {
   }
 
   int values[4] = {400, 400, 400, SMARTCANE_GROUND_BASE_CM};
+  int rawCm[4] = {400, 400, 400, SMARTCANE_GROUND_BASE_CM};
   bool valids[4] = {false, false, false, false};
   bool anyValid = false;
+  bool downNoTarget = false;
+  const char *downStatus = sensorReady[3] ? "timeout" : "disconnected";
 
   for (uint8_t i = 0; i < 4; ++i) {
     if (!sensorReady[i] || !selectTcaChannel(tofChannels[i])) {
       values[i] = filterCm(i, -1);
+      rawCm[i] = values[i];
       continue;
     }
 
     uint16_t rawMm = readRawMm(i);
     bool ok = !sensors[i].timeoutOccurred();
-    bool downNoTarget = ok &&
-                        i == 3 &&
-                        (rawMm == 0 || rawMm > SMARTCANE_TOF_MAX_VALID_MM);
-    int cm = downNoTarget ? SMARTCANE_DOWN_NO_TARGET_CM : (ok ? mmToCm(rawMm) : -1);
-    values[i] = filterCm(i, cm);
+    bool currentDownNoTarget = ok && i == 3 && (rawMm == 0 || rawMm > SMARTCANE_TOF_MAX_VALID_MM);
+    int cm = currentDownNoTarget ? SMARTCANE_DOWN_NO_TARGET_CM : (ok ? mmToCm(rawMm) : -1);
+    rawCm[i] = cm >= 0 ? cm : values[i];
+    if (currentDownNoTarget) {
+      values[i] = SMARTCANE_DOWN_NO_TARGET_CM;
+      if (i == 3) downStatus = "no_target";
+    } else {
+      values[i] = filterCm(i, cm);
+      if (i == 3) downStatus = cm >= 0 ? "valid" : "timeout";
+    }
     valids[i] = (cm >= 0);
+    if (valids[i] && !currentDownNoTarget) {
+      if (abs(values[i] - filteredCm[i]) <= SMARTCANE_DOWN_BASELINE_TOLERANCE_CM) {
+        if (stableFrames[i] < 255) stableFrames[i]++;
+      } else {
+        stableFrames[i] = 1;
+      }
+    } else {
+      stableFrames[i] = 0;
+    }
     anyValid = anyValid || valids[i];
+    downNoTarget = downNoTarget || currentDownNoTarget;
   }
 
   out.frontCm = values[0];
   out.leftCm = values[1];
   out.rightCm = values[2];
   out.downCm = values[3];
+  out.downRawCm = rawCm[3];
   out.frontValid = valids[0];
   out.leftValid = valids[1];
   out.rightValid = valids[2];
   out.downValid = valids[3];
+  out.downNoTarget = downNoTarget;
+  out.downStatus = downStatus;
+  out.downFailCount = failCount[3];
+  out.downStableFrames = stableFrames[3];
   out.valid = anyValid;
   return anyValid;
 }

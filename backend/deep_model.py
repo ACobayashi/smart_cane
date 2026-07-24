@@ -5,11 +5,11 @@ from dataclasses import dataclass
 from typing import Any
 
 
-MODEL_VERSION = "tiny-mlp-risk-tier-v2"
+MODEL_VERSION = "tiny-mlp-risk-tier-v4-baseline-step"
 
-DOWN_STEP_EDGE_MIN_CM = 45.0
-DOWN_STEP_EDGE_MAX_CM = 90.0
-DOWN_STEP_EDGE_CENTER_CM = 50.0
+DOWN_OBSTACLE_CM = 20.0
+FRONT_WARN_CM = 70.0
+FRONT_DANGER_CM = 35.0
 
 
 @dataclass(frozen=True)
@@ -75,20 +75,23 @@ def make_features(req: Any, history: dict[str, Any]) -> DeepRiskFeatures:
     front = cm(getattr(req, "front_cm", None), 220.0)
     left = cm(getattr(req, "left_cm", None), 180.0)
     right = cm(getattr(req, "right_cm", None), 180.0)
-    down = cm(getattr(req, "down_cm", None), 30.0)
 
     risk_count = max(0, int(history.get("risk_count", 0)))
     high_count = max(0, int(history.get("high_count", 0)))
     medium_count = max(0, int(history.get("medium_count", 0)))
 
     best_side = max(left, right)
-    front_close = clamp((110.0 - front) / 75.0)
+    front_close = clamp((FRONT_WARN_CM - front) / max(1.0, FRONT_WARN_CM - FRONT_DANGER_CM))
     side_blocked = clamp((95.0 - best_side) / 75.0)
-    drop_feature = clamp((down - 150.0) / 80.0)
-    step_edge_feature = 0.0
-    if DOWN_STEP_EDGE_MIN_CM <= down <= DOWN_STEP_EDGE_MAX_CM:
-        step_edge_feature = clamp(1.0 - abs(down - DOWN_STEP_EDGE_CENTER_CM) / 45.0)
-    ground_drop = max(drop_feature, step_edge_feature * 0.55)
+    reported_risk = str(
+        getattr(req, "risk_type", None)
+        or getattr(req, "manual_risk_type", None)
+        or getattr(req, "alert_type", None)
+        or ""
+    )
+    # The posture-aware firmware state machine owns step detection. Absolute
+    # down-facing distance cannot distinguish cane angle from a ground delta.
+    ground_drop = 1.0 if reported_risk in {"ground_step_down", "ground_step_up", "ground_drop", "ground_step"} else 0.0
     history_density = clamp(risk_count / 6.0)
     history_high_ratio = clamp((high_count + 0.4 * medium_count) / max(1.0, float(risk_count)))
     history_level = level_rank(str(history.get("max_level", "low")))
@@ -154,11 +157,11 @@ def safety_floor(req: Any, history: dict[str, Any]) -> float:
     down = cm(getattr(req, "down_cm", None), 30.0)
 
     floor = 0.0
-    if down > 150.0 or down < 20.0 or DOWN_STEP_EDGE_MIN_CM <= down <= DOWN_STEP_EDGE_MAX_CM:
-        floor = max(floor, 0.56)
-    if front < 35.0:
+    if down < DOWN_OBSTACLE_CM:
+        floor = max(floor, 0.18)
+    if front < FRONT_DANGER_CM:
         floor = max(floor, 0.74)
-    elif front < 110.0:
+    elif front < FRONT_WARN_CM:
         floor = max(floor, 0.18)
     if history.get("high_count", 0) >= 2:
         floor = max(floor, 0.24)
@@ -180,13 +183,7 @@ def level_for_request(req: Any, score: float) -> str:
     )
     if risk_type in {"sos", "fall_detected"} or getattr(req, "fall_detected", False):
         return "high"
-    down = cm(getattr(req, "down_cm", None), 30.0)
-    if (
-        risk_type in {"ground_drop", "ground_step", "user_mark"}
-        or down > 150.0
-        or down < 20.0
-        or DOWN_STEP_EDGE_MIN_CM <= down <= DOWN_STEP_EDGE_MAX_CM
-    ):
+    if risk_type in {"ground_step_down", "ground_step_up", "ground_drop", "ground_step", "user_mark"}:
         return "medium"
     front = cm(getattr(req, "front_cm", None), 220.0)
     if risk_type in {

@@ -54,6 +54,7 @@ import com.nankai.smartcane.data.model.RelationStatus
 import com.nankai.smartcane.data.network.EmergencyAlertDto
 import com.nankai.smartcane.ui.auth.LoginScreen
 import com.nankai.smartcane.ui.blind.BlindHomeScreen
+import com.nankai.smartcane.ui.blind.BlindNavigationScreen
 import com.nankai.smartcane.ui.companion.CompanionHomeScreen
 import com.nankai.smartcane.ui.components.SmartBg
 import com.nankai.smartcane.ui.components.SmartTeal
@@ -92,6 +93,14 @@ fun SmartCaneRootApp() {
         }
     }
 
+    LaunchedEffect(uiState.navigationStatus) {
+        if (uiState.navigationStatus in setOf("active", "replanning") && uiState.activeNavigationRoute != null) {
+            route = AppRoute.BlindNavigation
+        } else if (uiState.navigationStatus == "arrived" && route is AppRoute.BlindNavigation) {
+            route = AppRoute.BlindHome
+        }
+    }
+
     LaunchedEffect(route) {
         if (route is AppRoute.BlindHome && !hasSmartCaneLocationPermission(context)) {
             locationPermissionLauncher.launch(
@@ -115,7 +124,7 @@ fun SmartCaneRootApp() {
                 controller.startCompanionRelationPolling()
                 controller.startAlertPolling()
             }
-            AppRoute.BlindHome -> {
+            AppRoute.BlindHome, AppRoute.BlindNavigation -> {
                 controller.startAlertPolling()
                 controller.startBlindRiskProximityMonitoring()
             }
@@ -123,7 +132,7 @@ fun SmartCaneRootApp() {
         }
         onDispose {
             if (route is AppRoute.BlindPairing || route is AppRoute.CompanionPairing) controller.stopPairingPolling()
-            if (route is AppRoute.BlindHome) controller.stopBlindRiskProximityMonitoring()
+            if (route is AppRoute.BlindHome || route is AppRoute.BlindNavigation) controller.stopBlindRiskProximityMonitoring()
         }
     }
 
@@ -163,12 +172,26 @@ fun SmartCaneRootApp() {
                 message = uiState.message,
                 voiceTranscript = uiState.voiceTranscript,
                 urgentAlert = uiState.urgentAlert,
+                fallPending = uiState.fallPending,
+                navigationPreference = uiState.navigationPreference,
                 onVoicePressStart = controller::startVoicePress,
                 onVoicePressEnd = controller::endVoicePress,
                 onRepeat = controller::repeatNavigationPrompt,
                 onSos = controller::sendBlindSos,
                 onDismissAlert = controller::dismissUrgentAlert,
+                onCancelFall = controller::cancelPendingFall,
+                onNavigationPreference = controller::setNavigationPreference,
                 onOpenSettings = { route = AppRoute.BlindPairing }
+            )
+            AppRoute.BlindNavigation -> BlindNavigationScreen(
+                route = uiState.activeNavigationRoute,
+                status = uiState.navigationStatus,
+                instruction = uiState.currentNavigationInstruction,
+                onStop = {
+                    controller.stopNavigation()
+                    route = AppRoute.BlindHome
+                },
+                onBack = { route = AppRoute.BlindHome }
             )
             AppRoute.BlindPairing -> BlindPairingScreen(
                 pairingCode = uiState.storedState.pairingCode,

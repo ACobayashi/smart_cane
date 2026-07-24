@@ -1,4 +1,4 @@
-# ESP32-C5 Smart Cane Arduino Firmware
+﻿# ESP32-C5 Smart Cane Arduino Firmware
 
 This is the Arduino IDE / Arduino framework firmware for the ESP32-C5 collaborative smart cane.
 
@@ -64,7 +64,7 @@ Edit `config.h`:
 ```cpp
 #define SMARTCANE_DEVICE_ID "cane_001"
 #define SMARTCANE_WIFI_SSID "xin"
-#define SMARTCANE_WIFI_PASSWORD "22222222"
+#define SMARTCANE_WIFI_PASSWORD "your_wifi_password"
 #define SMARTCANE_SERVER_BASE_URL "http://118.31.221.165:8016"
 #define SMARTCANE_MOCK_LAT 31.230400
 #define SMARTCANE_MOCK_LNG 121.473700
@@ -90,7 +90,7 @@ Local safety does not depend on Wi-Fi:
 
 - Samples four ToF distances every `500 ms`.
 - Detects front warning/danger by distance thresholds.
-- Detects close ground obstacles, stair lower edges around `45-90 cm`, and ground drops from the down-facing sensor.
+- Detects close ground obstacles below `20 cm`; treats `20-90 cm` as normal; detects steps, pits, or suspended ground only when the down-facing valid distance is strictly above `90 cm`.
 - Fuses nearby history when available.
 - Drives obstacle vibration through PCA9685 `CH0/CH1/CH2` on TCA `CH6`.
 - Uses the buzzer only for high-risk cases, ground drops, and SOS.
@@ -172,7 +172,7 @@ Use `scan`, `pca`, `imu`, `read`, `vib all`, and `beep` for real hardware checks
 4. Put an obstacle in front: Serial prints one risk event, center motor vibrates, and high danger also beeps.
 5. Keep the obstacle still: the same place/same risk is not printed repeatedly.
 6. Open left/right side space or move to another grid cell: the left/right motor suggests the safer direction and a new event can be recorded.
-7. Point the down-facing sensor at a close curb below `20 cm` or a stair lower edge around `45-90 cm`: `ground_step` is uploaded as medium risk. Lift it above about `150 cm`: `ground_drop` triggers strong vibration and buzzer once for that place.
+7. Point the down-facing sensor below `20 cm`: `down_obstacle` is uploaded as low risk. Keep it between `20-90 cm`: no step/drop alarm. Move it strictly above `90 cm` for 2 confirmed frames: `ground_drop`/`ground_step` triggers stop feedback. No-target is reported separately as `down_no_target`.
 8. Run `mark` or long-press touch E1: backend records a user risk point.
 9. Run `path`: local walked route/risk ring buffer is printed.
 10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`: the second cane sees the historical risk area.
