@@ -169,17 +169,6 @@ fun BlindHomeScreen(
             }
 
             Spacer(Modifier.height(18.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = { onNavigationPreference("safe") },
-                    modifier = Modifier.weight(1f)
-                ) { Text(if (navigationPreference == "safe") "✓ 安全优先" else "安全优先") }
-                OutlinedButton(
-                    onClick = { onNavigationPreference("distance") },
-                    modifier = Modifier.weight(1f)
-                ) { Text(if (navigationPreference == "distance") "✓ 距离优先" else "距离优先") }
-            }
-            Spacer(Modifier.height(10.dp))
             if (fallPending) {
                 OutlinedButton(
                     onClick = onCancelFall,

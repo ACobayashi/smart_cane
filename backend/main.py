@@ -3168,6 +3168,68 @@ def route_voice_prompt(best: Optional[dict[str, Any]]) -> str:
     return f"{base}。请按路线谨慎前进。"
 
 
+async def generate_route_advice(
+    best_route: Optional[dict[str, Any]],
+    sensor_analysis: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    fallback = route_voice_prompt(best_route)
+    if sensor_analysis and sensor_analysis.get("risk_level") == "high":
+        fallback = str(sensor_analysis.get("voice_prompt") or fallback)
+    if not best_route:
+        return {
+            "advice": fallback,
+            "fallback": True,
+            "provider": chat_config()["provider"],
+            "model": chat_config()["model"],
+        }
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a navigation safety assistant for a smart cane. "
+                "Return one short Chinese voice prompt, under 55 Chinese characters. "
+                "Mention stop/slow/left/right only when supported by sensor or route risk data."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "best_route": {
+                        "distance_m": best_route.get("distance_m"),
+                        "duration_s": best_route.get("duration_s"),
+                        "risk_score": best_route.get("risk_score"),
+                        "risk_count": best_route.get("risk", {}).get("risk_count"),
+                        "high_count": best_route.get("risk", {}).get("high_count"),
+                        "medium_count": best_route.get("risk", {}).get("medium_count"),
+                    },
+                    "sensor_analysis": sensor_analysis,
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    try:
+        content, meta = await call_chat_completion(messages, temperature=0.1)
+        if content:
+            return {**meta, "advice": content, "fallback": False}
+        return {
+            "advice": fallback,
+            "fallback": True,
+            "provider": chat_config()["provider"],
+            "model": chat_config()["model"],
+        }
+    except Exception as exc:
+        return {
+            "advice": fallback,
+            "fallback": True,
+            "error": str(exc),
+            "provider": chat_config()["provider"],
+            "model": chat_config()["model"],
+        }
+
+
 def parse_route_text(text: str) -> tuple[Optional[str], Optional[str]]:
     normalized = text.strip()
     match = re.search(r"\u4ece(.+?)(?:\u5230|\u53bb|\u524d\u5f80)(.+)", normalized)
