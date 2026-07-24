@@ -300,3 +300,73 @@ def test_medium_and_high_obstacles_can_become_shared_risk_points():
     assert analysis["risk_level"] == "high"
     assert analysis["map_weight"] >= 70
     assert main.should_store_sensor_analysis(analysis)
+
+
+def test_sos_becomes_historical_risk_point(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "sos_history.db")
+    main.init_db()
+    stored = main.store_event(main.EventCreate(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="sos",
+        risk_level="high",
+        extra_json={"source": "esp32c5"},
+    ))
+    points = main.active_risk_points(31.0, 121.0, radius=20, limit=10)
+    assert stored["risk_type"] == "sos"
+    assert any(point["riskType"] == "sos" for point in points)
+    warning = main.nearby_risk_warning(lat=31.0, lng=121.00002, radius=50, min_level="medium", exclude_device_id="cane_real", bearing_deg=None)
+    assert warning["found"] is True
+    assert "SOS" in warning["warning"]["voicePrompt"]
+
+
+def test_low_obstacle_second_report_promotes_to_history_warning(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "low_promotion.db")
+    main.init_db()
+    for offset in (0.0, 0.000001):
+        main.store_event(main.EventCreate(
+            device_id="cane_real",
+            lat=31.0 + offset,
+            lng=121.0,
+            risk_type="front_obstacle",
+            risk_level="low",
+            front_cm=68,
+            distance_mm=680,
+            extra_json={"source": "esp32c5"},
+        ))
+    warning = main.nearby_risk_warning(lat=31.0, lng=121.00002, radius=50, min_level="medium", exclude_device_id=None, bearing_deg=None)
+    assert warning["found"] is True
+    assert warning["warning"]["riskLevel"] == "medium"
+    assert "重复出现的障碍风险点" in warning["warning"]["voicePrompt"]
+
+
+def test_recent_self_obstacle_is_not_rebroadcast_as_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "self_suppress.db")
+    main.init_db()
+    main.store_event(main.EventCreate(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="front_obstacle",
+        risk_level="high",
+        front_cm=25,
+        distance_mm=250,
+        extra_json={"source": "esp32c5"},
+    ))
+    warning = main.nearby_risk_warning(lat=31.0, lng=121.00002, radius=50, min_level="medium", exclude_device_id="cane_real", bearing_deg=None)
+    assert warning["found"] is False
+
+
+def test_test_source_is_filtered_from_active_risk_points(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "test_data_filter.db")
+    main.init_db()
+    main.store_event(main.EventCreate(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="ground_drop",
+        risk_level="medium",
+        extra_json={"source": "android_frontend_sim"},
+    ))
+    assert main.active_risk_points(31.0, 121.0, radius=50, limit=10) == []

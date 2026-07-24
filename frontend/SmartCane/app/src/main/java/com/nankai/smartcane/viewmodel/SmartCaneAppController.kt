@@ -501,7 +501,6 @@ class SmartCaneAppController private constructor(
     }
 
     private fun maybeSpeakNearbyRiskWarning(warning: NearbyRiskWarningDto) {
-        if (isFromCurrentCane(warning.deviceId)) return
         val now = System.currentTimeMillis()
         val lastSpokenAt = nearbyRiskSpeechTimes[warning.eventId] ?: 0L
         if (now - lastSpokenAt < 300_000L) return
@@ -664,10 +663,30 @@ class SmartCaneAppController private constructor(
         if (riskType == "none" || riskType == "history_risk") return
         val isFall = riskType == "fall_detected"
         if (!isFall) {
-            if (level == "low") return
-            if (riskType.contains("left") && level != "high" && (state.leftCm == null || state.leftCm > 35)) return
-            if (riskType.contains("right") && level != "high" && (state.rightCm == null || state.rightCm > 35)) return
-            if (riskType.contains("front") && level != "high" && (state.frontCm == null || state.frontCm > 40)) return
+            if (riskType.contains("left")) {
+                val limit = when (level) {
+                    "high" -> Int.MAX_VALUE
+                    "medium" -> 35
+                    else -> 55
+                }
+                if (state.leftCm == null || state.leftCm > limit) return
+            }
+            if (riskType.contains("right")) {
+                val limit = when (level) {
+                    "high" -> Int.MAX_VALUE
+                    "medium" -> 35
+                    else -> 55
+                }
+                if (state.rightCm == null || state.rightCm > limit) return
+            }
+            if (riskType.contains("front")) {
+                val limit = when (level) {
+                    "high" -> Int.MAX_VALUE
+                    "medium" -> 40
+                    else -> 80
+                }
+                if (state.frontCm == null || state.frontCm > limit) return
+            }
         }
 
         val now = System.currentTimeMillis()
@@ -678,11 +697,12 @@ class SmartCaneAppController private constructor(
 
         val prompt = hardwareRiskPrompt(state) ?: state.voicePrompt.takeIf { it.isNotBlank() } ?: return
         val speechKey = hardwareRiskSpeechKey(riskType)
+        val cooldownMs = if (level == "low") 15_000L else 10_000L
         val lastKeySpokenAt = hardwareRiskSpeechTimes[speechKey] ?: 0L
-        if (now - lastKeySpokenAt < 10_000L) return
+        if (now - lastKeySpokenAt < cooldownMs) return
 
         val signature = listOf(state.source, riskType, level).joinToString("|")
-        if (signature == lastHardwareRiskSignature && now - lastHardwareRiskSpokenAt < 10_000L) return
+        if (signature == lastHardwareRiskSignature && now - lastHardwareRiskSpokenAt < cooldownMs) return
         lastHardwareRiskSignature = signature
         lastHardwareRiskSpokenAt = now
         hardwareRiskSpeechTimes[speechKey] = now

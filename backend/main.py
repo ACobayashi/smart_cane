@@ -53,6 +53,17 @@ RISK_POINT_CLUSTER_RADIUS_M = 12.0
 LEGACY_SIM_POINT_LAT = 31.2304
 LEGACY_SIM_POINT_LNG = 121.4737
 LEGACY_SIM_POINT_RADIUS_M = 80.0
+SELF_HISTORY_SUPPRESSION_SECONDS = 120
+LOW_OBSTACLE_PROMOTION_COUNT = 2
+TEST_DATA_DEVICE_IDS = {
+    "cane_test",
+    "tester_risk_broadcast",
+    "care_tester_02",
+    "blind_demo",
+    "companion_demo",
+}
+TEST_DATA_KEYWORDS = ("mock", "simulator", "simulation", "fake", "demo", "test")
+TEST_DATA_SOURCE_IDS = {"android_frontend_sim", "mock", "simulator", "simulation", "test"}
 RISK_POINT_TRANSIENT_TTL_SECONDS = 2 * 60 * 60
 RISK_POINT_FIXED_TTL_SECONDS = 7 * 24 * 60 * 60
 RISK_POINT_EMERGENCY_TTL_SECONDS = 30 * 60
@@ -1347,6 +1358,7 @@ MAPPABLE_RISK_TYPES = {
     "down_obstacle",
     "down_no_target",
     "down_sensor_unavailable",
+    "sos",
     "user_mark",
     "history_risk",
     "prolonged_obstacle",
@@ -1385,6 +1397,68 @@ def is_legacy_sim_point(lat: float, lng: float) -> bool:
     return haversine_m(lat, lng, LEGACY_SIM_POINT_LAT, LEGACY_SIM_POINT_LNG) <= LEGACY_SIM_POINT_RADIUS_M
 
 
+def is_test_device_id(device_id: Any) -> bool:
+    text = str(device_id or "").strip().lower()
+    if not text:
+        return False
+    if text in TEST_DATA_DEVICE_IDS:
+        return True
+    return any(keyword in text for keyword in TEST_DATA_KEYWORDS)
+
+
+def is_test_source_name(source: Any) -> bool:
+    text = str(source or "").strip().lower()
+    if not text:
+        return False
+    if text in TEST_DATA_SOURCE_IDS:
+        return True
+    return any(keyword in text for keyword in TEST_DATA_KEYWORDS)
+
+
+def event_extra_map(event: dict[str, Any]) -> dict[str, Any]:
+    extra = parse_json_field(event.get("extra_json") or event.get("extraJson"))
+    if isinstance(extra, dict):
+        return extra
+    return {}
+
+
+def is_test_event_like(event: dict[str, Any]) -> bool:
+    if is_test_device_id(event.get("device_id") or event.get("deviceId")):
+        return True
+    if is_test_source_name(event.get("source")):
+        return True
+    extra = event_extra_map(event)
+    for key in ("source", "provider", "quality", "device_name", "deviceName"):
+        if is_test_source_name(extra.get(key) or event.get(key)):
+            return True
+    return False
+
+
+def risk_point_level_after_merge(risk_type: str, existing_level: str, incoming_level: str, report_count: int) -> str:
+    if risk_type in {"sos", "fall_detected"}:
+        return "high"
+    merged = incoming_level if LEVEL_RANK[incoming_level] >= LEVEL_RANK.get(existing_level, 0) else existing_level
+    if risk_type in {"front_obstacle", "left_obstacle", "right_obstacle"} and report_count >= LOW_OBSTACLE_PROMOTION_COUNT:
+        return "medium" if LEVEL_RANK.get(merged, 0) < LEVEL_RANK["medium"] else merged
+    return merged
+
+
+def should_suppress_self_history_warning(event: dict[str, Any], excluded_device: str) -> bool:
+    if not excluded_device:
+        return False
+    event_device = str(event.get("deviceId") or event.get("device_id") or "").strip()
+    source_devices = [str(item).strip() for item in (event.get("sourceDevices") or event.get("source_devices") or [])]
+    if event_device != excluded_device and excluded_device not in source_devices:
+        return False
+    risk_type = str(event.get("riskType") or event.get("risk_type") or "none")
+    if risk_type in {"sos", "fall_detected", "user_mark", "ground_drop", "ground_step", "ground_step_down", "ground_step_up", "history_risk"}:
+        return False
+    seen = parse_time(str(event.get("timestamp") or ""))
+    if not seen:
+        return False
+    return datetime.now(timezone.utc) - seen <= timedelta(seconds=SELF_HISTORY_SUPPRESSION_SECONDS)
+
+
 def expire_risk_points() -> None:
     with db() as conn:
         conn.execute(
@@ -1410,6 +1484,8 @@ def upsert_risk_point_for_event(event: dict[str, Any]) -> None:
     risk_type = str(event.get("risk_type") or "none")
     level = str(event.get("risk_level") or "low")
     if risk_type not in MAPPABLE_RISK_TYPES or level not in LEVEL_RANK:
+        return
+    if is_test_event_like(event):
         return
     lat = event.get("lat")
     lng = event.get("lng")
@@ -1447,7 +1523,12 @@ def upsert_risk_point_for_event(event: dict[str, Any]) -> None:
             devices = sorted(set(parse_devices_json(point.get("source_devices_json"))) | {device_id})
             merged_lat = (float(point["lat"]) * (report_count - 1) + lat) / report_count
             merged_lng = (float(point["lng"]) * (report_count - 1) + lng) / report_count
-            merged_level = level if LEVEL_RANK[level] >= LEVEL_RANK.get(str(point.get("risk_level") or "low"), 0) else str(point.get("risk_level") or level)
+            merged_level = risk_point_level_after_merge(
+                risk_type,
+                str(point.get("risk_level") or "low"),
+                level,
+                report_count,
+            )
             confidence = risk_point_confidence(merged_level, report_count, len(devices))
             conn.execute(
                 """
@@ -1542,9 +1623,23 @@ def active_risk_points(lat: Optional[float] = None, lng: Optional[float] = None,
     expire_risk_points()
     with db() as conn:
         rows = conn.execute("SELECT * FROM risk_points WHERE status = 'active' ORDER BY last_reported_at DESC LIMIT ?", (max(limit * 5, limit),)).fetchall()
+        latest_event_ids = [int(row["latest_event_id"]) for row in rows if row["latest_event_id"]]
+        latest_events: dict[int, dict[str, Any]] = {}
+        if latest_event_ids:
+            placeholders = ",".join("?" for _ in latest_event_ids)
+            event_rows = conn.execute(
+                f"SELECT * FROM risk_events WHERE id IN ({placeholders})",
+                tuple(latest_event_ids),
+            ).fetchall()
+            latest_events = {int(row["id"]): event_to_dict(row) for row in event_rows}
     points: list[dict[str, Any]] = []
     for row in rows:
         if is_legacy_sim_point(float(row["lat"]), float(row["lng"])):
+            continue
+        if any(is_test_device_id(device) for device in parse_devices_json(row["source_devices_json"])):
+            continue
+        latest_event = latest_events.get(int(row["latest_event_id"] or 0))
+        if latest_event and is_test_event_like(latest_event):
             continue
         distance_m = None
         if lat is not None and lng is not None:
@@ -1582,7 +1677,7 @@ def latest_mobile_location_for_device(device_id: str, max_age_seconds: int = 300
     source = str(latest.get("source") or "").lower()
     provider = str(latest.get("provider") or "").lower()
     quality = str(latest.get("quality") or "").lower()
-    if "mock" in {source, provider, quality}:
+    if any(is_test_source_name(item) for item in (source, provider, quality)):
         return None
     timestamp = latest.get("timestamp")
     if timestamp:
@@ -2332,10 +2427,13 @@ def should_store_sensor_analysis(analysis: dict[str, Any]) -> bool:
         return True
     if analysis["risk_type"] in {"ground_drop", "ground_step", "ground_step_down", "ground_step_up", "down_no_target", "down_sensor_unavailable"}:
         return float(analysis.get("map_weight") or 0) >= 55
-    return analysis["risk_type"] in {
+    if analysis["risk_type"] in {
         "front_obstacle",
         "left_obstacle",
         "right_obstacle",
+    }:
+        return float(analysis.get("map_weight") or 0) >= 8 and analysis["risk_level"] in {"low", "medium", "high"}
+    return analysis["risk_type"] in {
         "prolonged_obstacle",
         "approaching_obstacle",
     } and float(analysis.get("map_weight") or 0) >= 60 and analysis["risk_level"] in {"medium", "high"}
@@ -2797,7 +2895,7 @@ def maybe_store_road_observation(event: dict[str, Any]) -> None:
     lat = float(lat)
     lng = float(lng)
     source = str(event.get("source") or event.get("sensor") or "")
-    if is_legacy_sim_point(lat, lng) or source.lower() == "mock":
+    if is_legacy_sim_point(lat, lng) or is_test_event_like(event) or is_test_source_name(source):
         return
     segment_id = nearest_road_segment_id(lat, lng)
     match_status = "matched" if segment_id else "pending"
@@ -4974,7 +5072,17 @@ def nearby_risks(
 def nearby_warning_text(distance_m: float, risk_level: str, direction: str, event: dict[str, Any]) -> str:
     level_text = {"high": "\u9ad8", "medium": "\u4e2d", "low": "\u4f4e"}.get(risk_level, "\u9ad8")
     direction_text = relative_direction_label(direction)
-    base = f"{direction_text}\u7ea6 {max(1, int(round(distance_m)))} \u7c73\u6709{level_text}\u98ce\u9669\uff0c\u8bf7\u6ce8\u610f\u907f\u8ba9\u3002"
+    distance_text = max(1, int(round(distance_m)))
+    risk_type = str(event.get("riskType") or event.get("risk_type") or "history_risk")
+    report_count = int(event.get("reportCount") or event.get("report_count") or 1)
+    if risk_type == "sos":
+        return f"{direction_text}\u7ea6 {distance_text} \u7c73\u5904\u66fe\u89e6\u53d1 SOS \u9ad8\u98ce\u9669\u6c42\u52a9\uff0c\u8bf7\u7acb\u5373\u51cf\u901f\u5e76\u7559\u610f\u5468\u56f4\u3002"
+    if risk_type in {"ground_drop", "ground_step", "ground_step_down", "ground_step_up", "down_no_target", "down_sensor_unavailable"}:
+        return f"{direction_text}\u7ea6 {distance_text} \u7c73\u6709\u5386\u53f2\u843d\u5dee\u98ce\u9669\u70b9\uff0c\u8bf7\u505c\u4e0b\u5e76\u5148\u63a2\u6d4b\u8def\u9762\u3002"
+    if risk_type in {"front_obstacle", "left_obstacle", "right_obstacle", "prolonged_obstacle", "approaching_obstacle"}:
+        if report_count >= LOW_OBSTACLE_PROMOTION_COUNT or risk_level in {"medium", "high"}:
+            return f"{direction_text}\u7ea6 {distance_text} \u7c73\u6709\u91cd\u590d\u51fa\u73b0\u7684\u969c\u788d\u98ce\u9669\u70b9\uff0c\u8bf7\u51cf\u901f\u786e\u8ba4\u3002"
+    base = f"{direction_text}\u7ea6 {distance_text} \u7c73\u6709{level_text}\u98ce\u9669\uff0c\u8bf7\u6ce8\u610f\u907f\u8ba9\u3002"
     detail = str(event.get("voicePrompt") or event.get("message") or "").strip()
     if detail and detail not in base:
         return f"{base}{detail}"
@@ -4999,11 +5107,8 @@ def nearby_risk_warning(
     excluded_device = (exclude_device_id or "").strip()
     candidates: list[tuple[int, float, float, int, dict[str, Any], str, Optional[float]]] = []
     for event in active_risk_points(lat, lng, radius, limit=500):
-        if excluded_device:
-            event_device = str(event.get("deviceId") or event.get("device_id") or "").strip()
-            source_devices = [str(item).strip() for item in (event.get("sourceDevices") or [])]
-            if event_device == excluded_device or excluded_device in source_devices:
-                continue
+        if should_suppress_self_history_warning(event, excluded_device):
+            continue
         level = str(event.get("riskLevel") or "low")
         rank = LEVEL_RANK.get(level, 0)
         if rank < min_rank:
