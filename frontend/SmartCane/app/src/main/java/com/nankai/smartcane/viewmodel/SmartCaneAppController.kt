@@ -503,12 +503,13 @@ class SmartCaneAppController private constructor(
 
         val distanceCm = (warning.distanceM * 100).toInt().coerceAtLeast(1)
         val directionText = warning.relativeDirectionText.ifBlank { "前方" }
-        val text = "${directionText}${distanceCm}厘米${riskLevelLabel(warning.riskLevel)}风险"
+        val fallback = "${directionText}${distanceCm}厘米${riskLevelLabel(warning.riskLevel)}风险"
+        val text = warning.voicePrompt.ifBlank { fallback }
         if (text == lastNearbyRiskText && now - lastNearbyRiskTextSpokenAt < 600_000L) return
         nearbyRiskSpeechTimes[warning.eventId] = now
         lastNearbyRiskText = text
         lastNearbyRiskTextSpokenAt = now
-        _uiState.update { it.copy(message = "附近历史风险：${distanceCm}厘米", lastSpokenText = text) }
+        _uiState.update { it.copy(message = "附近风险点：${directionText}${distanceCm}厘米", lastSpokenText = text) }
         speakText(text)
     }
 
@@ -556,7 +557,6 @@ class SmartCaneAppController private constructor(
     }
 
     fun startAlertPolling() {
-        startNearbyRiskPolling()
         startHardwareRiskPolling()
         if (alertPollingJob?.isActive == true) return
         alertPollingJob = scope.launch {
@@ -609,7 +609,6 @@ class SmartCaneAppController private constructor(
     fun stopAlertPolling() {
         alertPollingJob?.cancel()
         alertPollingJob = null
-        stopNearbyRiskPolling()
         stopHardwareRiskPolling()
     }
 
