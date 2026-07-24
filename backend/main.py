@@ -4986,6 +4986,7 @@ def nearby_risk_warning(
     lng: float = Query(..., ge=-180, le=180),
     radius: float = Query(50.0, gt=0, le=5000),
     min_level: str = Query("medium", pattern="^(low|medium|high)$"),
+    exclude_device_id: Optional[str] = Query(None),
     bearing_deg: Optional[float] = Query(None, ge=0, lt=360),
     fov_deg: float = Query(140.0, gt=10, le=360),
 ) -> dict[str, Any]:
@@ -4995,8 +4996,14 @@ def nearby_risk_warning(
     points inside the user's forward field of view are considered.
     """
     min_rank = LEVEL_RANK[min_level]
+    excluded_device = (exclude_device_id or "").strip()
     candidates: list[tuple[int, float, float, int, dict[str, Any], str, Optional[float]]] = []
     for event in active_risk_points(lat, lng, radius, limit=500):
+        if excluded_device:
+            event_device = str(event.get("deviceId") or event.get("device_id") or "").strip()
+            source_devices = [str(item).strip() for item in (event.get("sourceDevices") or [])]
+            if event_device == excluded_device or excluded_device in source_devices:
+                continue
         level = str(event.get("riskLevel") or "low")
         rank = LEVEL_RANK.get(level, 0)
         if rank < min_rank:
@@ -5022,6 +5029,7 @@ def nearby_risk_warning(
             "found": False,
             "radius_m": radius,
             "min_level": min_level,
+            "exclude_device_id": exclude_device_id,
             "bearing_deg": bearing_deg,
             "fov_deg": fov_deg,
             "warning": None,
@@ -5037,6 +5045,7 @@ def nearby_risk_warning(
         "found": True,
         "radius_m": radius,
         "min_level": min_level,
+        "exclude_device_id": exclude_device_id,
         "bearing_deg": bearing_deg,
         "fov_deg": fov_deg,
         "warning": {

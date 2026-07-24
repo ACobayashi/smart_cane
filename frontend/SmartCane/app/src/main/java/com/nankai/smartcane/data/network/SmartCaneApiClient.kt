@@ -447,12 +447,14 @@ object SmartCaneApiClient {
         longitude: Double,
         radiusM: Int = 50,
         minLevel: String = "medium",
-        bearingDeg: Float? = null
+        bearingDeg: Float? = null,
+        excludeDeviceId: String? = null
     ): ApiResult<NearbyRiskWarningDto?> = withContext(Dispatchers.IO) {
         try {
             val path = buildString {
                 append("/api/risks/nearby-warning?lat=$latitude&lng=$longitude&radius=$radiusM&min_level=${minLevel.urlEncode()}")
                 if (bearingDeg != null) append("&bearing_deg=$bearingDeg")
+                if (!excludeDeviceId.isNullOrBlank()) append("&exclude_device_id=${excludeDeviceId.urlEncode()}")
             }
             ApiResult.Success(getJson(path).toNearbyRiskWarningDtoOrNull())
         } catch (exception: Exception) {

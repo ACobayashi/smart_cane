@@ -479,7 +479,13 @@ class SmartCaneAppController private constructor(
                     )
                 )
 
-                when (val result = SmartCaneApiClient.getNearbyRiskWarning(location.latitude, location.longitude, radiusM = 50, bearingDeg = location.bearing.takeIf { location.hasBearing() })) {
+                when (val result = SmartCaneApiClient.getNearbyRiskWarning(
+                    location.latitude,
+                    location.longitude,
+                    radiusM = 50,
+                    bearingDeg = location.bearing.takeIf { location.hasBearing() },
+                    excludeDeviceId = deviceId
+                )) {
                     is ApiResult.Success -> result.data?.let { maybeSpeakNearbyRiskWarning(it) }
                     is ApiResult.Failure -> Unit
                 }
