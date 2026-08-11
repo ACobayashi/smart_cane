@@ -21,6 +21,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.nankai.smartcane.data.local.DemoData
 import com.nankai.smartcane.data.local.LocalAppPreferences
@@ -32,6 +33,7 @@ import com.nankai.smartcane.data.model.PairingCode
 import com.nankai.smartcane.data.model.PairingFlowStatus
 import com.nankai.smartcane.data.model.RelationStatus
 import com.nankai.smartcane.data.model.SelfSosGeneration
+import com.nankai.smartcane.data.model.SelfSosReplayState
 import com.nankai.smartcane.data.model.SelfSosReplayStateMachine
 import com.nankai.smartcane.data.model.UserProfile
 import com.nankai.smartcane.data.model.UserRole
@@ -520,9 +522,22 @@ class SmartCaneAppController private constructor(
             currentDeviceId.isNotEmpty() &&
             warning.riskType == "sos" &&
             warning.sourceDevices.any { sourceDevice -> sourceDevice.trim() == currentDeviceId }
+        Log.d(
+            SELF_SOS_REPLAY_LOG_TAG,
+            "SELF_SOS_REPLAY candidate recognized=$isSelfSosReplay " +
+                "riskPointId=${warning.eventId} riskType=${warning.riskType} riskLevel=${warning.riskLevel} " +
+                "sourceDevices=${warning.sourceDevices} currentDeviceId=$currentDeviceId " +
+                "distanceM=${warning.distanceM} timestamp=${warning.timestamp} reportCount=${warning.reportCount}"
+        )
         if (isSelfSosReplay && _uiState.value.voiceState == VoiceState.Listening) return
 
         val shouldPlaySelfSosReplay = if (isSelfSosReplay) {
+            Log.d(
+                SELF_SOS_REPLAY_LOG_TAG,
+                "SELF_SOS_REPLAY before update state=${selfSosReplayStateMachine.state} " +
+                    "distanceM=${warning.distanceM} generation=" +
+                    "${warning.eventId}|${warning.timestamp}|${warning.reportCount ?: 0}"
+            )
             val transition = selfSosReplayStateMachine.update(
                 SelfSosGeneration(
                     riskPointId = warning.eventId,
@@ -530,6 +545,21 @@ class SmartCaneAppController private constructor(
                     reportCount = warning.reportCount ?: 0
                 ),
                 warning.distanceM
+            )
+            val replayOutcome = mapOf(
+                Pair(SelfSosReplayState.WAITING_TO_LEAVE, false) to
+                    "SELF_SOS_REPLAY waiting_to_leave - speech suppressed",
+                Pair(SelfSosReplayState.ARMED, false) to
+                    "SELF_SOS_REPLAY armed - waiting for re-entry",
+                Pair(SelfSosReplayState.PLAYED, true) to
+                    "SELF_SOS_REPLAY trigger speech",
+                Pair(SelfSosReplayState.PLAYED, false) to
+                    "SELF_SOS_REPLAY already played - speech suppressed"
+            )[Pair(transition.state, transition.shouldPlay)] ?: "SELF_SOS_REPLAY transition observed"
+            Log.d(
+                SELF_SOS_REPLAY_LOG_TAG,
+                "$replayOutcome state=${transition.state} shouldPlay=${transition.shouldPlay} " +
+                    "isNewGeneration=${transition.isNewGeneration}"
             )
             if (!transition.shouldPlay) return
             true
@@ -1555,6 +1585,7 @@ class SmartCaneAppController private constructor(
     }
 
     companion object {
+        private const val SELF_SOS_REPLAY_LOG_TAG = "SelfSosReplay"
         private const val LOCATION_MAX_AGE_MS = 5 * 60 * 1000L
         private const val NAVIGATION_LOCATION_MAX_AGE_MS = 90 * 1000L
         private const val LOCATION_MAX_ACCURACY_M = 80f
