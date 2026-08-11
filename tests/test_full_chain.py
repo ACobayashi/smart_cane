@@ -233,6 +233,206 @@ def test_fall_event_id_is_persistently_deduplicated(tmp_path, monkeypatch):
         ).fetchone()["c"] == 1
 
 
+def test_fall_detected_becomes_high_shared_risk_point_and_warns_other_device(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "fall_shared_risk.db")
+    main.init_db()
+    event = main.EventCreate(
+        device_id="cane_device_a",
+        lat=31.0,
+        lng=121.0,
+        risk_type="fall_detected",
+        risk_level="low",
+        fall_event_id="fall-shared-risk-1",
+    )
+
+    first = main.store_event(event)
+    second = main.store_event(event)
+
+    assert first["id"] == second["id"]
+    with main.db() as conn:
+        event_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM risk_events WHERE fall_event_id = ?",
+            ("fall-shared-risk-1",),
+        ).fetchone()["c"]
+        points = conn.execute(
+            "SELECT * FROM risk_points WHERE risk_type = ?",
+            ("fall_detected",),
+        ).fetchall()
+
+    assert event_count == 1
+    assert len(points) == 1
+    point = points[0]
+    assert point["risk_type"] == "fall_detected"
+    assert point["risk_level"] == "high"
+    assert point["report_count"] == 1
+    assert point["latest_event_id"] == first["id"]
+    assert main.parse_devices_json(point["source_devices_json"]) == ["cane_device_a"]
+    ttl_seconds = (main.parse_time(point["expires_at"]) - main.parse_time(point["last_reported_at"])).total_seconds()
+    assert 1799 <= ttl_seconds <= 1801
+
+    warning = main.nearby_risk_warning(
+        lat=31.0,
+        lng=121.00002,
+        radius=50,
+        min_level="medium",
+        exclude_device_id="cane_device_b",
+        bearing_deg=None,
+    )
+    assert warning["found"] is True
+    assert warning["warning"]["riskType"] == "fall_detected"
+    assert warning["warning"]["riskLevel"] == "high"
+
+
+def test_fall_detected_with_filtered_mock_coordinates_saves_event_without_risk_point(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "fall_filtered_location.db")
+    main.init_db()
+
+    stored = main.store_event(main.EventCreate(
+        device_id="cane_device_a",
+        lat=main.LEGACY_SIM_POINT_LAT,
+        lng=main.LEGACY_SIM_POINT_LNG,
+        risk_type="fall_detected",
+        risk_level="low",
+        fall_event_id="fall-filtered-location-1",
+    ))
+
+    with main.db() as conn:
+        event_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM risk_events WHERE id = ?",
+            (stored["id"],),
+        ).fetchone()["c"]
+        point_count = conn.execute("SELECT COUNT(*) AS c FROM risk_points").fetchone()["c"]
+    assert event_count == 1
+    assert point_count == 0
+
+
+def test_latest_mobile_location_skips_multiple_newer_untrusted_locations(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "mobile_location_history.db")
+    main.init_db()
+    now = main.datetime.now(main.timezone.utc)
+    device_id = "cane_location_a"
+    trusted = main.create_location(main.LocationCreate(
+        device_id=device_id,
+        lat=31.1,
+        lng=121.1,
+        source="android",
+        provider="amap",
+        quality="usable",
+        timestamp=(now - main.timedelta(seconds=120)).isoformat(timespec="seconds"),
+    ))
+    main.create_location(main.LocationCreate(
+        device_id=device_id,
+        lat=main.LEGACY_SIM_POINT_LAT,
+        lng=main.LEGACY_SIM_POINT_LNG,
+        source="esp32c5",
+        provider="mock",
+        quality="mock",
+        timestamp=(now - main.timedelta(seconds=30)).isoformat(timespec="seconds"),
+    ))
+    main.create_location(main.LocationCreate(
+        device_id=device_id,
+        lat=30.0,
+        lng=120.0,
+        source="test",
+        provider="simulator",
+        quality="demo",
+        timestamp=(now - main.timedelta(seconds=10)).isoformat(timespec="seconds"),
+    ))
+
+    selected = main.latest_mobile_location_for_device(device_id)
+
+    assert selected["id"] == trusted["id"]
+    assert (selected["lat"], selected["lng"]) == (31.1, 121.1)
+
+
+def test_latest_mobile_location_rejects_stale_trusted_location_and_preserves_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "mobile_location_fallback.db")
+    main.init_db()
+    now = main.datetime.now(main.timezone.utc)
+    device_id = "cane_location_b"
+    main.create_location(main.LocationCreate(
+        device_id=device_id,
+        lat=31.2,
+        lng=121.2,
+        source="android",
+        provider="amap",
+        quality="usable",
+        timestamp=(now - main.timedelta(seconds=301)).isoformat(timespec="seconds"),
+    ))
+    mock = main.create_location(main.LocationCreate(
+        device_id=device_id,
+        lat=main.LEGACY_SIM_POINT_LAT,
+        lng=main.LEGACY_SIM_POINT_LNG,
+        source="esp32c5",
+        provider="mock",
+        quality="mock",
+        timestamp=now.isoformat(timespec="seconds"),
+    ))
+
+    assert main.latest_mobile_location_for_device(device_id) is None
+    assert main.prefer_mobile_location(device_id, mock["lat"], mock["lng"]) == (mock["lat"], mock["lng"])
+
+    mock_only_device = "cane_location_c"
+    mock_only = main.create_location(main.LocationCreate(
+        device_id=mock_only_device,
+        lat=30.5,
+        lng=120.5,
+        source="esp32c5",
+        provider="mock",
+        quality="mock",
+        timestamp=now.isoformat(timespec="seconds"),
+    ))
+    assert main.latest_mobile_location_for_device(mock_only_device) is None
+    assert main.prefer_mobile_location(
+        mock_only_device, mock_only["lat"], mock_only["lng"]
+    ) == (mock_only["lat"], mock_only["lng"])
+
+
+def test_sos_uses_recent_trusted_mobile_location_behind_newer_mock(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "sos_mobile_location.db")
+    main.init_db()
+    now = main.datetime.now(main.timezone.utc)
+    device_id = "cane_device_a"
+    real_lat, real_lng = 31.1, 121.1
+    main.create_location(main.LocationCreate(
+        device_id=device_id,
+        lat=real_lat,
+        lng=real_lng,
+        source="android",
+        provider="amap",
+        quality="usable",
+        timestamp=(now - main.timedelta(seconds=60)).isoformat(timespec="seconds"),
+    ))
+    main.create_location(main.LocationCreate(
+        device_id=device_id,
+        lat=main.LEGACY_SIM_POINT_LAT,
+        lng=main.LEGACY_SIM_POINT_LNG,
+        source="esp32c5",
+        provider="mock",
+        quality="mock",
+        timestamp=now.isoformat(timespec="seconds"),
+    ))
+
+    stored = main.create_risk_event(main.EventCreate(
+        device_id=device_id,
+        lat=main.LEGACY_SIM_POINT_LAT,
+        lng=main.LEGACY_SIM_POINT_LNG,
+        risk_type="sos",
+        risk_level="high",
+    ))
+
+    with main.db() as conn:
+        event_row = conn.execute("SELECT * FROM risk_events WHERE id = ?", (stored["id"],)).fetchone()
+        point = conn.execute("SELECT * FROM risk_points WHERE latest_event_id = ?", (stored["id"],)).fetchone()
+    assert event_row is not None
+    assert (event_row["lat"], event_row["lng"]) == (real_lat, real_lng)
+    assert point is not None
+    assert (point["lat"], point["lng"]) == (real_lat, real_lng)
+    assert point["risk_type"] == "sos"
+    assert point["risk_level"] == "high"
+    assert device_id in main.parse_devices_json(point["source_devices_json"])
+
+
 def test_fall_suppresses_other_sensor_alerts_for_30_seconds(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "fall_suppression.db")
     main.init_db()

@@ -322,6 +322,7 @@ data class VoiceCommandDto(
 data class NearbyRiskWarningDto(
     val eventId: Int,
     val deviceId: String,
+    val sourceDevices: List<String>,
     val riskType: String,
     val riskLevel: String,
     val distanceM: Double,
@@ -335,6 +336,9 @@ data class NearbyRiskWarningDto(
     val confidence: Double? = null,
     val reportCount: Int? = null
 )
+
+internal fun stringValues(size: Int, valueAt: (Int) -> String): List<String> =
+    (0 until size).mapNotNull { index -> valueAt(index).trim().takeIf(String::isNotEmpty) }
 
 object SmartCaneApiClient {
     private const val CONNECT_TIMEOUT_MS = 5_000
@@ -963,9 +967,14 @@ object SmartCaneApiClient {
         if (!optBoolean("found", false)) return null
         val warning = optJSONObject("warning") ?: return null
         val messageValue = warning.optString("message")
+        val sourceDevicesArray = warning.optJSONArray("sourceDevices")
+            ?: warning.optJSONArray("source_devices")
         return NearbyRiskWarningDto(
             eventId = warning.optInt("eventId", warning.optInt("id")),
             deviceId = warning.optString("deviceId", warning.optString("device_id", "")),
+            sourceDevices = sourceDevicesArray?.let { array ->
+                stringValues(array.length()) { index -> array.optString(index) }
+            }.orEmpty(),
             riskType = warning.optString("riskType", warning.optString("risk_type", "none")),
             riskLevel = warning.optString("riskLevel", warning.optString("risk_level", "low")),
             distanceM = warning.optDouble("distanceM", warning.optDouble("distance_m", 0.0)),

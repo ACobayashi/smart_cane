@@ -1358,6 +1358,7 @@ MAPPABLE_RISK_TYPES = {
     "down_obstacle",
     "down_no_target",
     "down_sensor_unavailable",
+    "fall_detected",
     "sos",
     "user_mark",
     "history_risk",
@@ -1485,6 +1486,8 @@ def upsert_risk_point_for_event(event: dict[str, Any]) -> None:
     level = str(event.get("risk_level") or "low")
     if risk_type not in MAPPABLE_RISK_TYPES or level not in LEVEL_RANK:
         return
+    if risk_type == "fall_detected":
+        level = "high"
     if is_test_event_like(event):
         return
     lat = event.get("lat")
@@ -1671,25 +1674,30 @@ def resolve_legacy_location(device_id: str, lat: Optional[float], lng: Optional[
 
 
 def latest_mobile_location_for_device(device_id: str, max_age_seconds: int = 300) -> Optional[dict[str, Any]]:
-    latest = latest_location_for_device(device_id)
-    if not latest:
-        return None
-    source = str(latest.get("source") or "").lower()
-    provider = str(latest.get("provider") or "").lower()
-    quality = str(latest.get("quality") or "").lower()
-    if any(is_test_source_name(item) for item in (source, provider, quality)):
-        return None
-    timestamp = latest.get("timestamp")
-    if timestamp:
-        try:
-            seen = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
-            if seen.tzinfo is None:
-                seen = seen.replace(tzinfo=timezone.utc)
-            if datetime.now(timezone.utc) - seen > timedelta(seconds=max_age_seconds):
-                return None
-        except ValueError:
-            pass
-    return latest
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM device_locations WHERE device_id = ? ORDER BY datetime(timestamp) DESC, id DESC",
+            (device_id,),
+        ).fetchall()
+    for row in rows:
+        location = row_to_dict(row)
+        source = str(location.get("source") or "").lower()
+        provider = str(location.get("provider") or "").lower()
+        quality = str(location.get("quality") or "").lower()
+        if any(is_test_source_name(item) for item in (source, provider, quality)):
+            continue
+        timestamp = location.get("timestamp")
+        if timestamp:
+            try:
+                seen = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+                if seen.tzinfo is None:
+                    seen = seen.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) - seen > timedelta(seconds=max_age_seconds):
+                    return None
+            except ValueError:
+                pass
+        return location
+    return None
 
 
 def prefer_mobile_location(device_id: str, lat: Optional[float], lng: Optional[float]) -> tuple[float, float]:
