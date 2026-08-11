@@ -31,6 +31,8 @@ import com.nankai.smartcane.data.model.CareRequest
 import com.nankai.smartcane.data.model.PairingCode
 import com.nankai.smartcane.data.model.PairingFlowStatus
 import com.nankai.smartcane.data.model.RelationStatus
+import com.nankai.smartcane.data.model.SelfSosGeneration
+import com.nankai.smartcane.data.model.SelfSosReplayStateMachine
 import com.nankai.smartcane.data.model.UserProfile
 import com.nankai.smartcane.data.model.UserRole
 import com.nankai.smartcane.data.network.ApiResult
@@ -106,6 +108,8 @@ class SmartCaneAppController private constructor(
     private var lastNearbyRiskTextSpokenAt: Long = 0L
     private val announcedNearbyRiskIds = mutableSetOf<Int>()
     private val nearbyRiskSpeechTimes: MutableMap<Int, Long> = mutableMapOf()
+    private var selfSosReplayDemoEnabled = true
+    private var selfSosReplayStateMachine = SelfSosReplayStateMachine()
     private var navigationReceiverRegistered = false
     private val navigationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -500,20 +504,56 @@ class SmartCaneAppController private constructor(
         stopPhoneLocationUpdates()
     }
 
+    fun setSelfSosReplayDemoEnabled(enabled: Boolean) {
+        if (selfSosReplayDemoEnabled == enabled) return
+        selfSosReplayDemoEnabled = enabled
+        resetSelfSosReplayDemoState()
+    }
+
+    fun resetSelfSosReplayDemoState() {
+        selfSosReplayStateMachine = SelfSosReplayStateMachine()
+    }
+
     private fun maybeSpeakNearbyRiskWarning(warning: NearbyRiskWarningDto) {
+        val currentDeviceId = currentCaneDeviceId().trim()
+        val isSelfSosReplay = selfSosReplayDemoEnabled &&
+            currentDeviceId.isNotEmpty() &&
+            warning.riskType == "sos" &&
+            warning.sourceDevices.any { sourceDevice -> sourceDevice.trim() == currentDeviceId }
+        if (isSelfSosReplay && _uiState.value.voiceState == VoiceState.Listening) return
+
+        val shouldPlaySelfSosReplay = if (isSelfSosReplay) {
+            val transition = selfSosReplayStateMachine.update(
+                SelfSosGeneration(
+                    riskPointId = warning.eventId,
+                    timestamp = warning.timestamp,
+                    reportCount = warning.reportCount ?: 0
+                ),
+                warning.distanceM
+            )
+            if (!transition.shouldPlay) return
+            true
+        } else {
+            false
+        }
+
         val now = System.currentTimeMillis()
-        val lastSpokenAt = nearbyRiskSpeechTimes[warning.eventId] ?: 0L
-        if (now - lastSpokenAt < 300_000L) return
+        if (!shouldPlaySelfSosReplay) {
+            val lastSpokenAt = nearbyRiskSpeechTimes[warning.eventId] ?: 0L
+            if (now - lastSpokenAt < 300_000L) return
+        }
         if (_uiState.value.voiceState == VoiceState.Listening) return
 
         val distanceCm = (warning.distanceM * 100).toInt().coerceAtLeast(1)
         val directionText = warning.relativeDirectionText.ifBlank { "前方" }
         val fallback = "${directionText}${distanceCm}厘米${riskLevelLabel(warning.riskLevel)}风险"
         val text = warning.voicePrompt.ifBlank { fallback }
-        if (text == lastNearbyRiskText && now - lastNearbyRiskTextSpokenAt < 600_000L) return
-        nearbyRiskSpeechTimes[warning.eventId] = now
-        lastNearbyRiskText = text
-        lastNearbyRiskTextSpokenAt = now
+        if (!shouldPlaySelfSosReplay) {
+            if (text == lastNearbyRiskText && now - lastNearbyRiskTextSpokenAt < 600_000L) return
+            nearbyRiskSpeechTimes[warning.eventId] = now
+            lastNearbyRiskText = text
+            lastNearbyRiskTextSpokenAt = now
+        }
         _uiState.update { it.copy(message = "附近风险点：${directionText}${distanceCm}厘米", lastSpokenText = text) }
         speakText(text)
     }
