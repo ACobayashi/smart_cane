@@ -14,6 +14,8 @@ The system implements a practical ESP32-C5 multi-device collaborative smart cane
 
 Local safety remains rule-based and offline-capable. Network, deep-risk scoring, and LLM advice only enrich phone/backend feedback and do not replace local obstacle avoidance.
 
+For the replacement PCA9685 motor board wiring, see `docs/pca9685_motor_wiring.md`.
+
 Private reference PDFs and API keys must not be committed or uploaded.
 
 ## Repository Structure

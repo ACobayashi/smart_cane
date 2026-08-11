@@ -102,7 +102,7 @@ These endpoints read and write the same SQLite tables as `/api/risk-events` and 
 - touch MPR121: TCA `CH7`
 - buzzer: GPIO `4`, low-level trigger
 - physical button: GPIO `5`, active low. Short press requests Android voice input; long press uploads `sos`.
-- vibration motors: PCA9685 blue board on root I2C `0x40`; left `CH8`, right `CH9`, center `CH10`. Do not use ESP32 GPIO `8/9/10` because they are reserved by the BMI270/BMM350 shuttle board path.
+- vibration motors: PCA9685 blue board on TCA `CH6`, I2C address `0x40`; left `CH0`, right `CH1`, center `CH2`. Do not use ESP32 GPIO `8/9/10` because they are reserved by the BMI270/BMM350 shuttle board path.
 - built-in BMI270 IMU: fall detection; BMM350 is heading reference only, not GPS/location
 
 If the Android app has uploaded a recent non-mock Amap location for the same `device_id`, the backend uses that phone location for risk events and sensor frames. Firmware mock coordinates are only a fallback.

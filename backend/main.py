@@ -27,6 +27,15 @@ from pydantic import BaseModel, Field
 
 
 BASE_DIR = Path(__file__).resolve().parent
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(BASE_DIR / ".env", override=True)
+    load_dotenv(BASE_DIR.parent / ".env", override=False)
+except ImportError:
+    pass
+
 DB_PATH = Path(os.getenv("SMARTCANE_DB_PATH", str(BASE_DIR / "smartcane.db")))
 LEVEL_RANK = {"low": 0, "medium": 1, "high": 2}
 DEVICE_OFFLINE_SECONDS = 60
@@ -101,10 +110,11 @@ HARDWARE_PROFILE: dict[str, Any] = {
         "vibration_motors": {
             "mode": "pca9685_pwm",
             "address": "0x40",
-            "note": "Use PCA9685 channels, not ESP32 GPIO8/9/10. GPIO8/9/10 are reserved by the BMI270/BMM350 shuttle board.",
-            "left": {"pca_channel": 8},
-            "right": {"pca_channel": 9},
-            "center": {"pca_channel": 10},
+            "tca_channel": 6,
+            "note": "Use PCA9685 channels CH0/CH1/CH2 on TCA channel 6, not ESP32 GPIO8/9/10. GPIO8/9/10 are reserved by the BMI270/BMM350 shuttle board.",
+            "left": {"pca_channel": 0},
+            "right": {"pca_channel": 1},
+            "center": {"pca_channel": 2},
         },
     },
     "built_in_sensors": {
@@ -125,15 +135,6 @@ HARDWARE_PROFILE: dict[str, Any] = {
         "down_step_edge_max": DOWN_STEP_EDGE_MAX_CM,
     },
 }
-
-
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv(BASE_DIR / ".env")
-    load_dotenv(BASE_DIR.parent / ".env", override=False)
-except ImportError:
-    pass
 
 
 class EventCreate(BaseModel):
@@ -3489,7 +3490,7 @@ def chat_config() -> dict[str, str]:
         "provider": "ark",
         "api_key": secret_env("ARK_API_KEY"),
         "base_url": env("ARK_OPENAI_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/"),
-        "model": env("ARK_MODEL", "doubao-seed-2-1-pro-260628"),
+        "model": env("ARK_MODEL", "doubao-seed-evolving"),
     }
 
 
