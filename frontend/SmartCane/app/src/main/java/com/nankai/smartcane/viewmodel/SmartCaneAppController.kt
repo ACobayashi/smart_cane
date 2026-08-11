@@ -666,10 +666,13 @@ class SmartCaneAppController private constructor(
                                 speakText(newest.voicePrompt.ifBlank { newest.message }, listenAfter = true)
                             } else {
                                 _uiState.update { it.copy(urgentAlert = newest, message = newest.title) }
-                                if (role == "blind" && sosAlarmJob?.isActive != true) {
-                                    val alertPrompt = if (newest.riskType == "fall_detected") "检测到跌倒" else newest.voicePrompt.ifBlank { newest.message }
-                                    speakText(alertPrompt)
-                                }
+                                alertSpeechForRole(
+                                    role = role,
+                                    riskType = newest.riskType,
+                                    voicePrompt = newest.voicePrompt,
+                                    message = newest.message,
+                                    sosAlarmActive = sosAlarmJob?.isActive == true
+                                )?.let(::speakText)
                             }
                         }
                     }
@@ -1612,6 +1615,21 @@ class SmartCaneAppController private constructor(
 
 enum class VoiceState(val label: String) { Idle("按住说话"), Listening("正在录音"), Processing("正在识别"), Speaking("正在播报") }
 enum class SosActionState { Idle, Sending, Success, Error }
+
+internal fun alertSpeechForRole(
+    role: String,
+    riskType: String,
+    voicePrompt: String,
+    message: String,
+    sosAlarmActive: Boolean
+): String? {
+    if (riskType == "sos") {
+        return if (role == "companion") "盲人用户发起紧急求助，请查看" else null
+    }
+    if (role != "blind" || sosAlarmActive) return null
+    return if (riskType == "fall_detected") "检测到跌倒" else voicePrompt.ifBlank { message }
+}
+
 enum class TtsPriority(val rank: Int) {
     NORMAL(1), ROAD_RISK(2), NAVIGATION(3), OBSTACLE_STOP(4), STEP(5), EMERGENCY(6)
 }
