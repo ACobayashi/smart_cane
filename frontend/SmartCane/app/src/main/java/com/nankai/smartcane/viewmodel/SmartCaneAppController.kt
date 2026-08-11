@@ -723,12 +723,22 @@ class SmartCaneAppController private constructor(
                     is ApiResult.Success -> result.data.state?.let {
                         val wasPending = _uiState.value.fallPending
                         _uiState.update { state -> state.copy(fallPending = it.fallPending, fallStage = it.fallStage) }
-                        val hardwareFallActive = it.fallPending || it.riskType.equals("fall_detected", ignoreCase = true)
+                        val trustedHardwareState = it.online &&
+                            !isNonHardwareSource(it.source) &&
+                            it.riskType.isNotBlank() &&
+                            it.riskLevel.lowercase(Locale.US) in setOf("low", "medium", "high")
+                        val hardwareFallActive = trustedHardwareState &&
+                            (it.fallPending || it.riskType.equals("fall_detected", ignoreCase = true))
                         if (hardwareFallActive) {
                             fallHardwareEpisodeObserved = true
                         } else if (fallHardwareEpisodeObserved) {
-                            fallRiskEpisode.clear()
-                            fallHardwareEpisodeObserved = false
+                            if (trustedHardwareState) {
+                                if (fallRiskEpisode.observeTrustedClear()) {
+                                    fallHardwareEpisodeObserved = false
+                                }
+                            } else {
+                                fallRiskEpisode.observeUnknown()
+                            }
                         }
                         if (it.fallPending && !wasPending) {
                             maybeSpeakFallEpisode("疑似跌倒，按键可取消。")
@@ -749,18 +759,18 @@ class SmartCaneAppController private constructor(
 
     private fun maybeSpeakHardwareRisk(state: DeviceStateDto) {
         if (!state.online || isNonHardwareSource(state.source)) {
-            hardwareRiskEpisode.clear()
+            hardwareRiskEpisode.observeUnknown()
             return
         }
 
         val level = state.riskLevel.lowercase(Locale.US)
         if (level !in setOf("low", "medium", "high")) {
-            hardwareRiskEpisode.clear()
+            hardwareRiskEpisode.observeUnknown()
             return
         }
         val riskType = state.riskType.lowercase(Locale.US)
         if (riskType == "none" || riskType == "history_risk") {
-            hardwareRiskEpisode.clear()
+            hardwareRiskEpisode.observeTrustedClear()
             return
         }
         if (riskType == "fall_detected") {
@@ -773,8 +783,12 @@ class SmartCaneAppController private constructor(
                 "medium" -> 35
                 else -> 55
             }
-            if (state.leftCm == null || state.leftCm > limit) {
-                hardwareRiskEpisode.clear()
+            if (state.leftCm == null) {
+                hardwareRiskEpisode.observeUnknown()
+                return
+            }
+            if (state.leftCm > limit) {
+                hardwareRiskEpisode.observeTrustedClear()
                 return
             }
         }
@@ -784,8 +798,12 @@ class SmartCaneAppController private constructor(
                 "medium" -> 35
                 else -> 55
             }
-            if (state.rightCm == null || state.rightCm > limit) {
-                hardwareRiskEpisode.clear()
+            if (state.rightCm == null) {
+                hardwareRiskEpisode.observeUnknown()
+                return
+            }
+            if (state.rightCm > limit) {
+                hardwareRiskEpisode.observeTrustedClear()
                 return
             }
         }
@@ -795,12 +813,17 @@ class SmartCaneAppController private constructor(
                 "medium" -> 40
                 else -> 80
             }
-            if (state.frontCm == null || state.frontCm > limit) {
-                hardwareRiskEpisode.clear()
+            if (state.frontCm == null) {
+                hardwareRiskEpisode.observeUnknown()
+                return
+            }
+            if (state.frontCm > limit) {
+                hardwareRiskEpisode.observeTrustedClear()
                 return
             }
         }
 
+        hardwareRiskEpisode.observeActive()
         val now = System.currentTimeMillis()
         if (now < suppressHardwareRiskUntilAfterFall) return
         if (_uiState.value.voiceState != VoiceState.Idle) return
@@ -1656,17 +1679,34 @@ internal fun alertSpeechForRole(
     return if (riskType == "fall_detected") "检测到跌倒" else voicePrompt.ifBlank { message }
 }
 
-internal class RiskEpisodeTracker {
+internal class RiskEpisodeTracker(
+    private val trustedClearThreshold: Int = 3
+) {
     private var activeKey: String? = null
+    private var trustedClearCount = 0
 
     fun enter(key: String): Boolean {
+        observeActive()
         if (activeKey == key) return false
         activeKey = key
         return true
     }
 
-    fun clear() {
+    fun observeActive() {
+        trustedClearCount = 0
+    }
+
+    fun observeTrustedClear(): Boolean {
+        if (activeKey == null) return false
+        trustedClearCount++
+        if (trustedClearCount < trustedClearThreshold) return false
         activeKey = null
+        trustedClearCount = 0
+        return true
+    }
+
+    fun observeUnknown() {
+        trustedClearCount = 0
     }
 }
 

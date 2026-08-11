@@ -15,12 +15,59 @@ class RiskEpisodeTrackerTest {
     }
 
     @Test
-    fun clearedRiskCanEnterAgain() {
+    fun threeTrustedClearsAllowRiskToEnterAgain() {
         val tracker = RiskEpisodeTracker()
 
         assertTrue(tracker.enter("ground_step_down"))
-        tracker.clear()
+        assertFalse(tracker.observeTrustedClear())
+        assertFalse(tracker.observeTrustedClear())
+        assertTrue(tracker.observeTrustedClear())
         assertTrue(tracker.enter("ground_step_down"))
+    }
+
+    @Test
+    fun oneOrTwoTrustedClearsDoNotEndEpisode() {
+        val tracker = RiskEpisodeTracker()
+
+        assertTrue(tracker.enter("ground_step_down"))
+        assertFalse(tracker.observeTrustedClear())
+        assertFalse(tracker.enter("ground_step_down"))
+        assertFalse(tracker.observeTrustedClear())
+        assertFalse(tracker.observeTrustedClear())
+        assertFalse(tracker.enter("ground_step_down"))
+    }
+
+    @Test
+    fun unknownInterruptsConsecutiveTrustedClears() {
+        val tracker = RiskEpisodeTracker()
+
+        assertTrue(tracker.enter("ground_step_down"))
+        assertFalse(tracker.observeTrustedClear())
+        assertFalse(tracker.observeTrustedClear())
+        tracker.observeUnknown()
+        assertFalse(tracker.observeTrustedClear())
+        assertFalse(tracker.enter("ground_step_down"))
+    }
+
+    @Test
+    fun activeRiskInterruptsConsecutiveTrustedClearsEvenBeforeSpeechDecision() {
+        val tracker = RiskEpisodeTracker()
+
+        assertTrue(tracker.enter("ground_step_down"))
+        assertFalse(tracker.observeTrustedClear())
+        assertFalse(tracker.observeTrustedClear())
+        tracker.observeActive()
+        assertFalse(tracker.observeTrustedClear())
+        assertFalse(tracker.enter("ground_step_down"))
+    }
+
+    @Test
+    fun transientUnknownDoesNotEndEpisode() {
+        val tracker = RiskEpisodeTracker()
+
+        assertTrue(tracker.enter("ground_step_down"))
+        tracker.observeUnknown()
+        assertFalse(tracker.enter("ground_step_down"))
     }
 
     @Test
@@ -31,5 +78,18 @@ class RiskEpisodeTrackerTest {
         assertTrue(tracker.enter("ground_step_down"))
         assertFalse(tracker.enter("ground_step_down"))
         assertTrue(tracker.enter("front_obstacle"))
+    }
+
+    @Test
+    fun fallNeedsThreeTrustedClearsBeforeNewEpisode() {
+        val tracker = RiskEpisodeTracker()
+
+        assertTrue(tracker.enter("fall_detected"))
+        assertFalse(tracker.observeTrustedClear())
+        assertFalse(tracker.enter("fall_detected"))
+        assertFalse(tracker.observeTrustedClear())
+        assertFalse(tracker.observeTrustedClear())
+        assertTrue(tracker.observeTrustedClear())
+        assertTrue(tracker.enter("fall_detected"))
     }
 }
