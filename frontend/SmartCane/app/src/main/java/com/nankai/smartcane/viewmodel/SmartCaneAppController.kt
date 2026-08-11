@@ -1473,7 +1473,7 @@ class SmartCaneAppController private constructor(
     private fun startLocalSosAlarm(durationMs: Long = 30_000L) {
         sosAlarmJob?.cancel()
         sosAlarmJob = scope.launch {
-            val alarmText = "\u5df2\u7ecf\u53d1\u51fa\u7d27\u6025\u4fe1\u606f\uff0c\u8bf7\u505c\u7559\u5728\u5b89\u5168\u5730\u5e26\u3002"
+            val alarmText = "已发起紧急求助，请在安全地带等候"
             val endAt = System.currentTimeMillis() + durationMs
             while (System.currentTimeMillis() < endAt) {
                 speakText(alarmText)
@@ -1485,8 +1485,8 @@ class SmartCaneAppController private constructor(
     fun sendBlindSos() {
         if (_uiState.value.sosState == SosActionState.Sending) return
         scope.launch {
+            sosAlarmJob?.cancel()
             _uiState.update { it.copy(sosState = SosActionState.Sending, message = "正在发送 SOS，并持续呼救 30 秒") }
-            startLocalSosAlarm()
             startPhoneLocationUpdates()
             val location = latestPhoneLocation()
             val deviceId = currentCaneDeviceId()
@@ -1519,8 +1519,12 @@ class SmartCaneAppController private constructor(
             when (result) {
                 is ApiResult.Success -> {
                     _uiState.update { it.copy(sosState = SosActionState.Success, message = "SOS 已发送") }
+                    startLocalSosAlarm()
                 }
-                is ApiResult.Failure -> _uiState.update { it.copy(sosState = SosActionState.Error, message = "发送失败") }
+                is ApiResult.Failure -> {
+                    sosAlarmJob?.cancel()
+                    _uiState.update { it.copy(sosState = SosActionState.Error, message = "发送失败") }
+                }
             }
         }
     }
