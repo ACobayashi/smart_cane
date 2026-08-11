@@ -1358,6 +1358,7 @@ MAPPABLE_RISK_TYPES = {
     "down_obstacle",
     "down_no_target",
     "down_sensor_unavailable",
+    "fall_detected",
     "sos",
     "user_mark",
     "history_risk",
@@ -1485,6 +1486,8 @@ def upsert_risk_point_for_event(event: dict[str, Any]) -> None:
     level = str(event.get("risk_level") or "low")
     if risk_type not in MAPPABLE_RISK_TYPES or level not in LEVEL_RANK:
         return
+    if risk_type == "fall_detected":
+        level = "high"
     if is_test_event_like(event):
         return
     lat = event.get("lat")

@@ -233,6 +233,79 @@ def test_fall_event_id_is_persistently_deduplicated(tmp_path, monkeypatch):
         ).fetchone()["c"] == 1
 
 
+def test_fall_detected_becomes_high_shared_risk_point_and_warns_other_device(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "fall_shared_risk.db")
+    main.init_db()
+    event = main.EventCreate(
+        device_id="cane_device_a",
+        lat=31.0,
+        lng=121.0,
+        risk_type="fall_detected",
+        risk_level="low",
+        fall_event_id="fall-shared-risk-1",
+    )
+
+    first = main.store_event(event)
+    second = main.store_event(event)
+
+    assert first["id"] == second["id"]
+    with main.db() as conn:
+        event_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM risk_events WHERE fall_event_id = ?",
+            ("fall-shared-risk-1",),
+        ).fetchone()["c"]
+        points = conn.execute(
+            "SELECT * FROM risk_points WHERE risk_type = ?",
+            ("fall_detected",),
+        ).fetchall()
+
+    assert event_count == 1
+    assert len(points) == 1
+    point = points[0]
+    assert point["risk_type"] == "fall_detected"
+    assert point["risk_level"] == "high"
+    assert point["report_count"] == 1
+    assert point["latest_event_id"] == first["id"]
+    assert main.parse_devices_json(point["source_devices_json"]) == ["cane_device_a"]
+    ttl_seconds = (main.parse_time(point["expires_at"]) - main.parse_time(point["last_reported_at"])).total_seconds()
+    assert 1799 <= ttl_seconds <= 1801
+
+    warning = main.nearby_risk_warning(
+        lat=31.0,
+        lng=121.00002,
+        radius=50,
+        min_level="medium",
+        exclude_device_id="cane_device_b",
+        bearing_deg=None,
+    )
+    assert warning["found"] is True
+    assert warning["warning"]["riskType"] == "fall_detected"
+    assert warning["warning"]["riskLevel"] == "high"
+
+
+def test_fall_detected_with_filtered_mock_coordinates_saves_event_without_risk_point(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "fall_filtered_location.db")
+    main.init_db()
+
+    stored = main.store_event(main.EventCreate(
+        device_id="cane_device_a",
+        lat=main.LEGACY_SIM_POINT_LAT,
+        lng=main.LEGACY_SIM_POINT_LNG,
+        risk_type="fall_detected",
+        risk_level="low",
+        fall_event_id="fall-filtered-location-1",
+    ))
+
+    with main.db() as conn:
+        event_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM risk_events WHERE id = ?",
+            (stored["id"],),
+        ).fetchone()["c"]
+        point_count = conn.execute("SELECT COUNT(*) AS c FROM risk_points").fetchone()["c"]
+    assert event_count == 1
+    assert point_count == 0
+
+
 def test_fall_suppresses_other_sensor_alerts_for_30_seconds(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "fall_suppression.db")
     main.init_db()
