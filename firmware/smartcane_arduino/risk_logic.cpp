@@ -142,7 +142,8 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
   }
 
   float heightDeltaCm = compensatedCm - baselineDownCm;
-  bool alarmDistance = cm > SMARTCANE_DOWN_LONG_DISTANCE_ALARM_CM;
+  bool alarmDistance = imu.available && poseUsable && poseComparable &&
+      cm > SMARTCANE_DOWN_LONG_DISTANCE_ALARM_CM;
   bool alarmDelta = poseUsable && poseComparable &&
       heightDeltaCm >= SMARTCANE_DOWN_DROP_DELTA_CM;
 
