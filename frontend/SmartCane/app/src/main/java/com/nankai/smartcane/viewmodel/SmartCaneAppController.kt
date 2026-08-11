@@ -102,10 +102,10 @@ class SmartCaneAppController private constructor(
     private val speechCooldowns = mutableMapOf<String, Long>()
     private var lastAlertId: Int = 0
     private var alertBaselineReady = false
-    private var lastHardwareRiskSignature: String? = null
-    private var lastHardwareRiskSpokenAt: Long = 0L
     private var suppressHardwareRiskUntilAfterFall: Long = 0L
-    private val hardwareRiskSpeechTimes: MutableMap<String, Long> = mutableMapOf()
+    private val hardwareRiskEpisode = RiskEpisodeTracker()
+    private val fallRiskEpisode = RiskEpisodeTracker()
+    private var fallHardwareEpisodeObserved = false
     private var lastNearbyRiskText: String? = null
     private var lastNearbyRiskTextSpokenAt: Long = 0L
     private val announcedNearbyRiskIds = mutableSetOf<Int>()
@@ -518,6 +518,10 @@ class SmartCaneAppController private constructor(
 
     private fun maybeSpeakNearbyRiskWarning(warning: NearbyRiskWarningDto) {
         val currentDeviceId = currentCaneDeviceId().trim()
+        val isOwnFallRisk = currentDeviceId.isNotEmpty() &&
+            warning.riskType == "fall_detected" &&
+            warning.sourceDevices.any { sourceDevice -> sourceDevice.trim() == currentDeviceId }
+        if (isOwnFallRisk) return
         val isSelfSosReplay = selfSosReplayDemoEnabled &&
             currentDeviceId.isNotEmpty() &&
             warning.riskType == "sos" &&
@@ -666,13 +670,23 @@ class SmartCaneAppController private constructor(
                                 speakText(newest.voicePrompt.ifBlank { newest.message }, listenAfter = true)
                             } else {
                                 _uiState.update { it.copy(urgentAlert = newest, message = newest.title) }
-                                alertSpeechForRole(
-                                    role = role,
-                                    riskType = newest.riskType,
-                                    voicePrompt = newest.voicePrompt,
-                                    message = newest.message,
-                                    sosAlarmActive = sosAlarmJob?.isActive == true
-                                )?.let(::speakText)
+                                if (newest.riskType == "fall_detected" && role == "blind") {
+                                    maybeSpeakFallEpisode("检测到跌倒")
+                                } else {
+                                    alertSpeechForRole(
+                                        role = role,
+                                        riskType = newest.riskType,
+                                        voicePrompt = newest.voicePrompt,
+                                        message = newest.message,
+                                        sosAlarmActive = sosAlarmJob?.isActive == true
+                                    )?.let { alertText ->
+                                        if (newest.riskType == "sos") {
+                                            speakText(alertText, TtsPriority.EMERGENCY, bypassTextCooldown = true)
+                                        } else {
+                                            speakText(alertText)
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -709,8 +723,15 @@ class SmartCaneAppController private constructor(
                     is ApiResult.Success -> result.data.state?.let {
                         val wasPending = _uiState.value.fallPending
                         _uiState.update { state -> state.copy(fallPending = it.fallPending, fallStage = it.fallStage) }
+                        val hardwareFallActive = it.fallPending || it.riskType.equals("fall_detected", ignoreCase = true)
+                        if (hardwareFallActive) {
+                            fallHardwareEpisodeObserved = true
+                        } else if (fallHardwareEpisodeObserved) {
+                            fallRiskEpisode.clear()
+                            fallHardwareEpisodeObserved = false
+                        }
                         if (it.fallPending && !wasPending) {
-                            speakText("疑似跌倒，按键可取消。", priority = TtsPriority.EMERGENCY)
+                            maybeSpeakFallEpisode("疑似跌倒，按键可取消。")
                         }
                         maybeSpeakHardwareRisk(it)
                     }
@@ -727,64 +748,74 @@ class SmartCaneAppController private constructor(
     }
 
     private fun maybeSpeakHardwareRisk(state: DeviceStateDto) {
-        if (!state.online) return
-        if (isNonHardwareSource(state.source)) return
+        if (!state.online || isNonHardwareSource(state.source)) {
+            hardwareRiskEpisode.clear()
+            return
+        }
 
         val level = state.riskLevel.lowercase(Locale.US)
-        if (level !in setOf("low", "medium", "high")) return
+        if (level !in setOf("low", "medium", "high")) {
+            hardwareRiskEpisode.clear()
+            return
+        }
         val riskType = state.riskType.lowercase(Locale.US)
-        if (riskType == "none" || riskType == "history_risk") return
-        val isFall = riskType == "fall_detected"
-        if (!isFall) {
-            if (riskType.contains("left")) {
-                val limit = when (level) {
-                    "high" -> Int.MAX_VALUE
-                    "medium" -> 35
-                    else -> 55
-                }
-                if (state.leftCm == null || state.leftCm > limit) return
+        if (riskType == "none" || riskType == "history_risk") {
+            hardwareRiskEpisode.clear()
+            return
+        }
+        if (riskType == "fall_detected") {
+            maybeSpeakFallEpisode("检测到跌倒")
+            return
+        }
+        if (riskType.contains("left")) {
+            val limit = when (level) {
+                "high" -> Int.MAX_VALUE
+                "medium" -> 35
+                else -> 55
             }
-            if (riskType.contains("right")) {
-                val limit = when (level) {
-                    "high" -> Int.MAX_VALUE
-                    "medium" -> 35
-                    else -> 55
-                }
-                if (state.rightCm == null || state.rightCm > limit) return
+            if (state.leftCm == null || state.leftCm > limit) {
+                hardwareRiskEpisode.clear()
+                return
             }
-            if (riskType.contains("front")) {
-                val limit = when (level) {
-                    "high" -> Int.MAX_VALUE
-                    "medium" -> 40
-                    else -> 80
-                }
-                if (state.frontCm == null || state.frontCm > limit) return
+        }
+        if (riskType.contains("right")) {
+            val limit = when (level) {
+                "high" -> Int.MAX_VALUE
+                "medium" -> 35
+                else -> 55
+            }
+            if (state.rightCm == null || state.rightCm > limit) {
+                hardwareRiskEpisode.clear()
+                return
+            }
+        }
+        if (riskType.contains("front")) {
+            val limit = when (level) {
+                "high" -> Int.MAX_VALUE
+                "medium" -> 40
+                else -> 80
+            }
+            if (state.frontCm == null || state.frontCm > limit) {
+                hardwareRiskEpisode.clear()
+                return
             }
         }
 
         val now = System.currentTimeMillis()
-        if (!isFall) {
-            if (now < suppressHardwareRiskUntilAfterFall) return
-            if (_uiState.value.voiceState != VoiceState.Idle) return
-        }
+        if (now < suppressHardwareRiskUntilAfterFall) return
+        if (_uiState.value.voiceState != VoiceState.Idle) return
 
         val prompt = hardwareRiskPrompt(state) ?: state.voicePrompt.takeIf { it.isNotBlank() } ?: return
-        val speechKey = hardwareRiskSpeechKey(riskType)
-        val cooldownMs = if (level == "low") 15_000L else 10_000L
-        val lastKeySpokenAt = hardwareRiskSpeechTimes[speechKey] ?: 0L
-        if (now - lastKeySpokenAt < cooldownMs) return
-
-        val signature = listOf(state.source, riskType, level).joinToString("|")
-        if (signature == lastHardwareRiskSignature && now - lastHardwareRiskSpokenAt < cooldownMs) return
-        lastHardwareRiskSignature = signature
-        lastHardwareRiskSpokenAt = now
-        hardwareRiskSpeechTimes[speechKey] = now
-        if (isFall) {
-            suppressHardwareRiskUntilAfterFall = now + 30_000L
-        }
+        if (!hardwareRiskEpisode.enter(riskType)) return
 
         _uiState.update { it.copy(message = "硬件实时风险：${riskLevelLabel(level)}", voiceTranscript = prompt) }
-        speakText(prompt, priority = if (isFall) TtsPriority.EMERGENCY else inferTtsPriority(prompt))
+        speakText(prompt, priority = inferTtsPriority(prompt))
+    }
+
+    private fun maybeSpeakFallEpisode(text: String) {
+        if (!fallRiskEpisode.enter("fall_detected")) return
+        suppressHardwareRiskUntilAfterFall = System.currentTimeMillis() + 30_000L
+        speakText(text, TtsPriority.EMERGENCY, bypassTextCooldown = true)
     }
 
     private fun isNonHardwareSource(source: String): Boolean {
@@ -809,15 +840,6 @@ class SmartCaneAppController private constructor(
             riskType.contains("obstacle") -> nearestHardwareObstaclePrompt(state)
             else -> state.voicePrompt.takeIf { it.isNotBlank() }
         }
-    }
-
-    private fun hardwareRiskSpeechKey(riskType: String): String = when {
-        riskType == "fall_detected" -> "fall"
-        riskType.contains("front") -> "front"
-        riskType.contains("left") -> "left"
-        riskType.contains("right") -> "right"
-        riskType.contains("ground") || riskType.contains("down") || riskType.contains("drop") -> "down"
-        else -> riskType
     }
 
     private fun nearestHardwareObstaclePrompt(state: DeviceStateDto): String? {
@@ -1032,8 +1054,8 @@ class SmartCaneAppController private constructor(
         }
     }
 
-    private fun speakText(text: String, priority: TtsPriority) {
-        speakText(text, listenAfter = false, priority = priority)
+    private fun speakText(text: String, priority: TtsPriority, bypassTextCooldown: Boolean = false) {
+        speakText(text, listenAfter = false, priority = priority, bypassTextCooldown = bypassTextCooldown)
     }
 
     private fun inferTtsPriority(text: String): TtsPriority = when {
@@ -1051,14 +1073,15 @@ class SmartCaneAppController private constructor(
         text: String,
         listenAfter: Boolean,
         priority: TtsPriority = inferTtsPriority(text),
-        fromQueue: Boolean = false
+        fromQueue: Boolean = false,
+        bypassTextCooldown: Boolean = false
     ) {
         val cleanText = text.trim()
         if (cleanText.isBlank()) return
         val now = System.currentTimeMillis()
         val key = speechKey(cleanText)
-        if (!fromQueue && now - (speechCooldowns[key] ?: 0L) < 12_000L) return
-        if (!fromQueue && pendingSpeech.any { speechKey(it.text) == key }) return
+        if (!fromQueue && !bypassTextCooldown && now - (speechCooldowns[key] ?: 0L) < 12_000L) return
+        if (!fromQueue && !bypassTextCooldown && pendingSpeech.any { speechKey(it.text) == key }) return
         val currentPriority = activeTtsPriority
         if (activeTtsUtteranceId != null && currentPriority != null) {
             if (priority.rank <= currentPriority.rank) {
@@ -1470,15 +1493,14 @@ class SmartCaneAppController private constructor(
         _uiState.update { it.copy(voiceState = VoiceState.Idle, message = message, voiceTranscript = it.voiceTranscript ?: message) }
     }
 
-    private fun startLocalSosAlarm(durationMs: Long = 30_000L) {
+    private fun startLocalSosAlarm() {
         sosAlarmJob?.cancel()
         sosAlarmJob = scope.launch {
-            val alarmText = "已发起紧急求助，请在安全地带等候"
-            val endAt = System.currentTimeMillis() + durationMs
-            while (System.currentTimeMillis() < endAt) {
-                speakText(alarmText)
-                delay(6_500L)
-            }
+            speakText(
+                "已发起紧急求助，请在安全地带等候",
+                TtsPriority.EMERGENCY,
+                bypassTextCooldown = true
+            )
         }
     }
 
@@ -1632,6 +1654,20 @@ internal fun alertSpeechForRole(
     }
     if (role != "blind" || sosAlarmActive) return null
     return if (riskType == "fall_detected") "检测到跌倒" else voicePrompt.ifBlank { message }
+}
+
+internal class RiskEpisodeTracker {
+    private var activeKey: String? = null
+
+    fun enter(key: String): Boolean {
+        if (activeKey == key) return false
+        activeKey = key
+        return true
+    }
+
+    fun clear() {
+        activeKey = null
+    }
 }
 
 enum class TtsPriority(val rank: Int) {
