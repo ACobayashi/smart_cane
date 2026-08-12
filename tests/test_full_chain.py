@@ -84,10 +84,10 @@ def test_side_alert_boundary_is_exactly_35cm():
     assert main.analyze_sensor_frame(frame(55, right_cm=35), history)["risk_type"] == "right_obstacle"
 
 
-def test_front_warns_at_105cm_and_firmware_ground_direction_is_preserved():
+def test_front_warns_at_120cm_and_firmware_ground_direction_is_preserved():
     history = {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": "low"}
-    assert main.analyze_sensor_frame(frame(55, front_cm=106), history)["risk_type"] == "none"
-    assert main.analyze_sensor_frame(frame(55, front_cm=105), history)["risk_type"] == "front_obstacle"
+    assert main.analyze_sensor_frame(frame(55, front_cm=121), history)["risk_type"] == "none"
+    assert main.analyze_sensor_frame(frame(55, front_cm=120), history)["risk_type"] == "front_obstacle"
     up = main.analyze_sensor_frame(frame(
         42, risk_type="ground_step", direction="up", compensated_down_cm=42,
         ground_baseline_cm=55, height_delta_cm=-13, ground_state="GROUND_STEP_UP"
@@ -507,18 +507,37 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     config = (ROOT / "firmware" / "smartcane_arduino" / "config.h").read_text(encoding="utf-8")
     sketch = (ROOT / "firmware" / "smartcane_arduino" / "smartcane_arduino.ino").read_text(encoding="utf-8")
     assert "SMARTCANE_STEP_UP_ENTER_CM 9" in config
-    assert "SMARTCANE_STEP_DOWN_ENTER_CM 11" in config
-    assert "SMARTCANE_DEEP_DROP_CM 30" in config
+    assert "SMARTCANE_FRONT_WARN_CM 120" in config
+    assert "SMARTCANE_STEP_DOWN_ENTER_CM 50" in config
+    assert "SMARTCANE_DEEP_DROP_CM 70" in config
+    assert "SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS 250" in config
+    assert "SMARTCANE_DOWN_STARTUP_RELEARN_MS 1500" in config
     assert "SMARTCANE_SIDE_ALERT_CM 35" in config
     assert "SMARTCANE_DOWN_NO_TARGET_CM 400" in config
     assert "lastHeightDeltaCm >= SMARTCANE_STEP_DOWN_ENTER_CM" in firmware
     assert "lastHeightDeltaCm <= -SMARTCANE_STEP_UP_ENTER_CM" in firmware
     assert "cm > SMARTCANE_DOWN_LONG_DISTANCE_ALARM_CM" not in firmware
     assert "rawCm >= SMARTCANE_DOWN_NO_TARGET_CM" in firmware
-    assert "FALL_STAGE_CANDIDATE" in (ROOT / "firmware" / "smartcane_arduino" / "imu_fall.cpp").read_text(encoding="utf-8")
-    assert "SMARTCANE_FALL_CONFIRM_MS 1900" in config
+    imu = (ROOT / "firmware" / "smartcane_arduino" / "imu_fall.cpp").read_text(encoding="utf-8")
+    assert "FALL_STAGE_CANDIDATE" in imu
+    assert "REG_ACC_X_LSB = 0x0C" in imu
+    assert "REG_GYR_X_LSB = 0x12" in imu
+    assert "SMARTCANE_FALL_CONFIRM_MS 2000" in config
+    assert "SMARTCANE_FALL_ALERT_BUZZ_MS 2000" in config
+    assert "SMARTCANE_FALL_ALERT_VIB_MS 2000" in config
+    assert "beginFallCandidate" in imu
+    assert "candidate_expired_without_lying" in imu
     assert "fall_confirmed" in sketch and "fall_detected" in sketch
     assert "fallLockActive" in sketch
+    assert "beep(SMARTCANE_FALL_ALERT_BUZZ_MS);" in sketch
+    assert "vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, SMARTCANE_FALL_ALERT_VIB_MS);" in sketch
+    assert "applyFeedbackForRisk(risk, true, true);" in sketch
+    assert sketch.index("applyFeedbackForRisk(risk, true, true);") > sketch.index("static void publishRiskEventIfNeeded")
+    loop = sketch[sketch.index("void loop()") :]
+    assert "if (updateRiskFeedbackGate(currentRisk, persistent))" not in loop
+    assert "buzzerStop();" in sketch
+    vibration = (ROOT / "firmware" / "smartcane_arduino" / "vibration.cpp").read_text(encoding="utf-8")
+    assert "vibrateIndex(0, level, durationMs);" in vibration
 
 
 def test_medium_and_high_obstacles_can_become_shared_risk_points():

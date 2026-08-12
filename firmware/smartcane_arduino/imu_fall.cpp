@@ -10,8 +10,10 @@
 // BMI270 minimal register path for acceleration + gyro fall detection.
 static const uint8_t REG_CHIP_ID = 0x00;
 static const uint8_t REG_STATUS = 0x03;
-static const uint8_t REG_GYR_X_LSB = 0x0C;
-static const uint8_t REG_ACC_X_LSB = 0x12;
+// BMI270 normal-data register layout (not the OIS register map):
+// 0x0C..0x11 = ACC_X/Y/Z, 0x12..0x17 = GYR_X/Y/Z.
+static const uint8_t REG_ACC_X_LSB = 0x0C;
+static const uint8_t REG_GYR_X_LSB = 0x12;
 static const uint8_t REG_INTERNAL_STATUS = 0x21;
 static const uint8_t REG_ACC_CONF = 0x40;
 static const uint8_t REG_ACC_RANGE = 0x41;
@@ -51,6 +53,7 @@ static float baselineAzG = 1.0f;
 static float baselinePostureDeg = 0.0f;
 static bool normalUseReady = false;
 static unsigned long normalUseSinceMs = 0;
+static unsigned long lastNormalUseQualifiedMs = 0;
 static float previousAngleFromBaseline = 0.0f;
 static float previousTotalG = 1.0f;
 static unsigned long previousMotionMs = 0;
@@ -59,11 +62,52 @@ static bool readAccel();
 static void printDebugRegisters();
 static void printStreamSample();
 
+static void resetNormalUseQualification() {
+  normalUseReady = false;
+  normalUseSinceMs = 0;
+  lastNormalUseQualifiedMs = 0;
+}
+
 static void resetFallCandidate() {
   fallStage = FALL_STAGE_NORMAL;
   candidateStartedMs = 0;
   stillLyingSinceMs = 0;
   state.fallLock = false;
+  state.triggerTotalG = 0.0f;
+  state.triggerGyroDps = 0.0f;
+  state.triggerAngleDeg = 0.0f;
+  state.triggerTiltRateDps = 0.0f;
+  state.triggerJerkGPerSec = 0.0f;
+  state.triggerAtMs = 0;
+}
+
+static void beginFallCandidate(unsigned long now, float angleFromBaseline, float jerkGPerSec,
+                               bool accelTrigger, const char *reason) {
+  fallStage = FALL_STAGE_CANDIDATE;
+  candidateStartedMs = now;
+  stillLyingSinceMs = 0;
+  // Lock as soon as the abnormal motion sequence begins. A formal event is
+  // intentionally delayed until the relative lying posture is still for 2 s.
+  state.fallLock = true;
+  state.triggerTotalG = state.totalG;
+  state.triggerGyroDps = state.gyroDps;
+  state.triggerAngleDeg = angleFromBaseline;
+  state.triggerTiltRateDps = state.tiltRateDps;
+  state.triggerJerkGPerSec = jerkGPerSec;
+  state.triggerAtMs = now;
+  state.stage = "fall_candidate";
+  state.reason = reason;
+  state.confidence = accelTrigger ? 0.68f : 0.60f;
+  Serial.print(F("[FALL] lock candidate reason="));
+  Serial.print(reason);
+  Serial.print(F(" g="));
+  Serial.print(state.triggerTotalG, 2);
+  Serial.print(F(" gyro="));
+  Serial.print(state.triggerGyroDps, 1);
+  Serial.print(F(" angle="));
+  Serial.print(state.triggerAngleDeg, 1);
+  Serial.print(F(" tilt_rate="));
+  Serial.println(state.triggerTiltRateDps, 1);
 }
 
 static void rememberAccel() {
@@ -280,18 +324,21 @@ static bool detectAndConfigureBmi270() {
 
 static bool readAccel() {
   uint8_t bytes[12] = {0};
-  if (!readReg(REG_GYR_X_LSB, bytes, sizeof(bytes))) {
+  // Read the contiguous normal-data block from ACC_X.  Starting at 0x0C
+  // preserves each axis LSB/MSB shadow pair and must not be confused with
+  // the separate OIS output map at the same address range.
+  if (!readReg(REG_ACC_X_LSB, bytes, sizeof(bytes))) {
     state.available = false;
     state.reason = "read_failed";
     return false;
   }
 
-  state.gxRaw = (int16_t)((uint16_t)bytes[1] << 8 | bytes[0]);
-  state.gyRaw = (int16_t)((uint16_t)bytes[3] << 8 | bytes[2]);
-  state.gzRaw = (int16_t)((uint16_t)bytes[5] << 8 | bytes[4]);
-  state.axRaw = (int16_t)((uint16_t)bytes[7] << 8 | bytes[6]);
-  state.ayRaw = (int16_t)((uint16_t)bytes[9] << 8 | bytes[8]);
-  state.azRaw = (int16_t)((uint16_t)bytes[11] << 8 | bytes[10]);
+  state.axRaw = (int16_t)((uint16_t)bytes[1] << 8 | bytes[0]);
+  state.ayRaw = (int16_t)((uint16_t)bytes[3] << 8 | bytes[2]);
+  state.azRaw = (int16_t)((uint16_t)bytes[5] << 8 | bytes[4]);
+  state.gxRaw = (int16_t)((uint16_t)bytes[7] << 8 | bytes[6]);
+  state.gyRaw = (int16_t)((uint16_t)bytes[9] << 8 | bytes[8]);
+  state.gzRaw = (int16_t)((uint16_t)bytes[11] << 8 | bytes[10]);
 
   if (state.axRaw == 0 && state.ayRaw == 0 && state.azRaw == 0) {
     state.axG = 0.0f;
@@ -395,10 +442,16 @@ static bool readAccel() {
                          baselineStill && angleFromBaseline <= SMARTCANE_FALL_CANCEL_UPRIGHT_DEG;
   if (normalUseSample) {
     if (normalUseSinceMs == 0) normalUseSinceMs = now;
-    if (now - normalUseSinceMs >= SMARTCANE_FALL_NORMAL_USE_READY_MS) normalUseReady = true;
+    if (now - normalUseSinceMs >= SMARTCANE_FALL_NORMAL_USE_READY_MS) {
+      normalUseReady = true;
+      lastNormalUseQualifiedMs = now;
+    }
   } else if (fallStage == FALL_STAGE_NORMAL) {
     normalUseSinceMs = 0;
-    normalUseReady = false;
+    if (lastNormalUseQualifiedMs == 0 ||
+        now - lastNormalUseQualifiedMs > SMARTCANE_FALL_NORMAL_USE_LAUNCH_WINDOW_MS) {
+      resetNormalUseQualification();
+    }
   }
 
   bool accelTrigger = state.totalG > SMARTCANE_FALL_ACCEL_HIGH_G ||
@@ -406,11 +459,32 @@ static bool readAccel() {
   bool gyroTrigger = state.gyroDps > SMARTCANE_FALL_GYRO_TRIGGER_DPS;
   bool tiltRateTrigger = state.tiltRateDps > SMARTCANE_FALL_FAST_TILT_RATE_DPS;
   bool jerkTrigger = jerkGPerSec > 2.2f;
-  bool dynamicEvidence = accelTrigger || gyroTrigger || tiltRateTrigger || jerkTrigger;
-  bool fastTilt = angleFromBaseline >= SMARTCANE_FALL_FAST_ANGLE_DEG && dynamicEvidence;
-  bool lyingAngle = angleFromBaseline > SMARTCANE_FALL_LYING_ANGLE_DEG ||
-                    postureDeg > SMARTCANE_FALL_LYING_ANGLE_DEG;
-  bool stillLying = lyingAngle &&
+  // A fast large relative tilt is sufficient to start a fall candidate; an
+  // impact is useful evidence but is deliberately not mandatory. This covers
+  // the common soft-cushion/controlled fall where acceleration is damped.
+  bool rapidTiltStart = angleFromBaseline >= SMARTCANE_FALL_FAST_ANGLE_DEG &&
+      (tiltRateTrigger || gyroTrigger);
+  // Some fast controlled falls settle between two 50 ms samples. The measured
+  // gyro can then already be low, but a recent normal-use posture has changed
+  // directly into a lying vector. This is still a tilt transition, not an
+  // impact requirement; the independent two-second lying check prevents a
+  // normal cane sweep from becoming a formal fall.
+  bool directLyingTransitionStart = angleFromBaseline >= SMARTCANE_FALL_LYING_ANGLE_DEG &&
+      (state.tiltRateDps >= 18.0f || state.gyroDps >= 18.0f);
+  // If the impact and tilt arrive in separate BMI270 samples, retain the
+  // impact-assisted path at a smaller angle. It remains only a fallback.
+  bool impactAssistedTiltStart = (accelTrigger || jerkTrigger) &&
+      angleFromBaseline >= SMARTCANE_FALL_CANDIDATE_ANGLE_DEG;
+  bool abnormalMotionStart = rapidTiltStart || directLyingTransitionStart || impactAssistedTiltStart;
+  // The cane is intentionally held at an angle, and BMI270 axes vary with the
+  // enclosure. Only a change from the learned normal-use vector represents
+  // lying down; absolute pitch/roll must never be used as the lying test.
+  // Entry uses the high angle so an ordinary cane lift cannot start a lying
+  // confirmation.  After that entry, a real landing may rebound or settle by
+  // several degrees; retain the lock down to the separate hold threshold.
+  bool lyingAngle = angleFromBaseline >= SMARTCANE_FALL_LYING_ANGLE_DEG;
+  bool lyingHoldAngle = angleFromBaseline >= SMARTCANE_FALL_LYING_HOLD_ANGLE_DEG;
+  bool stillLying = lyingHoldAngle &&
                     state.gyroDps < SMARTCANE_FALL_STILL_GYRO_DPS &&
                     state.totalG > SMARTCANE_FALL_STILL_ACC_MIN_G &&
                     state.totalG < SMARTCANE_FALL_STILL_ACC_MAX_G;
@@ -430,8 +504,7 @@ static bool readAccel() {
         state.reason = "normal_use_pose_stable_after_fall";
         state.confidence = 0.25f;
         resetFallCandidate();
-        normalUseReady = false;
-        normalUseSinceMs = now;
+        resetNormalUseQualification();
       }
     } else {
       recoverySinceMs = 0;
@@ -447,33 +520,42 @@ static bool readAccel() {
 
   switch (fallStage) {
     case FALL_STAGE_NORMAL:
-      if (normalUseReady && fastTilt) {
-        fallStage = FALL_STAGE_CANDIDATE;
-        candidateStartedMs = now;
-        stillLyingSinceMs = 0;
-        state.stage = "fall_candidate";
-        state.reason = "normal_use_fast_tilt_with_dynamic_evidence";
-        state.confidence = accelTrigger ? 0.68f : 0.60f;
-      } else {
+      {
+        bool normalUseArmed = normalUseReady && lastNormalUseQualifiedMs != 0 &&
+            now - lastNormalUseQualifiedMs <= SMARTCANE_FALL_NORMAL_USE_LAUNCH_WINDOW_MS;
+        if (normalUseArmed && abnormalMotionStart) {
+          beginFallCandidate(now, angleFromBaseline, jerkGPerSec, accelTrigger,
+                             rapidTiltStart ? "normal_use_rapid_tilt_lock_waiting_lying"
+                                            : directLyingTransitionStart ? "normal_use_direct_lying_tilt_lock_waiting_lying"
+                                            : "normal_use_impact_assisted_tilt_lock_waiting_lying");
+          // The trigger sample in the user's real fall already crossed 58°.
+          // Do not wait for one more 50 ms sample to notice it: that sample
+          // can be a settling/rebound frame and used to release the lock back
+          // to ordinary obstacle reporting before the two-second check began.
+          if (lyingAngle) {
+            fallStage = FALL_STAGE_LYING_WAIT;
+            stillLyingSinceMs = 0;
+            state.fallLock = true;
+            state.stage = "fall_lying_wait";
+            state.reason = "rapid_tilt_reached_lying_angle";
+            state.confidence = 0.70f;
+            Serial.println(F("[FALL] lying posture reached; hold still 2000ms to confirm"));
+          }
+        } else {
         state.stage = "normal";
-        state.reason = normalUseReady ? "normal_use" : "learning_normal_use";
+        state.reason = normalUseArmed ? "normal_use" : "learning_normal_use";
         state.confidence = 0.20f;
+        }
       }
       break;
 
     case FALL_STAGE_CANDIDATE:
       if (uprightAgain && now - candidateStartedMs > 250) {
         resetFallCandidate();
+        resetNormalUseQualification();
         state.stage = "normal";
         state.reason = "candidate_cancelled_upright";
         state.confidence = 0.18f;
-      } else if (now - candidateStartedMs > SMARTCANE_FALL_CANDIDATE_WINDOW_MS) {
-        fallStage = FALL_STAGE_LYING_WAIT;
-        stillLyingSinceMs = 0;
-        state.fallLock = true;
-        state.stage = "fall_lying_wait";
-        state.reason = "candidate_window_expired_waiting_lying";
-        state.confidence = 0.58f;
       } else if (lyingAngle) {
         fallStage = FALL_STAGE_LYING_WAIT;
         stillLyingSinceMs = 0;
@@ -481,6 +563,16 @@ static bool readAccel() {
         state.stage = "fall_lying_wait";
         state.reason = "candidate_reached_lying_angle";
         state.confidence = 0.66f;
+        Serial.println(F("[FALL] lying posture reached; hold still 2000ms to confirm"));
+      } else if (now - candidateStartedMs > SMARTCANE_FALL_CANDIDATE_WINDOW_MS) {
+        // A large normal cane swing can reach the fast-tilt threshold, but a
+        // fall must become a relative lying posture promptly. Release this
+        // false candidate instead of leaving ordinary feedback muted forever.
+        resetFallCandidate();
+        resetNormalUseQualification();
+        state.stage = "normal";
+        state.reason = "candidate_expired_without_lying";
+        state.confidence = 0.18f;
       } else {
         state.stage = "fall_candidate";
         state.reason = "motion_candidate_window";
@@ -491,9 +583,20 @@ static bool readAccel() {
     case FALL_STAGE_LYING_WAIT:
       if (uprightAgain) {
         resetFallCandidate();
+        resetNormalUseQualification();
         state.stage = "normal";
         state.reason = "post_fall_cancelled_upright";
         state.confidence = 0.18f;
+      } else if (!lyingHoldAngle) {
+        // A fall that has crossed the 58-degree entry threshold can settle a
+        // little after landing. Keep ordinary distance alerts locked until it
+        // is genuinely upright again, but do not start the two-second timer
+        // until the retained lying angle is present.
+        stillLyingSinceMs = 0;
+        state.fallLock = true;
+        state.stage = "fall_lying_wait";
+        state.reason = "waiting_for_retained_lying_angle";
+        state.confidence = 0.60f;
       } else if (stillLying) {
         if (stillLyingSinceMs == 0) {
           stillLyingSinceMs = now;

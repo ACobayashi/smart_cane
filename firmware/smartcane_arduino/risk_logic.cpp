@@ -42,16 +42,21 @@ static void chooseMoreSevere(RiskState &best, const RiskState &candidate) {
     best = candidate;
     return;
   }
+  // A confirmed stair is more precise than the front ToF's simultaneous view
+  // of its vertical riser. Keep ground_step/up or ground_step/down distinct.
+  if (isGroundRisk(candidate.riskType) && !isGroundRisk(best.riskType)) {
+    best = candidate;
+    return;
+  }
+  if (!isGroundRisk(candidate.riskType) && isGroundRisk(best.riskType)) {
+    return;
+  }
   if (candidate.level > best.level) {
     best = candidate;
     return;
   }
   if (candidate.level < best.level) return;
   if (strcmp(candidate.direction, "stop") == 0 && strcmp(best.direction, "stop") != 0) {
-    best = candidate;
-    return;
-  }
-  if (isGroundRisk(candidate.riskType) && !isGroundRisk(best.riskType)) {
     best = candidate;
     return;
   }
@@ -87,6 +92,8 @@ static int8_t candidateDirection = 0;  // +1 down, -1 up
 static const char *confirmedGroundRiskType = "none";
 static unsigned long candidateStartedMs = 0;
 static unsigned long confirmedAtMs = 0;
+static unsigned long normalUseStableSinceMs = 0;
+static unsigned long startupRelearnUntilMs = 0;
 static float rebaseLastCm = 0.0f;
 static uint8_t rebaseFrames = 0;
 static float lastCompensatedDownCm = -1.0f;
@@ -123,6 +130,8 @@ void resetGroundStepDetector() {
   confirmedGroundRiskType = "none";
   candidateStartedMs = 0;
   confirmedAtMs = 0;
+  normalUseStableSinceMs = 0;
+  startupRelearnUntilMs = 0;
   rebaseLastCm = 0.0f;
   rebaseFrames = 0;
   lastCompensatedDownCm = -1.0f;
@@ -218,6 +227,14 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
   }
   if (!d.downValid) {
     clearCandidate();
+    // The ToF reader intentionally tolerates a few missed samples.  Do not
+    // turn one bus timeout while the cane is moving into a medium, audible
+    // hazard; only report a genuinely unavailable down sensor after the same
+    // configured failure count used by the reader itself.
+    if (d.downFailCount < SMARTCANE_TOF_FAILS_BEFORE_INVALID) {
+      downRiskReason = "down_transient_read_ignored";
+      return "none";
+    }
     downRiskReason = "down_sensor_unavailable";
     return "down_sensor_unavailable";
   }
@@ -245,7 +262,11 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
     if (baselineFrames >= SMARTCANE_DOWN_BASELINE_STABLE_FRAMES) {
       baselineReady = true;
       groundState = GROUND_NORMAL;
-      downRiskReason = "normal_use_baseline_ready";
+      // The initial seven readings can finish before the user has fully
+      // positioned a freshly powered cane.  Treat the next short still
+      // interval as baseline settling instead of a real curb/stair event.
+      startupRelearnUntilMs = now + SMARTCANE_DOWN_STARTUP_RELEARN_MS;
+      downRiskReason = "normal_use_baseline_settling";
     } else {
       downRiskReason = "learning_normal_use_baseline";
     }
@@ -256,6 +277,25 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
   const bool poseNearNormal = imuAtNormalUsePose(imu);
   const bool caneMotion = caneInMotion(imu);
   lastCaneMotion = caneMotion;
+
+  if ((long)(now - startupRelearnUntilMs) < 0) {
+    clearCandidate();
+    groundState = GROUND_NORMAL;
+    normalUseStableSinceMs = 0;
+    // This window only runs immediately after boot.  Replacing the baseline
+    // with each still sample lets the real held angle/range win over the
+    // first value observed while the device was being picked up.
+    if (poseNearNormal && !caneMotion) {
+      baselineDownCm = compensatedCm;
+      normalUsePitchDeg = imu.pitchDeg;
+      normalUseRollDeg = imu.rollDeg;
+      lastHeightDeltaCm = 0.0f;
+      downRiskReason = "startup_normal_use_settling";
+    } else {
+      downRiskReason = "startup_waiting_for_still_normal_use";
+    }
+    return "none";
+  }
   const int8_t direction = lastHeightDeltaCm >= SMARTCANE_STEP_DOWN_ENTER_CM ? 1 :
                            (lastHeightDeltaCm <= -SMARTCANE_STEP_UP_ENTER_CM ? -1 : 0);
 
@@ -293,7 +333,29 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
     return holdRisk;
   }
 
+  // A raised/swept cane changes the down range in exactly the same direction
+  // as a lower floor. Do not carry raw samples from that motion into the later
+  // normal-use confirmation; re-arm only after a short stable hold. The real
+  // stair thresholds and two-of-three confirmation remain unchanged.
+  if (!poseNearNormal || caneMotion) {
+    clearCandidate();
+    groundState = GROUND_NORMAL;
+    normalUseStableSinceMs = 0;
+    downRiskReason = "cane_motion_candidate_cancelled";
+    return "none";
+  }
+  if (normalUseStableSinceMs == 0) {
+    normalUseStableSinceMs = now;
+  }
+
   if (direction != 0) {
+    if (now - normalUseStableSinceMs < SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS) {
+      // Suppress the front ToF's view of the stair riser while the ground
+      // detector takes its short, independent confirmation window.
+      groundState = direction < 0 ? GROUND_CANDIDATE_UP : GROUND_CANDIDATE_DOWN;
+      downRiskReason = "step_candidate_waiting_stable_normal_use";
+      return "none";
+    }
     if (candidateDirection != direction) {
       clearCandidate();
       candidateDirection = direction;
@@ -360,6 +422,8 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
 
   const char *downRiskType = updateDownRiskState(d, imu);
   const int downCmForRisk = downRiskCm(d);
+  const bool groundCandidateActive = groundState == GROUND_CANDIDATE_UP ||
+                                     groundState == GROUND_CANDIDATE_DOWN;
   RiskState risk;
   if (strcmp(downRiskType, "down_sensor_unavailable") == 0) {
     risk.level = RISK_MEDIUM;
@@ -387,7 +451,7 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
     chooseMoreSevere(best, risk);
   }
 
-  if (d.frontValid && d.frontCm <= SMARTCANE_FRONT_DANGER_CM) {
+  if (!groundCandidateActive && d.frontValid && d.frontCm <= SMARTCANE_FRONT_DANGER_CM) {
     risk = RiskState();
     risk.detectedAtMs = best.detectedAtMs;
     risk.level = RISK_HIGH;
@@ -401,7 +465,7 @@ RiskState calculateRisk(const DistanceReadings &d, const NearbyRiskSummary &near
     applyBestSide(risk, d);
     attachGroundTelemetry(risk);
     chooseMoreSevere(best, risk);
-  } else if (d.frontValid && d.frontCm <= SMARTCANE_FRONT_WARN_CM) {
+  } else if (!groundCandidateActive && d.frontValid && d.frontCm <= SMARTCANE_FRONT_WARN_CM) {
     risk = RiskState();
     risk.detectedAtMs = best.detectedAtMs;
     risk.level = RISK_LOW;

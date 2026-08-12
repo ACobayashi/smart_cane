@@ -7,7 +7,7 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-posture-ground-fall-lock-20260812"
+#define SMARTCANE_BUILD_TAG "arduino-step-down-50cm-20260812"
 #define SMARTCANE_DEVICE_ID "cane_001"
 #ifndef SMARTCANE_DEVICE_NAME
 #define SMARTCANE_DEVICE_NAME "智能盲杖01"
@@ -155,7 +155,7 @@
 // The cane is normally held at an angle, so front/down warnings need a little
 // more reach, while side warnings are moderate to stay responsive without
 // marking every sweep as a map risk.
-#define SMARTCANE_FRONT_WARN_CM 105
+#define SMARTCANE_FRONT_WARN_CM 120
 #define SMARTCANE_FRONT_DANGER_CM 40
 #define SMARTCANE_SIDE_SAFE_CM 80
 #define SMARTCANE_SIDE_ALERT_CM 35
@@ -171,15 +171,28 @@
 // is the VL53L1X invalid/no-target sentinel and is never a drop.
 #define SMARTCANE_DOWN_NO_TARGET_CM 400
 #define SMARTCANE_STEP_UP_ENTER_CM 9
-#define SMARTCANE_STEP_DOWN_ENTER_CM 11
-#define SMARTCANE_DEEP_DROP_CM 30
+// Downward range is especially sensitive to a small hand lift because the
+// box and cane are held diagonally.  Require a 50 cm compensated increase
+// before announcing a downstairs edge/drop; the up-stair threshold remains
+// intentionally smaller so a raised step is still announced before contact.
+#define SMARTCANE_STEP_DOWN_ENTER_CM 50
+// Keep a distinct "large drop" class above the new downstairs threshold.
+#define SMARTCANE_DEEP_DROP_CM 70
 #define SMARTCANE_STEP_CLEAR_CM 5
 #define SMARTCANE_DOWN_BASELINE_TOLERANCE_CM 3
 #define SMARTCANE_DOWN_BASELINE_STABLE_FRAMES 7
+// Power-on is a setup period, not a walking edge.  After the first stable
+// baseline we keep learning the held cane position briefly, so putting the
+// cane/box into its use angle cannot be announced as a down stair.
+#define SMARTCANE_DOWN_STARTUP_RELEARN_MS 1500
 #define SMARTCANE_STEP_CONFIRM_SAMPLES 2
 #define SMARTCANE_STEP_HISTORY_SAMPLES 3
 #define SMARTCANE_STEP_REBASE_STABLE_FRAMES 4
 #define SMARTCANE_STEP_REBASE_MIN_HOLD_MS 700
+// A hand sweep must settle in normal use before its down-facing samples may
+// contribute to a step candidate. This removes the stale-candidate path where
+// a brief upward sweep was reported as a drop after the hand stopped.
+#define SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS 250
 #define SMARTCANE_DOWN_NORMAL_POSE_DELTA_DEG 18.0f
 #define SMARTCANE_DOWN_MOTION_POSE_DELTA_DEG 10.0f
 #define SMARTCANE_DOWN_MOTION_GYRO_DPS 35.0f
@@ -220,22 +233,33 @@
 #define SMARTCANE_IMU_RAW_PRINT_REGS 0
 #define SMARTCANE_FALL_ACCEL_HIGH_G 1.22f
 #define SMARTCANE_FALL_ACCEL_LOW_G 0.85f
-#define SMARTCANE_FALL_GYRO_TRIGGER_DPS 70.0f
+#define SMARTCANE_FALL_GYRO_TRIGGER_DPS 35.0f
 #define SMARTCANE_FALL_FAST_ANGLE_DEG 45.0f
-#define SMARTCANE_FALL_FAST_TILT_RATE_DPS 85.0f
+#define SMARTCANE_FALL_CANDIDATE_ANGLE_DEG 30.0f
+#define SMARTCANE_FALL_FAST_TILT_RATE_DPS 45.0f
+// A fast fall must first cross the 58-degree entry angle.  Once it has done
+// so, permit a little post-impact settling while retaining the fall lock;
+// this lower hold angle is not an independent fall trigger.
 #define SMARTCANE_FALL_LYING_ANGLE_DEG 58.0f
+#define SMARTCANE_FALL_LYING_HOLD_ANGLE_DEG 40.0f
 #define SMARTCANE_FALL_STILL_GYRO_DPS 22.0f
 #define SMARTCANE_FALL_STILL_ACC_MIN_G 0.78f
 #define SMARTCANE_FALL_STILL_ACC_MAX_G 1.22f
-#define SMARTCANE_FALL_CONFIRM_MS 1900
-#define SMARTCANE_FALL_CANDIDATE_WINDOW_MS 1100
+#define SMARTCANE_FALL_CONFIRM_MS 2000
+#define SMARTCANE_FALL_CANDIDATE_WINDOW_MS 2500
 #define SMARTCANE_FALL_CANCEL_UPRIGHT_DEG 20.0f
 #define SMARTCANE_FALL_BASELINE_STILL_GYRO_DPS 18.0f
 #define SMARTCANE_FALL_BASELINE_ACC_MIN_G 0.90f
 #define SMARTCANE_FALL_BASELINE_ACC_MAX_G 1.10f
 #define SMARTCANE_FALL_NORMAL_USE_READY_MS 500
+// Once a normal-use posture has been held for READY_MS, keep that qualification
+// for this short launch window.  The first fall sample is necessarily no longer
+// still/upright, so clearing it on that same sample would miss the fall.
+#define SMARTCANE_FALL_NORMAL_USE_LAUNCH_WINDOW_MS 1200
 #define SMARTCANE_FALL_RECOVERY_MS 1200
 #define SMARTCANE_FALL_UPLOAD_COOLDOWN_MS 3000
+#define SMARTCANE_FALL_ALERT_BUZZ_MS 2000
+#define SMARTCANE_FALL_ALERT_VIB_MS 2000
 
 // Only these escalated obstacle states are sent to the companion side.
 #define SMARTCANE_COMPANION_OBSTACLE_HOLD_MS 12000

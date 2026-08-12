@@ -462,7 +462,10 @@ void vibrateCenter(uint8_t level, uint16_t durationMs) {
 
 void vibrateAll(uint8_t level, uint16_t durationMs) {
 #if SMARTCANE_VIB_MOTOR_COUNT <= 1
-  vibrateNoticeOnce();
+  // The one-motor hardware still needs a true two-second fall vibration.
+  // Do not downgrade a caller's requested duration to the normal 150 ms
+  // navigation notification pulse.
+  vibrateIndex(0, level, durationMs);
 #else
   vibrateLeft(level, durationMs);
   vibrateRight(level, durationMs);

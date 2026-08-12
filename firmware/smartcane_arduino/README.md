@@ -88,14 +88,14 @@ Local safety does not depend on Wi-Fi:
 
 - Samples four ToF distances every `100 ms`; VL53L1X uses a 20 ms timing budget.
 - Detects front warning/danger by distance thresholds.
-- Front warning/danger is `<=105/<=40 cm`; side obstacle entry is exactly `<=35 cm`.
-- Detects up/down steps from BMI270-compensated down distance relative to a stable normal-use ground baseline: up step at `-9 cm`, down step at `+11 cm`, deep drop at `+30 cm`, two of the latest three samples. Absolute down distance is never a step rule.
+- Front warning/danger is `<=120/<=40 cm`; side obstacle entry is exactly `<=35 cm`.
+- Detects up/down steps from BMI270-compensated down distance relative to a stable normal-use ground baseline: up step at `-9 cm`, down step at `+50 cm`, deep drop at `+70 cm`, two of the latest three samples. A brief cane lift/sweep clears its candidate and must settle for `250 ms` before it can form another; absolute down distance is never a step rule. Confirmed stairs always publish `ground_step` with `direction=up` or `direction=down`, rather than a generic front obstacle.
 - Fuses nearby history when available.
 - Drives obstacle vibration through PCA9685 `CH0` on TCA `CH6` in current single-motor bench mode.
 - Uses the buzzer only for high-risk cases, ground drops, and SOS.
 - Debounces the physical button. Short press uploads `voice_request` for the blind Android app; long press after `2 s` uploads `sos`.
 - Reads MPR121 touch electrodes 0-5.
-- Reads BMI270 acceleration and gyro. A fall can start only after normal-use posture, then requires fast `>=45°` tilt plus one dynamic signal, followed by sideways stillness for `1.9 s`. Fall lock mutes ordinary distance vibration/buzzer/uploads until stable normal-use posture returns for `1.2 s`.
+- Reads BMI270 acceleration and gyro. After `0.5 s` of learned normal-use posture, a rapid `>=45°` relative tilt locks ordinary distance/step feedback; reaching the lying angle during the same motion also locks even if a soft cushion has damped the impact. Acceleration impact is only an additional fallback for a slower `>=30°` tilt. A formal fall then requires any relative lying posture `>=58°` held still for `2 s`—left, right, or face-up orientation is not restricted. It stops any ordinary cue, then gives exactly one continuous `2 s` buzzer and vibration alert, and stays silent until normal-use posture is stable again for `1.2 s`.
 
 ## Route And Risk Recording
 
@@ -106,7 +106,7 @@ When the location moves into a new small grid cell, the firmware:
 - stores it in a local ring buffer,
 - uploads it to `POST /api/locations` when network mode is enabled.
 
-Local risk events are event-driven: the same risk type/level/direction in the same location grid is logged and uploaded once. A new obstacle event vibrates and beeps once, then the phone speaks that event once; a changed risk type, direction, level, location grid, or meaningful distance change creates the next event. A persistent unchanged obstacle does not repeat old feedback. User marks are uploaded to `POST /api/risk-events`. Another device ID can then call `GET /api/risks/nearby` and use the historical risk count in local risk fusion.
+Local risk events are event-driven: the same risk type/level/direction in the same location grid is logged and uploaded once. A new obstacle event starts its matching vibration/buzzer cue once, then the phone speaks that same event once. A persistent unchanged risk does not replay old physical feedback or speech. A changed risk type, direction, level, location grid, or meaningful distance change creates the next event. User marks are uploaded to `POST /api/risk-events`. Another device ID can then call `GET /api/risks/nearby` and use the historical risk count in local risk fusion.
 
 `SMARTCANE_MOCK_ROUTE_ENABLED` is `0` by default for bench testing. Keep it off for product tests.
 
@@ -172,10 +172,10 @@ Use `scan`, `pca`, `imu`, `read`, `vib all`, and `beep` for real hardware checks
 4. Put an obstacle in front: Serial prints one risk event, the CH0 motor vibrates, and high danger also beeps.
 5. Keep the obstacle still: the same place/same risk is not printed repeatedly.
 6. Open left/right side space or move to another grid cell: the CH0 motor uses different pulse counts to indicate the cue and a new event can be recorded.
-7. Hold normal use posture for about 0.7 s to learn ground baseline. A compensated `-9 cm` ground change triggers `ground_step direction=up`; `+11 cm` triggers `ground_step direction=down`; `+30 cm` triggers `ground_drop`. A normal cane lift/sweep that returns to baseline is cancelled without an alert.
+7. Hold the normal-use posture through the startup settling window to learn the ground baseline. A compensated `-9 cm` ground change triggers `ground_step direction=up`; `+50 cm` triggers `ground_step direction=down`; `+70 cm` triggers `ground_drop`. A normal cane lift/sweep that returns to baseline is cancelled without an alert.
 8. Run `mark` or long-press touch E1: backend records a user risk point.
 9. Run `path`: local walked route/risk ring buffer is printed.
 10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`: the second cane sees the historical risk area.
 11. Short-press the physical button or run `btn`: firmware uploads `voice_request`; the blind Android app enters voice interaction mode.
 12. Hold the physical button for 2 seconds or run `sos`: buzzer, vibration, Serial SOS log, and backend upload as `sos`.
-13. Run `scan`: root should show `0x68` or `0x69` for BMI270. Then run `imurescan`, `imu`, and `imustream on`. Move the board and confirm raw acceleration changes. For a real fall test, move the board quickly downward over a soft cushion, stop it, and lay it sideways for about 2 seconds. The buzzer alarms, no motor runs, and the backend exposes the alert to both blind and companion app roles.
+13. Run `scan`: root should show `0x68` or `0x69` for BMI270. Then run `imurescan`, `imu`, and `imustream on`. Move the board and confirm raw acceleration changes. For a real fall test, hold normal use for at least one second, tip the board quickly onto a soft cushion, then keep it in its fallen posture for about 2 seconds. The first large motion locks all ordinary distance cues; only after the two-second fallen hold does one two-second buzzer/vibration alert fire and the backend exposes the alert to both blind and companion app roles.

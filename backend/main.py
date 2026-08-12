@@ -41,7 +41,7 @@ LEVEL_RANK = {"low": 0, "medium": 1, "high": 2}
 DEVICE_OFFLINE_SECONDS = 60
 AMAP_BASE_URL = "https://restapi.amap.com/v3"
 
-FRONT_WARN_CM = 105
+FRONT_WARN_CM = 120
 FRONT_DANGER_CM = 40
 SIDE_SAFE_CM = 80
 SIDE_ALERT_CM = 35

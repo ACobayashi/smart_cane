@@ -7,7 +7,7 @@ from typing import Any
 
 MODEL_VERSION = "tiny-mlp-risk-tier-v4-baseline-step"
 
-FRONT_WARN_CM = 105.0
+FRONT_WARN_CM = 120.0
 FRONT_DANGER_CM = 40.0
 
 
