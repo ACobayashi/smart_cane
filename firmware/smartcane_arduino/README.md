@@ -105,7 +105,7 @@ When the location moves into a new small grid cell, the firmware:
 - stores it in a local ring buffer,
 - uploads it to `POST /api/locations` when network mode is enabled.
 
-Local risk events are event-driven: the same risk type/level/direction in the same location grid is logged, vibrated, and uploaded only once. It is reported again after the risk changes, clears and reappears, or the user moves into another grid cell. User marks are uploaded to `POST /api/risk-events`. Another device ID can then call `GET /api/risks/nearby` and use the historical risk count in local risk fusion.
+Local risk events are event-driven: the same risk type/level/direction in the same location grid is logged and uploaded once, while feedback is demo-friendly. A new obstacle cue vibrates once and beeps once; a changed risk type, direction, or level cues again; if the same obstacle stays for 3 seconds, it repeats short vibration/beep reminders. User marks are uploaded to `POST /api/risk-events`. Another device ID can then call `GET /api/risks/nearby` and use the historical risk count in local risk fusion.
 
 `SMARTCANE_MOCK_ROUTE_ENABLED` is `0` by default for bench testing. Keep it off for product tests.
 
