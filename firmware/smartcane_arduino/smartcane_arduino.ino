@@ -677,16 +677,28 @@ static void handleFallEvent(const ImuFallState &fall) {
   Serial.print(fall.pitchDeg, 1);
   Serial.print(F(" roll="));
   Serial.print(fall.rollDeg, 1);
+  Serial.print(F(" trigger_g="));
+  Serial.print(fall.triggerTotalG, 2);
+  Serial.print(F(" trigger_gyro="));
+  Serial.print(fall.triggerGyroDps, 1);
+  Serial.print(F(" trigger_angle="));
+  Serial.print(fall.triggerAngleDeg, 1);
+  Serial.print(F(" trigger_tilt_rate="));
+  Serial.print(fall.triggerTiltRateDps, 1);
+  Serial.print(F(" trigger_jerk="));
+  Serial.print(fall.triggerJerkGPerSec, 2);
   Serial.print(F(" stage="));
   Serial.print(fall.stage);
   Serial.print(F(" reason="));
   Serial.println(fall.reason);
   Serial.println(F("========================================"));
   Serial.println();
-  // This is the dedicated fall alert.  Normal distance feedback remains
-  // silent and motor-free until BMI270 normal-use recovery clears fallLock.
+  // This is the only local formal-fall alert: exactly one continuous two-second
+  // buzzer plus one two-second vibration.  It is not repeated while fallLock
+  // remains active; normal feedback stays silent until posture recovery.
   buzzerSetEnabled(true);
-  beepPatternSos();
+  beep(SMARTCANE_FALL_ALERT_BUZZ_MS);
+  vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, SMARTCANE_FALL_ALERT_VIB_MS);
   recordPathPoint(fallRisk);
 
   String extra = String("{\"source\":\"bmi270_imu\",\"notify\":\"blind_and_companion\",\"fall_stage\":\"fall_confirmed\",\"imu_stage\":\"") +
@@ -694,7 +706,12 @@ static void handleFallEvent(const ImuFallState &fall) {
                  ",\"gyro_dps\":" + String(fall.gyroDps, 1) +
                  ",\"angle_delta_deg\":" + String(fall.angleChangeDeg, 1) +
                  ",\"pitch_deg\":" + String(fall.pitchDeg, 1) +
-                 ",\"roll_deg\":" + String(fall.rollDeg, 1) + "}";
+                 ",\"roll_deg\":" + String(fall.rollDeg, 1) +
+                 ",\"trigger_total_g\":" + String(fall.triggerTotalG, 2) +
+                 ",\"trigger_gyro_dps\":" + String(fall.triggerGyroDps, 1) +
+                 ",\"trigger_angle_deg\":" + String(fall.triggerAngleDeg, 1) +
+                 ",\"trigger_tilt_rate_dps\":" + String(fall.triggerTiltRateDps, 1) +
+                 ",\"trigger_jerk_gps\":" + String(fall.triggerJerkGPerSec, 2) + "}";
   uploadRiskEvent("fall_detected",
                   "high",
                   "stop",
@@ -1394,7 +1411,12 @@ void loop() {
       currentRisk.reason = "fall_lock_waiting_normal_use_recovery";
       currentRisk.confidence = lockedFall.confidence;
       currentRisk.detectedAtMs = now;
-      vibrationStopAll();
+      // Candidate/lying-wait locks cancel any old obstacle pulse.  Once the
+      // formal event has fired, preserve its dedicated two-second fall pulse;
+      // vibrationUpdate() turns it off and no repeat is scheduled.
+      if (!lockedFall.fallActive) {
+        vibrationStopAll();
+      }
     } else {
       currentRisk = stabilizeRisk(calculateRisk(distances, nearby, imuFallCurrent()));
       publishRiskEventIfNeeded(currentRisk);

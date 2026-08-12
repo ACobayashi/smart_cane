@@ -7,7 +7,7 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-posture-ground-fall-lock-20260812"
+#define SMARTCANE_BUILD_TAG "arduino-fall-lock-lie-confirm-20260812"
 #define SMARTCANE_DEVICE_ID "cane_001"
 #ifndef SMARTCANE_DEVICE_NAME
 #define SMARTCANE_DEVICE_NAME "智能盲杖01"
@@ -227,15 +227,21 @@
 #define SMARTCANE_FALL_STILL_GYRO_DPS 22.0f
 #define SMARTCANE_FALL_STILL_ACC_MIN_G 0.78f
 #define SMARTCANE_FALL_STILL_ACC_MAX_G 1.22f
-#define SMARTCANE_FALL_CONFIRM_MS 1900
+#define SMARTCANE_FALL_CONFIRM_MS 2000
 #define SMARTCANE_FALL_CANDIDATE_WINDOW_MS 1100
 #define SMARTCANE_FALL_CANCEL_UPRIGHT_DEG 20.0f
 #define SMARTCANE_FALL_BASELINE_STILL_GYRO_DPS 18.0f
 #define SMARTCANE_FALL_BASELINE_ACC_MIN_G 0.90f
 #define SMARTCANE_FALL_BASELINE_ACC_MAX_G 1.10f
 #define SMARTCANE_FALL_NORMAL_USE_READY_MS 500
+// Once a normal-use posture has been held for READY_MS, keep that qualification
+// for this short launch window.  The first fall sample is necessarily no longer
+// still/upright, so clearing it on that same sample would miss the fall.
+#define SMARTCANE_FALL_NORMAL_USE_LAUNCH_WINDOW_MS 1200
 #define SMARTCANE_FALL_RECOVERY_MS 1200
 #define SMARTCANE_FALL_UPLOAD_COOLDOWN_MS 3000
+#define SMARTCANE_FALL_ALERT_BUZZ_MS 2000
+#define SMARTCANE_FALL_ALERT_VIB_MS 2000
 
 // Only these escalated obstacle states are sent to the companion side.
 #define SMARTCANE_COMPANION_OBSTACLE_HOLD_MS 12000

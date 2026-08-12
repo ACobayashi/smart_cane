@@ -102,9 +102,8 @@ class SmartCaneAppController private constructor(
     private val speechCooldowns = mutableMapOf<String, Long>()
     private var lastAlertId: Int = 0
     private var alertBaselineReady = false
-    private var suppressHardwareRiskUntilAfterFall: Long = 0L
     private val hardwareRiskEpisode = RiskEpisodeTracker()
-    private val fallRiskEpisode = RiskEpisodeTracker()
+    private val fallRiskEpisode = RiskEpisodeTracker(trustedClearThreshold = 1)
     private var fallHardwareEpisodeObserved = false
     private var lastNearbyRiskText: String? = null
     private var lastNearbyRiskTextSpokenAt: Long = 0L
@@ -721,7 +720,6 @@ class SmartCaneAppController private constructor(
                 }
                 when (val result = SmartCaneApiClient.getLatestDeviceState(deviceId)) {
                     is ApiResult.Success -> result.data.state?.let {
-                        val wasPending = _uiState.value.fallPending
                         _uiState.update { state -> state.copy(fallPending = it.fallPending, fallStage = it.fallStage) }
                         val trustedHardwareState = it.online &&
                             !isNonHardwareSource(it.source) &&
@@ -740,9 +738,9 @@ class SmartCaneAppController private constructor(
                                 fallRiskEpisode.observeUnknown()
                             }
                         }
-                        if (it.fallPending && !wasPending) {
-                            maybeSpeakFallEpisode("检测到疑似跌倒，请恢复正常握杖姿态后继续使用。")
-                        }
+                        // fall_pending is only the firmware safety lock while
+                        // it verifies a still-lying posture. Do not announce a
+                        // fall until the hardware sends formal fall_detected.
                         maybeSpeakHardwareRisk(it)
                     }
                     is ApiResult.Failure -> Unit
@@ -816,8 +814,7 @@ class SmartCaneAppController private constructor(
         }
 
         hardwareRiskEpisode.observeActive()
-        val now = System.currentTimeMillis()
-        if (now < suppressHardwareRiskUntilAfterFall) return
+        if (fallHardwareEpisodeObserved) return
         if (_uiState.value.voiceState != VoiceState.Idle) return
 
         val prompt = hardwareRiskPrompt(state) ?: state.voicePrompt.takeIf { it.isNotBlank() } ?: return
@@ -829,7 +826,6 @@ class SmartCaneAppController private constructor(
 
     private fun maybeSpeakFallEpisode(text: String) {
         if (!fallRiskEpisode.enter("fall_detected")) return
-        suppressHardwareRiskUntilAfterFall = System.currentTimeMillis() + 30_000L
         speakText(text, TtsPriority.EMERGENCY, bypassTextCooldown = true)
     }
 

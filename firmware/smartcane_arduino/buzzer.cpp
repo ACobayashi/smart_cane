@@ -49,6 +49,10 @@ void beep(uint16_t ms) {
     digitalWrite(SMARTCANE_BUZZER_PIN, idleLevel());
     return;
   }
+  // A formal fall alert is a single continuous tone.  It must pre-empt a
+  // leftover obstacle/SOS pattern instead of allowing the pattern timer to
+  // turn the buzzer off midway through this requested duration.
+  patternActive = false;
   digitalWrite(SMARTCANE_BUZZER_PIN, activeLevel());
   singleBeepActive = true;
   singleBeepUntilMs = millis() + ms;

@@ -53,6 +53,7 @@ static float baselineAzG = 1.0f;
 static float baselinePostureDeg = 0.0f;
 static bool normalUseReady = false;
 static unsigned long normalUseSinceMs = 0;
+static unsigned long lastNormalUseQualifiedMs = 0;
 static float previousAngleFromBaseline = 0.0f;
 static float previousTotalG = 1.0f;
 static unsigned long previousMotionMs = 0;
@@ -61,11 +62,23 @@ static bool readAccel();
 static void printDebugRegisters();
 static void printStreamSample();
 
+static void resetNormalUseQualification() {
+  normalUseReady = false;
+  normalUseSinceMs = 0;
+  lastNormalUseQualifiedMs = 0;
+}
+
 static void resetFallCandidate() {
   fallStage = FALL_STAGE_NORMAL;
   candidateStartedMs = 0;
   stillLyingSinceMs = 0;
   state.fallLock = false;
+  state.triggerTotalG = 0.0f;
+  state.triggerGyroDps = 0.0f;
+  state.triggerAngleDeg = 0.0f;
+  state.triggerTiltRateDps = 0.0f;
+  state.triggerJerkGPerSec = 0.0f;
+  state.triggerAtMs = 0;
 }
 
 static void rememberAccel() {
@@ -400,10 +413,16 @@ static bool readAccel() {
                          baselineStill && angleFromBaseline <= SMARTCANE_FALL_CANCEL_UPRIGHT_DEG;
   if (normalUseSample) {
     if (normalUseSinceMs == 0) normalUseSinceMs = now;
-    if (now - normalUseSinceMs >= SMARTCANE_FALL_NORMAL_USE_READY_MS) normalUseReady = true;
+    if (now - normalUseSinceMs >= SMARTCANE_FALL_NORMAL_USE_READY_MS) {
+      normalUseReady = true;
+      lastNormalUseQualifiedMs = now;
+    }
   } else if (fallStage == FALL_STAGE_NORMAL) {
     normalUseSinceMs = 0;
-    normalUseReady = false;
+    if (lastNormalUseQualifiedMs == 0 ||
+        now - lastNormalUseQualifiedMs > SMARTCANE_FALL_NORMAL_USE_LAUNCH_WINDOW_MS) {
+      resetNormalUseQualification();
+    }
   }
 
   bool accelTrigger = state.totalG > SMARTCANE_FALL_ACCEL_HIGH_G ||
@@ -413,8 +432,10 @@ static bool readAccel() {
   bool jerkTrigger = jerkGPerSec > 2.2f;
   bool dynamicEvidence = accelTrigger || gyroTrigger || tiltRateTrigger || jerkTrigger;
   bool fastTilt = angleFromBaseline >= SMARTCANE_FALL_FAST_ANGLE_DEG && dynamicEvidence;
-  bool lyingAngle = angleFromBaseline > SMARTCANE_FALL_LYING_ANGLE_DEG ||
-                    postureDeg > SMARTCANE_FALL_LYING_ANGLE_DEG;
+  // The cane is intentionally held at an angle, and BMI270 axes vary with the
+  // enclosure. Only a change from the learned normal-use vector represents
+  // lying down; absolute pitch/roll must never be used as the lying test.
+  bool lyingAngle = angleFromBaseline >= SMARTCANE_FALL_LYING_ANGLE_DEG;
   bool stillLying = lyingAngle &&
                     state.gyroDps < SMARTCANE_FALL_STILL_GYRO_DPS &&
                     state.totalG > SMARTCANE_FALL_STILL_ACC_MIN_G &&
@@ -435,8 +456,7 @@ static bool readAccel() {
         state.reason = "normal_use_pose_stable_after_fall";
         state.confidence = 0.25f;
         resetFallCandidate();
-        normalUseReady = false;
-        normalUseSinceMs = now;
+        resetNormalUseQualification();
       }
     } else {
       recoverySinceMs = 0;
@@ -452,33 +472,49 @@ static bool readAccel() {
 
   switch (fallStage) {
     case FALL_STAGE_NORMAL:
-      if (normalUseReady && fastTilt) {
+      {
+        bool normalUseArmed = normalUseReady && lastNormalUseQualifiedMs != 0 &&
+            now - lastNormalUseQualifiedMs <= SMARTCANE_FALL_NORMAL_USE_LAUNCH_WINDOW_MS;
+        if (normalUseArmed && fastTilt) {
         fallStage = FALL_STAGE_CANDIDATE;
         candidateStartedMs = now;
         stillLyingSinceMs = 0;
+        // Lock immediately on the large abnormal motion. Formal fall
+        // notification still waits for the separate still-lying confirmation.
+        state.fallLock = true;
+        state.triggerTotalG = state.totalG;
+        state.triggerGyroDps = state.gyroDps;
+        state.triggerAngleDeg = angleFromBaseline;
+        state.triggerTiltRateDps = state.tiltRateDps;
+        state.triggerJerkGPerSec = jerkGPerSec;
+        state.triggerAtMs = now;
         state.stage = "fall_candidate";
-        state.reason = "normal_use_fast_tilt_with_dynamic_evidence";
+        state.reason = "normal_use_fast_tilt_lock_waiting_lying";
         state.confidence = accelTrigger ? 0.68f : 0.60f;
-      } else {
+        } else {
         state.stage = "normal";
-        state.reason = normalUseReady ? "normal_use" : "learning_normal_use";
+        state.reason = normalUseArmed ? "normal_use" : "learning_normal_use";
         state.confidence = 0.20f;
+        }
       }
       break;
 
     case FALL_STAGE_CANDIDATE:
       if (uprightAgain && now - candidateStartedMs > 250) {
         resetFallCandidate();
+        resetNormalUseQualification();
         state.stage = "normal";
         state.reason = "candidate_cancelled_upright";
         state.confidence = 0.18f;
       } else if (now - candidateStartedMs > SMARTCANE_FALL_CANDIDATE_WINDOW_MS) {
-        fallStage = FALL_STAGE_LYING_WAIT;
-        stillLyingSinceMs = 0;
-        state.fallLock = true;
-        state.stage = "fall_lying_wait";
-        state.reason = "candidate_window_expired_waiting_lying";
-        state.confidence = 0.58f;
+        // A large normal cane swing can reach the fast-tilt threshold, but a
+        // fall must become a relative lying posture promptly. Release this
+        // false candidate instead of leaving ordinary feedback muted forever.
+        resetFallCandidate();
+        resetNormalUseQualification();
+        state.stage = "normal";
+        state.reason = "candidate_expired_without_lying";
+        state.confidence = 0.18f;
       } else if (lyingAngle) {
         fallStage = FALL_STAGE_LYING_WAIT;
         stillLyingSinceMs = 0;
@@ -496,8 +532,17 @@ static bool readAccel() {
     case FALL_STAGE_LYING_WAIT:
       if (uprightAgain) {
         resetFallCandidate();
+        resetNormalUseQualification();
         state.stage = "normal";
         state.reason = "post_fall_cancelled_upright";
+        state.confidence = 0.18f;
+      } else if (!lyingAngle) {
+        // The relative lying pose was not retained, so it was not a fall that
+        // meets the product rule. Clear the temporary candidate lock.
+        resetFallCandidate();
+        resetNormalUseQualification();
+        state.stage = "normal";
+        state.reason = "candidate_cancelled_lying_not_retained";
         state.confidence = 0.18f;
       } else if (stillLying) {
         if (stillLyingSinceMs == 0) {

@@ -95,7 +95,7 @@ Local safety does not depend on Wi-Fi:
 - Uses the buzzer only for high-risk cases, ground drops, and SOS.
 - Debounces the physical button. Short press uploads `voice_request` for the blind Android app; long press after `2 s` uploads `sos`.
 - Reads MPR121 touch electrodes 0-5.
-- Reads BMI270 acceleration and gyro. A fall can start only after normal-use posture, then requires fast `>=45°` tilt plus one dynamic signal, followed by sideways stillness for `1.9 s`. Fall lock mutes ordinary distance vibration/buzzer/uploads until stable normal-use posture returns for `1.2 s`.
+- Reads BMI270 acceleration and gyro. After `0.5 s` of learned normal-use posture, a fast `>=45°` relative tilt plus a dynamic signal immediately locks ordinary distance/step feedback. A formal fall then requires a relative lying angle `>=58°` held still for `2 s`; it gives exactly one continuous `2 s` buzzer and vibration alert, then stays silent until normal-use posture is stable again for `1.2 s`.
 
 ## Route And Risk Recording
 
@@ -178,4 +178,4 @@ Use `scan`, `pca`, `imu`, `read`, `vib all`, and `beep` for real hardware checks
 10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`: the second cane sees the historical risk area.
 11. Short-press the physical button or run `btn`: firmware uploads `voice_request`; the blind Android app enters voice interaction mode.
 12. Hold the physical button for 2 seconds or run `sos`: buzzer, vibration, Serial SOS log, and backend upload as `sos`.
-13. Run `scan`: root should show `0x68` or `0x69` for BMI270. Then run `imurescan`, `imu`, and `imustream on`. Move the board and confirm raw acceleration changes. For a real fall test, move the board quickly downward over a soft cushion, stop it, and lay it sideways for about 2 seconds. The buzzer alarms, no motor runs, and the backend exposes the alert to both blind and companion app roles.
+13. Run `scan`: root should show `0x68` or `0x69` for BMI270. Then run `imurescan`, `imu`, and `imustream on`. Move the board and confirm raw acceleration changes. For a real fall test, hold normal use for at least one second, move the board quickly downward over a soft cushion, then keep it sideways for about 2 seconds. The first large motion locks all ordinary distance cues; only after the sideways hold does one two-second buzzer/vibration alert fire and the backend exposes the alert to both blind and companion app roles.
