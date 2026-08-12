@@ -67,6 +67,7 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 class SmartCaneAppController private constructor(
     private val authRepository: AuthRepository,
@@ -664,7 +665,8 @@ class SmartCaneAppController private constructor(
                                     riskType = alert.riskType,
                                     voicePrompt = alert.voicePrompt,
                                     message = alert.message,
-                                    sosAlarmActive = sosAlarmJob?.isActive == true
+                                    sosAlarmActive = sosAlarmJob?.isActive == true,
+                                    distanceMm = alert.distance
                                 )?.let { alertText ->
                                     if (!alert.freshForSpeech) return@let
                                     if (!spokenEventIds.tryAcquire(alert.id)) return@let
@@ -792,20 +794,7 @@ class SmartCaneAppController private constructor(
     }
 
     private fun hardwareEventPrompt(event: LatestRiskEventDto): String? {
-        val riskType = event.riskType.lowercase(Locale.US)
-        return when {
-            riskType == "fall_detected" -> "检测到跌倒"
-            riskType == "sos" -> "已发起紧急求助"
-            riskType == "voice_request" -> event.voicePrompt.ifBlank { "请说出您的需求" }
-            riskType.contains("front") -> "前方有障碍或上台阶，请停下"
-            riskType.contains("left") -> "左侧有障碍"
-            riskType.contains("right") -> "右侧有障碍"
-            riskType == "ground_step_up" || event.voicePrompt.contains("上台阶") -> "前方有障碍或上台阶，请停下"
-            riskType == "ground_step_down" || event.voicePrompt.contains("下台阶") -> "前方有下台阶或落差，请停下"
-            riskType.contains("ground") || riskType.contains("drop") -> "前方有下台阶或落差，请停下"
-            riskType.contains("down_sensor") -> "下视传感器异常，请停下检查"
-            else -> event.voicePrompt.takeIf { it.isNotBlank() }
-        }
+        return realtimeHardwareEventPrompt(event)
     }
 
     private fun ensureLocationUpdates() {
@@ -1522,38 +1511,61 @@ internal fun alertSpeechForRole(
     riskType: String,
     voicePrompt: String,
     message: String,
-    sosAlarmActive: Boolean
+    sosAlarmActive: Boolean,
+    distanceMm: Int? = null
 ): String? {
     if (riskType == "sos") {
         return if (role == "companion") "用户发起紧急求助" else null
     }
     if (role != "blind" || sosAlarmActive) return null
-    return if (riskType == "fall_detected") "检测到跌倒" else voicePrompt.ifBlank { message }
+    if (riskType == "fall_detected") return "检测到跌倒"
+    return realtimeHardwareEventPrompt(
+        LatestRiskEventDto(
+            id = 0,
+            deviceId = "",
+            riskType = riskType,
+            riskLevel = "",
+            distance = distanceMm,
+            message = message,
+            latitude = null,
+            longitude = null,
+            timestamp = "",
+            voicePrompt = voicePrompt
+        )
+    )
 }
 
-internal const val MAX_SPEECH_CHARACTERS = 15
 internal const val RISK_POINT_SPEECH_COOLDOWN_MS = 5 * 60 * 1000L
 
 internal fun compactSpeechText(text: String): String {
-    val normalized = text.trim().replace(Regex("\\s+"), "")
+    val normalized = text.trim()
     if (normalized.isBlank()) return ""
-    if (normalized.contains("疑似跌倒")) return ""
-    val corrected = when {
-        normalized.contains("AndroidApp") && normalized.contains("紧急求助") -> "用户发起紧急求助"
-        normalized.contains("语音请求失败") -> "语音请求失败，请重试"
-        normalized.contains("语音识别暂时不可用") -> "语音识别失败，请重试"
-        normalized.contains("后端暂时不可用") -> "后端暂不可用"
-        normalized.contains("当前位置不稳定") -> "定位不稳定，请重试"
-        normalized.contains("重新规划失败") -> "规划失败，请停下"
+    val compactForMatching = normalized.replace(Regex("\\s+"), "")
+    if (compactForMatching.contains("疑似跌倒")) return ""
+    return when {
+        compactForMatching.contains("AndroidApp") && compactForMatching.contains("紧急求助") -> "用户发起紧急求助"
         else -> normalized
     }
-    if (corrected.length <= MAX_SPEECH_CHARACTERS) return corrected
-    val firstClause = corrected.split(Regex("[。；;，,]"))
-        .firstOrNull()
-        .orEmpty()
-        .trim()
-    val candidate = firstClause.takeIf { it.isNotBlank() } ?: corrected
-    return candidate.take(MAX_SPEECH_CHARACTERS).trimEnd('，', '。', ',', ';', '；')
+}
+
+internal fun realtimeHardwareEventPrompt(event: LatestRiskEventDto): String? {
+    val riskType = event.riskType.lowercase(Locale.US)
+    val distanceCm = event.distance?.let { (it / 10.0).roundToInt().coerceAtLeast(1) }
+    return when {
+        riskType == "fall_detected" -> "检测到跌倒"
+        riskType == "sos" -> "已发起紧急求助"
+        riskType == "voice_request" -> event.voicePrompt.ifBlank { "请说出您的需求" }
+        riskType == "prolonged_obstacle" -> "前方障碍持续"
+        riskType == "approaching_obstacle" -> "前方障碍正在接近"
+        riskType.contains("front") -> distanceCm?.let { "前方${it}厘米有障碍" } ?: "前方有障碍"
+        riskType.contains("left") -> distanceCm?.let { "左侧${it}厘米有障碍" } ?: "左侧有障碍"
+        riskType.contains("right") -> distanceCm?.let { "右侧${it}厘米有障碍" } ?: "右侧有障碍"
+        riskType == "ground_step_up" || event.voicePrompt.contains("上台阶") -> "前方上台阶"
+        riskType == "ground_step_down" || event.voicePrompt.contains("下台阶") -> "前方下台阶"
+        riskType.contains("ground") || riskType.contains("drop") -> "前方有落差"
+        riskType.contains("down_sensor") -> "下视传感器异常"
+        else -> event.voicePrompt.substringBefore('，').substringBefore(',').takeIf { it.isNotBlank() }
+    }
 }
 
 internal class RiskPointSpeechCooldown(

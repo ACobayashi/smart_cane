@@ -1171,15 +1171,19 @@ def legacy_event_message(item: dict[str, Any]) -> str:
     if risk_type == "voice_request":
         return "请说目的地或指令"
     if risk_type == "prolonged_obstacle":
-        return "障碍持续，请停下探测"
+        return "前方障碍持续"
     if risk_type == "approaching_obstacle":
-        return "障碍逼近，请立即减速"
-    if risk_type in {"ground_drop", "ground_step_down"}:
-        return "前方有下台阶或落差，请停下"
+        return "前方障碍正在接近"
+    if risk_type == "ground_drop":
+        return "前方有落差"
+    if risk_type == "ground_step_down":
+        return "前方下台阶"
     if risk_type in {"ground_step", "ground_step_up"}:
-        return "前方有障碍或上台阶，请停下"
+        return "前方上台阶"
+    if risk_type == "down_sensor_unavailable":
+        return "下视传感器异常"
     if risk_type == "front_obstacle":
-        return "前方有障碍或上台阶，请停下"
+        return f"前方{cm_text}有障碍"
     if risk_type == "left_obstacle":
         return f"左侧{cm_text}有障碍"
     if risk_type == "right_obstacle":
@@ -3155,21 +3159,25 @@ def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, 
     if risk_type == "fall_detected":
         return "检测到跌倒"
     if risk_type == "prolonged_obstacle":
-        return "障碍持续，请停下探测"
+        return "前方障碍持续"
     if risk_type == "approaching_obstacle":
-        return "障碍逼近，请立即减速"
+        return "前方障碍正在接近"
     if risk_type == "ground_step" and direction == "up":
-        return "前方有障碍或上台阶，请停下"
+        return "前方上台阶"
     if risk_type == "ground_step" and direction == "down":
-        return "前方有下台阶或落差，请停下"
-    if risk_type in {"ground_drop", "ground_step", "ground_step_down", "ground_step_up"}:
-        return "前方有下台阶或落差，请停下"
+        return "前方下台阶"
+    if risk_type == "ground_drop":
+        return "前方有落差"
+    if risk_type == "ground_step_down":
+        return "前方下台阶"
+    if risk_type in {"ground_step", "ground_step_up"}:
+        return "前方上台阶"
     if risk_type == "down_no_target":
         return ""
     if risk_type == "down_sensor_unavailable":
-        return "下视异常，请停下"
+        return "下视传感器异常"
     if risk_type == "front_obstacle":
-        return "前方有障碍或上台阶，请停下"
+        return f"前方{frame.front_cm or '-'}厘米有障碍"
     if risk_type == "left_obstacle":
         return f"左侧{frame.left_cm or '-'}厘米有障碍"
     if risk_type == "right_obstacle":
@@ -3465,26 +3473,34 @@ def ai_enabled() -> bool:
 def fallback_advice(req: AdviceRequest, history: dict[str, Any]) -> str:
     if req.risk_type == "sos":
         return "求助已发送，请安全等候"
-    if req.risk_type in {"ground_drop", "ground_step", "down_no_target", "down_sensor_unavailable"}:
-        return "前方有落差，请停下"
+    if req.risk_type in {"ground_drop", "down_no_target"}:
+        return "前方有落差"
+    if req.risk_type in {"ground_step", "ground_step_down"}:
+        return "前方下台阶"
+    if req.risk_type == "ground_step_up":
+        return "前方上台阶"
+    if req.risk_type == "down_sensor_unavailable":
+        return "下视传感器异常"
+    if req.risk_type == "front_obstacle":
+        return f"前方{req.front_cm or '-'}厘米有障碍"
+    if req.risk_type == "left_obstacle":
+        return f"左侧{req.left_cm or '-'}厘米有障碍"
+    if req.risk_type == "right_obstacle":
+        return f"右侧{req.right_cm or '-'}厘米有障碍"
     if req.risk_level == "high":
-        return "前方高风险，请停下"
+        return "前方高风险"
     if req.risk_level == "medium":
-        return "前方中风险，请减速"
+        return "前方中风险"
     if history["high_count"] >= 2:
-        return "附近有高风险，请减速"
-    return "前方安全，请谨慎通行"
+        return "附近有高风险"
+    return "前方安全"
 
 
 def deep_advice(req: AdviceRequest, deep: dict[str, Any]) -> str:
-    level = deep.get("level", "low")
-    if level == "high":
-        if req.risk_type in {"ground_drop", "ground_step", "down_no_target", "down_sensor_unavailable"}:
-            return "前方有落差，请停下"
-        return "前方高风险，请停下"
-    if level == "medium":
-        return "前方中风险，请减速"
-    return "前方低风险，请留意"
+    return fallback_advice(
+        req,
+        {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": deep.get("level", "low")},
+    )
 
 
 async def call_chat_completion(messages: list[dict[str, str]], temperature: float = 0.2) -> tuple[Optional[str], dict[str, Any]]:
@@ -3512,60 +3528,13 @@ async def call_chat_completion(messages: list[dict[str, str]], temperature: floa
 
 async def generate_advice(req: AdviceRequest, history: dict[str, Any], deep: dict[str, Any]) -> dict[str, Any]:
     fallback = deep_advice(req, deep) if deep.get("level") != "low" else fallback_advice(req, history)
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a safety assistant for a smart cane. "
-                "Return one practical instruction in Chinese, no markdown, no diagnosis, no more than 15 Chinese characters. "
-                "Prefer stop/slow/left/right guidance based on sensor data."
-            ),
-        },
-        {
-            "role": "user",
-            "content": json.dumps(
-                {
-                    "device_id": req.device_id,
-                    "risk_type": req.risk_type,
-                    "risk_level": req.risk_level,
-                    "front_cm": req.front_cm,
-                    "left_cm": req.left_cm,
-                    "right_cm": req.right_cm,
-                    "down_cm": req.down_cm,
-                    "nearby_history": {
-                        "risk_count": history["risk_count"],
-                        "high_count": history["high_count"],
-                        "medium_count": history["medium_count"],
-                        "max_level": history["max_level"],
-                    },
-                    "deep_learning": {
-                        "model": deep["model"],
-                        "score": deep["score"],
-                        "level": deep["level"],
-                        "confidence": deep["confidence"],
-                    },
-                    "extra": req.extra,
-                },
-                ensure_ascii=False,
-            ),
-        },
-    ]
-
-    try:
-        content, meta = await call_chat_completion(messages)
-    except Exception as exc:
-        return {
-            "advice": fallback,
-            "fallback": True,
-            "error": str(exc),
-            "provider": chat_config()["provider"],
-            "model": chat_config()["model"],
-        }
-
-    if not content:
-        meta = meta if "meta" in locals() else {"provider": chat_config()["provider"], "model": chat_config()["model"]}
-        return {**meta, "advice": fallback, "fallback": True}
-    return {**meta, "advice": content, "fallback": False}
+    return {
+        "advice": fallback,
+        "fallback": True,
+        "provider": "rule",
+        "model": None,
+        "skipped": "realtime_condition_only",
+    }
 
 
 def fallback_command(text: str) -> dict[str, Any]:

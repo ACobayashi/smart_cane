@@ -1,5 +1,6 @@
 package com.nankai.smartcane.viewmodel
 
+import com.nankai.smartcane.data.network.LatestRiskEventDto
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -40,10 +41,38 @@ class AlertSpeechRoleTest {
     }
 
     @Test
-    fun speechIsLimitedToFifteenCharactersAndCorrectsLegacySosText() {
+    fun speechKeepsNavigationAndRiskPointContentAndCorrectsLegacyText() {
         assertEquals("用户发起紧急求助", compactSpeechText("收到 Android App 紧急求助，请尽快联系使用者。"))
         assertEquals("", compactSpeechText("检测到疑似跌倒，请恢复正常握杖姿态后继续使用。"))
-        assertEquals(15, compactSpeechText("这是一条没有标点并且明显超过十五个字的语音播报内容").length)
+        assertEquals(
+            "沿卫津路向北步行三百米，经过两个风险点后右转。 注意施工区域。",
+            compactSpeechText("沿卫津路向北步行三百米，经过两个风险点后右转。 注意施工区域。")
+        )
+    }
+
+    @Test
+    fun realtimeSensorSpeechOnlyDescribesTheSituation() {
+        val front = LatestRiskEventDto(1, "cane", "front_obstacle", "high", 320, "", null, null, "", "")
+        val left = LatestRiskEventDto(2, "cane", "left_obstacle", "medium", 450, "", null, null, "", "")
+        val up = LatestRiskEventDto(3, "cane", "ground_step_up", "medium", null, "", null, null, "", "")
+        val drop = LatestRiskEventDto(4, "cane", "ground_drop", "high", null, "", null, null, "", "")
+        val sensor = LatestRiskEventDto(5, "cane", "down_sensor_unavailable", "high", null, "", null, null, "", "")
+
+        assertEquals("前方32厘米有障碍", realtimeHardwareEventPrompt(front))
+        assertEquals("左侧45厘米有障碍", realtimeHardwareEventPrompt(left))
+        assertEquals("前方上台阶", realtimeHardwareEventPrompt(up))
+        assertEquals("前方有落差", realtimeHardwareEventPrompt(drop))
+        assertEquals("下视传感器异常", realtimeHardwareEventPrompt(sensor))
+        assertEquals(
+            "前方障碍持续",
+            alertSpeechForRole(
+                role = "blind",
+                riskType = "prolonged_obstacle",
+                voicePrompt = "同一障碍持续出现，已通知陪护端，请停止并重新探测",
+                message = "持续障碍",
+                sosAlarmActive = false
+            )
+        )
     }
 
     @Test

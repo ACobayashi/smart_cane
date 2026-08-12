@@ -731,35 +731,32 @@ def test_low_obstacle_second_report_promotes_to_history_warning(tmp_path, monkey
     assert len(warning["warning"]["voicePrompt"]) <= 15
 
 
-def test_voice_templates_are_short_and_only_confirmed_fall_is_spoken():
+def test_realtime_voice_templates_only_describe_conditions_and_confirmed_fall():
     pending = frame(55, fall_pending=True, fall_detected=False, fall_stage="fall_candidate")
     confirmed = frame(55, fall_pending=False, fall_detected=True, fall_stage="fall_confirmed")
     assert main.voice_prompt_for_risk(pending, "none", "low", "none") != "检测到跌倒"
     assert main.voice_prompt_for_risk(confirmed, "fall_detected", "high", "stop") == "检测到跌倒"
 
-    prompts = [
+    realtime_prompts = [
         main.legacy_event_message({"risk_type": "sos"}),
         main.voice_prompt_for_risk(frame(55, front_cm=35), "front_obstacle", "high", "stop"),
         main.voice_prompt_for_risk(frame(55), "ground_drop", "high", "down"),
-        main.nearby_warning_text(8.0, "high", "front", {"riskType": "sos"}),
-        main.route_voice_prompt(None),
-        main.route_voice_prompt({"distance_m": 500, "risk": {}, "steps": []}),
-        main.voice_route_failure_prompt({"infocode": "20803"}),
     ]
-    assert all(len(prompt) <= 15 for prompt in prompts)
+    forbidden = ("请", "保持距离", "停下", "探测", "恢复姿态", "立即减速", "重新探测")
+    assert all(not any(word in prompt for word in forbidden) for prompt in realtime_prompts)
     assert main.legacy_event_message({"risk_type": "sos"}) == "用户发起紧急求助"
 
 
-def test_front_and_up_step_share_prompt_while_down_step_and_drop_share_prompt():
+def test_realtime_obstacles_steps_and_drop_only_describe_the_condition():
     front = main.voice_prompt_for_risk(frame(55, front_cm=35), "front_obstacle", "high", "stop")
     up_step = main.voice_prompt_for_risk(frame(42), "ground_step", "high", "up")
     down_step = main.voice_prompt_for_risk(frame(68), "ground_step", "high", "down")
     drop = main.voice_prompt_for_risk(frame(86), "ground_drop", "high", "down")
 
-    assert front == up_step == "前方有障碍或上台阶，请停下"
-    assert down_step == drop == "前方有下台阶或落差，请停下"
-    assert len(front) <= 15
-    assert len(drop) <= 15
+    assert front == "前方35厘米有障碍"
+    assert up_step == "前方上台阶"
+    assert down_step == "前方下台阶"
+    assert drop == "前方有落差"
 
     historical_up = main.nearby_warning_text(
         8.0, "high", "front", {"riskType": "ground_step", "voicePrompt": up_step}
@@ -767,8 +764,8 @@ def test_front_and_up_step_share_prompt_while_down_step_and_drop_share_prompt():
     historical_down = main.nearby_warning_text(
         8.0, "high", "front", {"riskType": "ground_step", "voicePrompt": down_step}
     )
-    assert historical_up == front
-    assert historical_down == drop
+    assert historical_up == "前方有障碍或上台阶，请停下"
+    assert historical_down == "前方有下台阶或落差，请停下"
 
 
 def test_obstacle_advice_never_suggests_lateral_avoidance():
@@ -778,15 +775,40 @@ def test_obstacle_advice_never_suggests_lateral_avoidance():
         lng=121.0,
         risk_type="front_obstacle",
         risk_level="high",
+        front_cm=120,
         left_cm=120,
         right_cm=30,
     )
     history = {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": "low"}
 
-    assert main.fallback_advice(request, history) == "前方高风险，请停下"
-    assert main.deep_advice(request, {"level": "high"}) == "前方高风险，请停下"
+    assert main.fallback_advice(request, history) == "前方120厘米有障碍"
+    assert main.deep_advice(request, {"level": "high"}) == "前方120厘米有障碍"
     assert "向左" not in main.fallback_advice(request, history)
     assert "向右" not in main.deep_advice(request, {"level": "high"})
+
+
+def test_realtime_ai_advice_uses_condition_template_without_llm(monkeypatch):
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("realtime sensor advice must not call the LLM")
+
+    monkeypatch.setattr(main, "call_chat_completion", fail_if_called)
+    request = main.AdviceRequest(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="left_obstacle",
+        risk_level="medium",
+        left_cm=32,
+    )
+    result = main.asyncio.run(main.generate_advice(
+        request,
+        {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": "low"},
+        {"level": "medium"},
+    ))
+
+    assert result["advice"] == "左侧32厘米有障碍"
+    assert result["provider"] == "rule"
+    assert result["skipped"] == "realtime_condition_only"
 
 
 def test_navigation_advice_timeout_is_shorter_than_amap_timeout():

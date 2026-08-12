@@ -117,6 +117,7 @@ data class EmergencyAlertDto(
     val latitude: Double?,
     val longitude: Double?,
     val timestamp: String,
+    val distance: Int? = null,
     val freshForSpeech: Boolean = false,
     val relativeDirection: String = "front",
     val relativeDirectionText: String = "前方",
@@ -1023,6 +1024,12 @@ object SmartCaneApiClient {
         latitude = nullableDouble("latitude") ?: nullableDouble("lat"),
         longitude = nullableDouble("longitude") ?: nullableDouble("lng"),
         timestamp = optString("timestamp"),
+        distance = when {
+            !isNull("distance") -> optInt("distance")
+            !isNull("distanceMm") -> optInt("distanceMm")
+            !isNull("distance_mm") -> optInt("distance_mm")
+            else -> null
+        },
         freshForSpeech = optBoolean("freshForSpeech", false)
     )
 
