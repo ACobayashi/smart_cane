@@ -686,7 +686,7 @@ static void handleFallEvent(const ImuFallState &fall) {
   // This is the dedicated fall alert.  Normal distance feedback remains
   // silent and motor-free until BMI270 normal-use recovery clears fallLock.
   buzzerSetEnabled(true);
-  beepPatternSos();
+  runCue(CUE_SOS, true);
   recordPathPoint(fallRisk);
 
   String extra = String("{\"source\":\"bmi270_imu\",\"notify\":\"blind_and_companion\",\"fall_stage\":\"fall_confirmed\",\"imu_stage\":\"") +
@@ -931,6 +931,9 @@ static void publishRiskEventIfNeeded(const RiskState &risk) {
 
   if (hasConcreteRisk(risk)) {
     recordPathPoint(risk);
+    // Keep the physical cue and uploaded event on the same detection edge.
+    // Network latency only delays phone speech; it cannot delay the cane cue.
+    applyFeedbackForRisk(risk, true, true);
     maybeAutoUploadRisk();
     if (risk.level == RISK_HIGH && networkMode && networkAvailable()) {
       lastDeepRiskMs = millis();
@@ -1400,9 +1403,10 @@ void loop() {
       publishRiskEventIfNeeded(currentRisk);
       monitorCompanionAlerts(currentRisk);
       bool persistent = false;
-      if (updateRiskFeedbackGate(currentRisk, persistent)) {
-        applyFeedbackForRisk(currentRisk, true, true);
-      }
+      // Keep the gate state aligned with the active risk, but do not repeat
+      // local feedback for an old event. A new published event is the only
+      // trigger shared by phone speech, vibration, and buzzer.
+      updateRiskFeedbackGate(currentRisk, persistent);
     }
   }
 

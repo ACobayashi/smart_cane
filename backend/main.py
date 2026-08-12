@@ -1235,6 +1235,8 @@ def mobile_event_dict(row: sqlite3.Row) -> dict[str, Any]:
     if not isinstance(extra, dict):
         extra = {"raw": extra}
 
+    event_source = str(extra.get("source") or item.get("sensor") or "unknown")
+
     risk_type = str(item.get("risk_type") or "none")
     risk_level = str(item.get("risk_level") or item.get("level") or "low")
     distance_mm = event_distance_mm(item)
@@ -1264,6 +1266,7 @@ def mobile_event_dict(row: sqlite3.Row) -> dict[str, Any]:
         "title": alert_title(risk_type),
         "direction": item.get("direction") or "none",
         "sensor": item.get("sensor") or "unknown",
+        "source": event_source,
         "risk_score": item.get("risk_score"),
         "riskScore": item.get("risk_score"),
         "message": legacy_event_message(item),
@@ -2338,6 +2341,20 @@ def should_store_sensor_analysis(analysis: dict[str, Any]) -> bool:
         "prolonged_obstacle",
         "approaching_obstacle",
     } and float(analysis.get("map_weight") or 0) >= 60 and analysis["risk_level"] in {"medium", "high"}
+
+
+def should_store_sensor_frame_event(frame: SensorFrameCreate, analysis: dict[str, Any]) -> bool:
+    source = str(frame.source or "").strip().lower()
+    if source == "android_telemetry":
+        return False
+    if source == "esp32c5":
+        # Real firmware uploads each feedback edge through /api/risk-events.
+        # Periodic frames only refresh live state and must never create a new
+        # event that the phone could mistake for another hardware cue.
+        explicit_input = bool(frame.alert_type or frame.button_event or frame.touch_event)
+        if not explicit_input:
+            return False
+    return should_store_sensor_analysis(analysis)
 
 
 def amap_key() -> str:
@@ -3757,6 +3774,33 @@ def latest_event(
     return {"found": True, "event": event_to_dict(row) if raw else mobile_event_dict(row)}
 
 
+@app.get("/api/events/since")
+def events_since(
+    device_id: str = Query(..., min_length=1),
+    sinceId: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM risk_events
+             WHERE device_id = ? AND id > ?
+             ORDER BY id ASC
+             LIMIT ?
+            """,
+            (device_id, sinceId, limit),
+        ).fetchall()
+    events = [mobile_event_dict(row) for row in rows]
+    return {
+        "success": True,
+        "deviceId": device_id,
+        "sinceId": sinceId,
+        "events": events,
+        "lastId": int(events[-1]["id"]) if events else sinceId,
+        "serverTime": now_iso(),
+    }
+
+
 @app.get("/api/risk-events")
 def list_risk_events(limit: int = Query(200, ge=1, le=1000)) -> list[dict[str, Any]]:
     return list_events(limit)
@@ -3874,7 +3918,7 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
         )
     device_state = upsert_device_state(frame, lat, lng, analysis)
     stored_event: Optional[dict[str, Any]] = None
-    if should_store_sensor_analysis(analysis):
+    if should_store_sensor_frame_event(frame, analysis):
         stored_event = store_event(
             EventCreate(
                 device_id=frame.device_id,

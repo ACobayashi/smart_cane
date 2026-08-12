@@ -541,6 +541,50 @@ def test_medium_and_high_obstacles_can_become_shared_risk_points():
     assert main.should_store_sensor_analysis(analysis)
 
 
+def test_periodic_real_frame_updates_state_without_creating_event(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "periodic_frame.db")
+    main.init_db()
+    response = main.create_sensor_frame(frame(
+        55,
+        device_id="cane_real",
+        source="esp32c5",
+        front_cm=25,
+        risk_type="front_obstacle",
+        risk_level="high",
+        manual_risk_type="front_obstacle",
+        manual_risk_level="high",
+        extra="source=periodic_real_frame",
+    ), lite=False)
+    assert response["risk"]["risk_type"] == "front_obstacle"
+    assert response["stored_event"] is None
+    with main.db() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM risk_events").fetchone()["c"] == 0
+
+
+def test_device_event_cursor_returns_only_new_events_in_order(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "event_cursor.db")
+    main.init_db()
+    first = main.store_event(main.EventCreate(
+        device_id="cane_real", lat=31.0, lng=121.0,
+        risk_type="front_obstacle", risk_level="medium",
+        sensor="tof_front", extra_json={"source": "auto_detected_once_per_place"},
+    ))
+    second = main.store_event(main.EventCreate(
+        device_id="cane_real", lat=31.0, lng=121.0,
+        risk_type="ground_step", risk_level="high",
+        sensor="tof_down", extra_json={"source": "auto_detected_once_per_place"},
+    ))
+    main.store_event(main.EventCreate(
+        device_id="another_cane", lat=31.0, lng=121.0,
+        risk_type="sos", risk_level="high", sensor="sos_button",
+    ))
+
+    response = main.events_since(device_id="cane_real", sinceId=first["id"], limit=50)
+    assert [event["id"] for event in response["events"]] == [second["id"]]
+    assert response["events"][0]["source"] == "auto_detected_once_per_place"
+    assert response["lastId"] == second["id"]
+
+
 def test_sos_becomes_historical_risk_point(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "sos_history.db")
     main.init_db()

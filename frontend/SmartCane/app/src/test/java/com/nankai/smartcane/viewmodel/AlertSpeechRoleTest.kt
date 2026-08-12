@@ -1,10 +1,30 @@
 package com.nankai.smartcane.viewmodel
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AlertSpeechRoleTest {
+
+    @Test
+    fun eventSpeechGateAllowsEachPositiveEventOnlyOnce() {
+        val gate = EventSpeechGate()
+
+        assertTrue(gate.tryAcquire(41))
+        assertFalse(gate.tryAcquire(41))
+        assertTrue(gate.tryAcquire(42))
+        assertFalse(gate.tryAcquire(0))
+    }
+
+    @Test
+    fun onlyFreshServerEventsCanBeSpoken() {
+        assertTrue(isFreshDeviceEvent("2026-08-12T08:00:05Z", "2026-08-12T08:00:10Z"))
+        assertFalse(isFreshDeviceEvent("2026-08-12T07:59:00Z", "2026-08-12T08:00:10Z"))
+        assertFalse(isFreshDeviceEvent("not-a-time", "2026-08-12T08:00:10Z"))
+    }
+
     @Test
     fun companionSosUsesCaregiverPrompt() {
         assertEquals(

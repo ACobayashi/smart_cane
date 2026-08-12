@@ -87,7 +87,22 @@ data class LatestRiskEventDto(
     val timestamp: String,
     val voicePrompt: String = "",
     val riskScore: Double? = null,
-    val distanceMeters: Double? = null
+    val distanceMeters: Double? = null,
+    val source: String = "unknown"
+)
+
+data class DeviceEventsResponseDto(
+    val success: Boolean,
+    val deviceId: String,
+    val sinceId: Int,
+    val lastId: Int,
+    val serverTime: String,
+    val events: List<LatestRiskEventDto>
+)
+
+data class LatestDeviceEventResponseDto(
+    val found: Boolean,
+    val event: LatestRiskEventDto?
 )
 
 data class EmergencyAlertDto(
@@ -381,6 +396,41 @@ object SmartCaneApiClient {
         try {
             val path = if (deviceId.isNullOrBlank()) "/api/device-state/latest" else "/api/device-state/latest?device_id=${deviceId.urlEncode()}"
             ApiResult.Success(getJson(path).toDeviceStateResponseDto())
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
+    suspend fun getLatestDeviceEvent(deviceId: String): ApiResult<LatestDeviceEventResponseDto> = withContext(Dispatchers.IO) {
+        try {
+            val path = "/api/events/latest?device_id=${deviceId.urlEncode()}"
+            val response = getJson(path)
+            ApiResult.Success(
+                LatestDeviceEventResponseDto(
+                    found = response.optBoolean("found", false),
+                    event = response.optJSONObject("event")?.toLatestRiskEventDto()
+                )
+            )
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
+    suspend fun getDeviceEventsSince(deviceId: String, sinceId: Int): ApiResult<DeviceEventsResponseDto> = withContext(Dispatchers.IO) {
+        try {
+            val path = "/api/events/since?device_id=${deviceId.urlEncode()}&sinceId=$sinceId"
+            val response = getJson(path)
+            val events = response.optJSONArray("events") ?: JSONArray()
+            ApiResult.Success(
+                DeviceEventsResponseDto(
+                    success = response.optBoolean("success", false),
+                    deviceId = response.optString("deviceId", deviceId),
+                    sinceId = response.optInt("sinceId", sinceId),
+                    lastId = response.optInt("lastId", sinceId),
+                    serverTime = response.optString("serverTime"),
+                    events = List(events.length()) { index -> events.getJSONObject(index).toLatestRiskEventDto() }
+                )
+            )
         } catch (exception: Exception) {
             ApiResult.Failure(exception.toUserMessage())
         }
@@ -955,7 +1005,8 @@ object SmartCaneApiClient {
             timestamp = optString("timestamp"),
             voicePrompt = optString("voicePrompt", optString("voice_prompt", messageValue)),
             riskScore = nullableDouble("riskScore") ?: nullableDouble("risk_score"),
-            distanceMeters = nullableDouble("distanceM") ?: nullableDouble("distance_m")
+            distanceMeters = nullableDouble("distanceM") ?: nullableDouble("distance_m"),
+            source = optString("source", optString("sensor", "unknown"))
         )
     }
 
