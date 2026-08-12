@@ -78,12 +78,25 @@ static int approachStartFrontCm = 0;
 static unsigned long lastApproachFeedbackMs = 0;
 static unsigned long lastSerialCharMs = 0;
 static String activeFallEventId;
+static uint32_t localCueSequence = 0;
 
 static String newFallEventId() {
   uint64_t chip = ESP.getEfuseMac();
   char value[48];
   snprintf(value, sizeof(value), "%04X%08lX-%lu",
            (uint16_t)(chip >> 32), (unsigned long)chip, millis());
+  return String(value);
+}
+
+static String newLocalCueId() {
+  uint64_t chip = ESP.getEfuseMac();
+  ++localCueSequence;
+  char value[64];
+  snprintf(value, sizeof(value), "cue-%04X%08lX-%lu-%lu",
+           (uint16_t)(chip >> 32),
+           (unsigned long)chip,
+           millis(),
+           (unsigned long)localCueSequence);
   return String(value);
 }
 
@@ -110,6 +123,10 @@ static void processCommand(String command);
 static void printSensorRiskSnapshot();
 static bool recordPathPointIfMoved(const RiskState &risk);
 static void publishRiskEventIfNeeded(const RiskState &risk);
+static bool shouldBuzzForRisk(const RiskState &risk);
+static void publishLocalCueEvent(const RiskState &risk,
+                                 bool cueRepeat,
+                                 bool buzzerRequested);
 static RiskState stabilizeRisk(const RiskState &measuredRisk);
 static unsigned long telemetryIntervalForRisk(const RiskState &risk);
 
@@ -564,6 +581,24 @@ static FeedbackCue cueForRisk(const RiskState &risk) {
   return CUE_OBSTACLE;
 }
 
+static bool shouldBuzzForRisk(const RiskState &risk) {
+  bool closeObstacleBuzz =
+      (strcmp(risk.riskType, "front_obstacle") == 0 &&
+       risk.distanceMm > 0 &&
+       risk.distanceMm <= SMARTCANE_FRONT_BUZZ_CM * 10) ||
+      ((strcmp(risk.riskType, "left_obstacle") == 0 ||
+        strcmp(risk.riskType, "right_obstacle") == 0) &&
+       risk.distanceMm > 0 &&
+       risk.distanceMm <= SMARTCANE_SIDE_BUZZ_CM * 10);
+  return isDistanceRiskType(risk.riskType) ||
+         risk.level == RISK_HIGH ||
+         strcmp(risk.riskType, "ground_drop") == 0 ||
+         strcmp(risk.riskType, "ground_step") == 0 ||
+         strcmp(risk.riskType, "down_no_target") == 0 ||
+         strcmp(risk.riskType, "down_sensor_unavailable") == 0 ||
+         closeObstacleBuzz;
+}
+
 static void applyFeedbackForRisk(const RiskState &risk, bool force = false, bool allowBuzzer = true) {
   if (fallLockActive()) {
     return;
@@ -576,22 +611,45 @@ static void applyFeedbackForRisk(const RiskState &risk, bool force = false, bool
     return;
   }
   lastFeedbackMs = now;
-  bool closeObstacleBuzz =
-      (strcmp(risk.riskType, "front_obstacle") == 0 &&
-       risk.distanceMm > 0 &&
-       risk.distanceMm <= SMARTCANE_FRONT_BUZZ_CM * 10) ||
-      ((strcmp(risk.riskType, "left_obstacle") == 0 ||
-        strcmp(risk.riskType, "right_obstacle") == 0) &&
-       risk.distanceMm > 0 &&
-       risk.distanceMm <= SMARTCANE_SIDE_BUZZ_CM * 10);
-  bool shouldBuzz = isDistanceRiskType(risk.riskType) ||
-                    risk.level == RISK_HIGH ||
-                    strcmp(risk.riskType, "ground_drop") == 0 ||
-                    strcmp(risk.riskType, "ground_step") == 0 ||
-                    strcmp(risk.riskType, "down_no_target") == 0 ||
-                    strcmp(risk.riskType, "down_sensor_unavailable") == 0 ||
-                    closeObstacleBuzz;
-  runCue(cueForRisk(risk), allowBuzzer && shouldBuzz);
+  runCue(cueForRisk(risk), allowBuzzer && shouldBuzzForRisk(risk));
+}
+
+static void publishLocalCueEvent(const RiskState &risk,
+                                 bool cueRepeat,
+                                 bool buzzerRequested) {
+  // This function is deliberately called after runCue().  It is the only
+  // ordinary-risk event the phone should use for speech; detection telemetry
+  // remains available separately and must not be read back as a new alert.
+  const unsigned long cueAtMs = millis();
+  String cueId = newLocalCueId();
+  const bool vibrationRequested = cueForRisk(risk) != CUE_NONE;
+
+  Serial.print(F("[CUE_EVENT] id="));
+  Serial.print(cueId);
+  Serial.print(F(" type="));
+  Serial.print(risk.riskType);
+  Serial.print(F(" direction="));
+  Serial.print(risk.direction);
+  Serial.print(F(" repeat="));
+  Serial.print(cueRepeat ? F("yes") : F("no"));
+  Serial.print(F(" buzzer="));
+  Serial.print(buzzerRequested ? F("yes") : F("no"));
+  Serial.print(F(" vibration="));
+  Serial.println(vibrationRequested ? F("yes") : F("no"));
+
+  if (!networkMode || !networkAvailable()) {
+    Serial.println(F("[CUE_EVENT] not uploaded: network unavailable"));
+    return;
+  }
+
+  uploadLocalCueEvent(risk,
+                      distances,
+                      location,
+                      cueId.c_str(),
+                      cueAtMs,
+                      cueRepeat,
+                      buzzerRequested,
+                      vibrationRequested);
 }
 
 static void repeatLastCue() {
@@ -715,7 +773,13 @@ static void handleFallEvent(const ImuFallState &fall) {
   vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, SMARTCANE_FALL_ALERT_VIB_MS);
   recordPathPoint(fallRisk);
 
-  String extra = String("{\"source\":\"bmi270_imu\",\"notify\":\"blind_and_companion\",\"fall_stage\":\"fall_confirmed\",\"imu_stage\":\"") +
+  Serial.print(F("[CUE_EVENT] id="));
+  Serial.print(activeFallEventId);
+  Serial.println(F(" type=fall_detected direction=stop repeat=no buzzer=yes vibration=yes"));
+
+  String extra = String("{\"source\":\"bmi270_imu\",\"notify\":\"blind_and_companion\",\"schema\":\"smartcane.local_cue.v1\",\"cue_source\":\"formal_fall\",\"is_local_cue\":true,\"cue_id\":\"") +
+                 activeFallEventId + "\",\"cue_at_ms\":" + String(fallRisk.detectedAtMs) +
+                 ",\"cue_repeat\":false,\"buzzer_requested\":true,\"vibration_requested\":true,\"fall_stage\":\"fall_confirmed\",\"imu_stage\":\"") +
                  fall.stage + "\",\"total_g\":" + String(fall.totalG, 2) +
                  ",\"gyro_dps\":" + String(fall.gyroDps, 1) +
                  ",\"angle_delta_deg\":" + String(fall.angleChangeDeg, 1) +
@@ -1439,6 +1503,7 @@ void loop() {
       bool persistent = false;
       if (updateRiskFeedbackGate(currentRisk, persistent)) {
         applyFeedbackForRisk(currentRisk, true, true);
+        publishLocalCueEvent(currentRisk, persistent, shouldBuzzForRisk(currentRisk));
       }
     }
   }

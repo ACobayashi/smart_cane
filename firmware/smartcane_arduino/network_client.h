@@ -25,6 +25,17 @@ bool uploadEvent(const RiskState &risk,
                  const DistanceReadings &distances,
                  const LocationData &location,
                  const char *extra);
+// Sent only after the firmware has actually dispatched a local risk cue.
+// The cue metadata is stored in risk-events.extra_json so older servers keep
+// accepting the request while clients migrate to cue_id-based speech.
+bool uploadLocalCueEvent(const RiskState &risk,
+                         const DistanceReadings &distances,
+                         const LocationData &location,
+                         const char *cueId,
+                         unsigned long cueAtMs,
+                         bool cueRepeat,
+                         bool buzzerRequested,
+                         bool vibrationRequested);
 bool uploadSensorFrame(const RiskState &risk,
                        const DistanceReadings &distances,
                        const LocationData &location,

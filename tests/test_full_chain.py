@@ -570,6 +570,13 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "patternActive = false;" in (ROOT / "firmware" / "smartcane_arduino" / "buzzer.cpp").read_text(encoding="utf-8")
     network = (ROOT / "firmware" / "smartcane_arduino" / "network_client.cpp").read_text(encoding="utf-8")
     assert "if (risk.groundBaselineCm >= 0.0f)" in network
+    assert "uploadLocalCueEvent" in network
+    assert 'cue["is_local_cue"] = true;' in network
+    assert 'cue["cue_id"] = cueId;' in network
+    assert 'cue["cue_repeat"] = cueRepeat;' in network
+    assert "[CUE_EVENT] id=" in sketch
+    assert "publishLocalCueEvent(currentRisk, persistent, shouldBuzzForRisk(currentRisk));" in sketch
+    assert 'cue_source\\\":\\\"formal_fall' in sketch
 
 
 def test_medium_and_high_obstacles_can_become_shared_risk_points():
