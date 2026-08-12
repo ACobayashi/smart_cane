@@ -846,9 +846,9 @@ class SmartCaneAppController private constructor(
             riskType.contains("front") -> state.frontCm?.let { "前方${it}厘米有障碍" }
             riskType.contains("left") -> state.leftCm?.let { "左侧${it}厘米有障碍，请向右保持距离" }
             riskType.contains("right") -> state.rightCm?.let { "右侧${it}厘米有障碍，请向左保持距离" }
-            riskType == "ground_step" && state.direction.equals("up", ignoreCase = true) -> "前方上台阶，请立即停下并用盲杖确认"
-            riskType == "ground_step" && state.direction.equals("down", ignoreCase = true) -> "前方下台阶，请立即停下并用盲杖确认"
-            riskType.contains("ground") || riskType.contains("drop") -> "前方存在较大落差，请立即停下并探测台阶"
+            riskType == "ground_step" && state.direction.equals("up", ignoreCase = true) -> "前方上台阶，注意抬脚，用盲杖确认"
+            riskType == "ground_step" && state.direction.equals("down", ignoreCase = true) -> "前方下台阶，请减速，用盲杖确认"
+            riskType.contains("ground") || riskType.contains("drop") -> "前方较大落差，请立即停下，用盲杖确认"
             riskType.contains("down_sensor") -> "下视传感器异常，请停下检查"
             riskType.contains("obstacle") -> nearestHardwareObstaclePrompt(state)
             else -> state.voicePrompt.takeIf { it.isNotBlank() }
