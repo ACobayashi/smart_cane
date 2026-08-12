@@ -3,17 +3,44 @@
 #include "config.h"
 #include "i2c_bus.h"
 
-static unsigned long stopAtMs[3] = {0, 0, 0};
+#ifndef SMARTCANE_VIB_MOTOR_COUNT
+#define SMARTCANE_VIB_MOTOR_COUNT 3
+#endif
+
+#ifndef SMARTCANE_VIB_PRIMARY_CHANNEL
+#define SMARTCANE_VIB_PRIMARY_CHANNEL SMARTCANE_VIB_LEFT_CHANNEL
+#endif
+
+#ifndef SMARTCANE_VIB_SINGLE_PULSE_MS
+#define SMARTCANE_VIB_SINGLE_PULSE_MS 150
+#endif
+
+#ifndef SMARTCANE_VIB_SINGLE_PULSE_GAP_MS
+#define SMARTCANE_VIB_SINGLE_PULSE_GAP_MS 90
+#endif
+
+static const uint8_t LOGICAL_MOTOR_COUNT = 3;
+
+static unsigned long stopAtMs[LOGICAL_MOTOR_COUNT] = {0, 0, 0};
 static bool pcaReady = false;
 static bool pcaDetectedOnTca = SMARTCANE_PCA9685_ON_TCA;
 static int8_t pcaDetectedChannel = SMARTCANE_TCA_CH_PCA9685;
 static uint8_t pcaDetectedAddress = SMARTCANE_PCA9685_ADDR;
 
-static const uint8_t motorChannels[3] = {
+static const uint8_t motorChannels[LOGICAL_MOTOR_COUNT] = {
   SMARTCANE_VIB_LEFT_CHANNEL,
   SMARTCANE_VIB_RIGHT_CHANNEL,
   SMARTCANE_VIB_CENTER_CHANNEL
 };
+
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+static unsigned long singlePulseNextAtMs = 0;
+static uint8_t singlePulseRemaining = 0;
+static uint8_t singlePulseLevel = 0;
+static uint16_t singlePulseOnMs = 0;
+static uint16_t singlePulseOffMs = 0;
+static bool singlePulseOn = false;
+#endif
 
 static const uint8_t PCA9685_MODE1 = 0x00;
 static const uint8_t PCA9685_MODE2 = 0x01;
@@ -256,21 +283,74 @@ static void writeMotorChannel(uint8_t channel, uint16_t pwmValue) {
   pcaSetPwm(channel, 0, pwmValue);
 }
 
+static uint8_t channelForMotorIndex(uint8_t index) {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  (void)index;
+  return SMARTCANE_VIB_PRIMARY_CHANNEL;
+#else
+  return motorChannels[index];
+#endif
+}
+
+static uint8_t stopIndexForMotorIndex(uint8_t index) {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  (void)index;
+  return 0;
+#else
+  return index;
+#endif
+}
+
 static void setMotor(uint8_t index, uint8_t level) {
-  if (index >= 3) {
+  if (index >= LOGICAL_MOTOR_COUNT) {
     return;
   }
   if (pcaReady) {
-    writeMotorChannel(motorChannels[index], levelToPwm(level));
+    writeMotorChannel(channelForMotorIndex(index), levelToPwm(level));
   }
 }
 
-static void vibrateIndex(uint8_t index, uint8_t level, uint16_t durationMs) {
-  if (!pcaReady || index >= 3) {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+static void clearSinglePulsePattern() {
+  singlePulseNextAtMs = 0;
+  singlePulseRemaining = 0;
+  singlePulseLevel = 0;
+  singlePulseOnMs = 0;
+  singlePulseOffMs = 0;
+  singlePulseOn = false;
+}
+
+static void startSinglePulsePattern(uint8_t pulses, uint8_t level, uint16_t onMs, uint16_t offMs) {
+  if (!pcaReady || pulses == 0 || level == 0 || onMs == 0) {
+    clearSinglePulsePattern();
+    setMotor(0, 0);
     return;
   }
+
+  for (uint8_t i = 0; i < LOGICAL_MOTOR_COUNT; ++i) {
+    stopAtMs[i] = 0;
+  }
+
+  singlePulseRemaining = pulses;
+  singlePulseLevel = level;
+  singlePulseOnMs = onMs;
+  singlePulseOffMs = offMs;
+  singlePulseOn = true;
+  singlePulseNextAtMs = millis() + onMs;
+  setMotor(0, level);
+}
+#endif
+
+static void vibrateIndex(uint8_t index, uint8_t level, uint16_t durationMs) {
+  if (!pcaReady || index >= LOGICAL_MOTOR_COUNT) {
+    return;
+  }
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  startSinglePulsePattern(1, level, durationMs, SMARTCANE_VIB_SINGLE_PULSE_GAP_MS);
+#else
   setMotor(index, level);
-  stopAtMs[index] = millis() + durationMs;
+  stopAtMs[stopIndexForMotorIndex(index)] = millis() + durationMs;
+#endif
 }
 
 bool vibrationBegin() {
@@ -307,24 +387,49 @@ bool vibrationBegin() {
 #else
   Serial.print(F("root"));
 #endif
-  Serial.print(F(" channels L/R/C="));
+  Serial.print(F(" mode="));
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  Serial.print(F("single CH"));
+  Serial.println(SMARTCANE_VIB_PRIMARY_CHANNEL);
+#else
+  Serial.print(F("channels L/R/C="));
   Serial.print(SMARTCANE_VIB_LEFT_CHANNEL);
   Serial.print(F("/"));
   Serial.print(SMARTCANE_VIB_RIGHT_CHANNEL);
   Serial.print(F("/"));
   Serial.println(SMARTCANE_VIB_CENTER_CHANNEL);
+#endif
   return true;
 #endif
 }
 
 void vibrationUpdate() {
   unsigned long now = millis();
-  for (uint8_t i = 0; i < 3; ++i) {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  if (singlePulseNextAtMs != 0 && (long)(now - singlePulseNextAtMs) >= 0) {
+    if (singlePulseOn) {
+      setMotor(0, 0);
+      if (singlePulseRemaining <= 1) {
+        clearSinglePulsePattern();
+      } else {
+        singlePulseRemaining--;
+        singlePulseOn = false;
+        singlePulseNextAtMs = now + singlePulseOffMs;
+      }
+    } else {
+      setMotor(0, singlePulseLevel);
+      singlePulseOn = true;
+      singlePulseNextAtMs = now + singlePulseOnMs;
+    }
+  }
+#else
+  for (uint8_t i = 0; i < LOGICAL_MOTOR_COUNT; ++i) {
     if (stopAtMs[i] != 0 && (long)(now - stopAtMs[i]) >= 0) {
       stopAtMs[i] = 0;
       setMotor(i, 0);
     }
   }
+#endif
 }
 
 bool vibrationReady() {
@@ -335,7 +440,11 @@ const char *vibrationModeName() {
 #if !SMARTCANE_VIB_ENABLED
   return "disabled";
 #else
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  return pcaReady ? "pca9685-tca6-single-ch0" : "pca9685-not-found";
+#else
   return pcaReady ? "pca9685-tca6-ch0-1-2" : "pca9685-not-found";
+#endif
 #endif
 }
 
@@ -352,34 +461,62 @@ void vibrateCenter(uint8_t level, uint16_t durationMs) {
 }
 
 void vibrateAll(uint8_t level, uint16_t durationMs) {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  vibrateNoticeOnce();
+#else
   vibrateLeft(level, durationMs);
   vibrateRight(level, durationMs);
   vibrateCenter(level, durationMs);
+#endif
+}
+
+void vibrateNoticeOnce() {
+  vibrateIndex(0, SMARTCANE_VIB_LEVEL_MEDIUM, SMARTCANE_VIB_SINGLE_PULSE_MS);
 }
 
 void vibrationStopAll() {
-  for (uint8_t i = 0; i < 3; ++i) {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  clearSinglePulsePattern();
+  for (uint8_t i = 0; i < LOGICAL_MOTOR_COUNT; ++i) {
+    stopAtMs[i] = 0;
+  }
+  setMotor(0, 0);
+#else
+  for (uint8_t i = 0; i < LOGICAL_MOTOR_COUNT; ++i) {
     stopAtMs[i] = 0;
     setMotor(i, 0);
   }
+#endif
 }
 
 bool vibrationPcaIicMotor(uint8_t motorIndex, uint16_t durationMs) {
-  if (motorIndex >= 3) {
+  if (motorIndex >= LOGICAL_MOTOR_COUNT) {
     return false;
   }
   bool initOk = pcaReady || pcaConfiguredIicInit();
-  uint8_t channel = motorChannels[motorIndex];
-  uint8_t err = pcaRawSetPwm(channel, 0, SMARTCANE_PCA9685_MIN_RUN_PWM);
+  uint8_t channel = channelForMotorIndex(motorIndex);
+  uint8_t err = initOk ? pcaRawSetPwm(channel, 0, SMARTCANE_PCA9685_MIN_RUN_PWM) : 255;
   Serial.print(F("[VIB] motor_index="));
   Serial.print(motorIndex + 1);
   Serial.print(F(" pca_channel="));
   Serial.print(channel);
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  Serial.print(F(" single_ch0_pulses="));
+  Serial.print(motorIndex + 1);
+#endif
   Serial.print(F(" setPWM(0,2048) err="));
   Serial.println(err);
   if (initOk && err == 0) {
     pcaReady = true;
-    stopAtMs[motorIndex] = millis() + durationMs;
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+    (void)motorIndex;
+    startSinglePulsePattern(1,
+                            SMARTCANE_VIB_LEVEL_MEDIUM,
+                            SMARTCANE_VIB_SINGLE_PULSE_MS,
+                            SMARTCANE_VIB_SINGLE_PULSE_GAP_MS);
+#else
+    stopAtMs[stopIndexForMotorIndex(motorIndex)] = millis() + durationMs;
+#endif
     return true;
   }
   return false;
@@ -388,7 +525,19 @@ bool vibrationPcaIicMotor(uint8_t motorIndex, uint16_t durationMs) {
 bool vibrationPcaIicStop() {
   bool anyOk = false;
   bool initOk = pcaReady || pcaConfiguredIicInit();
-  for (uint8_t i = 0; i < 3; ++i) {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  clearSinglePulsePattern();
+  for (uint8_t i = 0; i < LOGICAL_MOTOR_COUNT; ++i) {
+    stopAtMs[i] = 0;
+  }
+  uint8_t err = pcaRawSetPwm(SMARTCANE_VIB_PRIMARY_CHANNEL, 0, 0);
+  anyOk = err == 0;
+  Serial.print(F("[VIB] stop single pca_channel="));
+  Serial.print(SMARTCANE_VIB_PRIMARY_CHANNEL);
+  Serial.print(F(" err="));
+  Serial.println(err);
+#else
+  for (uint8_t i = 0; i < LOGICAL_MOTOR_COUNT; ++i) {
     stopAtMs[i] = 0;
     uint8_t err = pcaRawSetPwm(motorChannels[i], 0, 0);
     anyOk = anyOk || (err == 0);
@@ -397,29 +546,54 @@ bool vibrationPcaIicStop() {
     Serial.print(F(" err="));
     Serial.println(err);
   }
+#endif
   return initOk && anyOk;
 }
 
 void patternObstacle() {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  vibrateNoticeOnce();
+#else
   vibrateCenter(SMARTCANE_VIB_LEVEL_MEDIUM, 180);
+#endif
 }
 
 void patternGroundDrop() {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  vibrateNoticeOnce();
+#else
   vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, 300);
+#endif
 }
 
 void patternTurnLeft() {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  vibrateNoticeOnce();
+#else
   vibrateLeft(SMARTCANE_VIB_LEVEL_MEDIUM, 220);
+#endif
 }
 
 void patternTurnRight() {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  vibrateNoticeOnce();
+#else
   vibrateRight(SMARTCANE_VIB_LEVEL_MEDIUM, 220);
+#endif
 }
 
 void patternStop() {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  vibrateNoticeOnce();
+#else
   vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, 260);
+#endif
 }
 
 void patternSos() {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  vibrateNoticeOnce();
+#else
   vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, 350);
+#endif
 }

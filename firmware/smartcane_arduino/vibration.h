@@ -10,6 +10,7 @@ void vibrateLeft(uint8_t level, uint16_t durationMs);
 void vibrateRight(uint8_t level, uint16_t durationMs);
 void vibrateCenter(uint8_t level, uint16_t durationMs);
 void vibrateAll(uint8_t level, uint16_t durationMs);
+void vibrateNoticeOnce();
 void vibrationStopAll();
 bool vibrationPcaIicMotor(uint8_t motorIndex, uint16_t durationMs);
 bool vibrationPcaIicStop();

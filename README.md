@@ -14,6 +14,8 @@ The system implements a practical ESP32-C5 multi-device collaborative smart cane
 
 Local safety remains rule-based and offline-capable. Network, deep-risk scoring, and LLM advice only enrich phone/backend feedback and do not replace local obstacle avoidance.
 
+For the replacement PCA9685 motor board wiring, see `docs/pca9685_motor_wiring.md`.
+
 Private reference PDFs and API keys must not be committed or uploaded.
 
 ## Repository Structure
@@ -55,7 +57,7 @@ docs/
 | 4 x VL53L1X | Front, left, right, and down distance sensing |
 | MPR121 / HW-017 | Capacitive touch handle |
 | PCA9685 PWM/Servo Shield | Blue motor PWM board on TCA `CH6`, address `0x40` |
-| 3 x 1027 3V vibration motors | Left, right, and center tactile feedback through PCA9685 channels |
+| 1 x 1027 3V vibration motor for current bench test | Single tactile feedback through PCA9685 `CH0`; firmware can be switched back to three motors later |
 | Active buzzer | High-risk, ground-drop, and SOS alert |
 | Physical button | Short press requests Android voice input; long press triggers SOS |
 
@@ -72,9 +74,7 @@ Recommended current bench wiring from the Arduino screenshots:
 | Down VL53L1X | TCA `CH5` |
 | MPR121 | TCA `CH7`, address `0x5A` |
 | PCA9685 | TCA `CH6`, address `0x40` |
-| Left vibration signal | PCA9685 `CH0` PWM/SIG, red to `V+`, black/brown to `GND` |
-| Right vibration signal | PCA9685 `CH1` PWM/SIG, red to `V+`, black/brown to `GND` |
-| Center vibration signal | PCA9685 `CH2` PWM/SIG, red to `V+`, black/brown to `GND` |
+| Current vibration motor | PCA9685 `CH0` PWM/SIG, red to `V+`, black/brown to `GND` |
 | Buzzer | `GPIO4` |
 | Physical button | `GPIO5`, active low; short press `voice_request`, long press `sos` |
 
@@ -86,7 +86,7 @@ Power note for the standalone cane:
 - PCA9685 blue motor board: motor `V+` can use the separate 3.7V battery already wired for the vibration motors.
 - The ESP32 GND, PCA9685 logic GND, and motor battery GND must be common ground.
 - PCA9685 logic `VCC` should be tied to ESP32 3.3V logic power; do not power ESP32 logic from the motor `V+` rail.
-- The actual motor plugs are on blue PCA9685 positions `0/1/2`: left/right/center.
+- The current bench motor plug is on blue PCA9685 position `0` / `CH0`; the firmware encodes all cues as pulse patterns on that one motor.
 
 ## Arduino Libraries
 

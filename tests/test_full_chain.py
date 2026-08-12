@@ -478,7 +478,9 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "SMARTCANE_DOWN_NO_TARGET_CM 400" in config
     assert "heightDeltaCm >= SMARTCANE_DOWN_DROP_DELTA_CM" in firmware
     assert "cm >= SMARTCANE_DOWN_NO_TARGET_CM" in firmware
-    assert "fall_pending" in sketch and "fall_detected" in sketch
+    assert "FALL_STAGE_CANDIDATE" in (ROOT / "firmware" / "smartcane_arduino" / "imu_fall.cpp").read_text(encoding="utf-8")
+    assert "SMARTCANE_FALL_CONFIRM_MS 2000" in config
+    assert "fall_confirmed_two_of_three" in sketch and "fall_detected" in sketch
     assert "fallRiskSuppressUntilMs" in sketch
 
 
