@@ -741,7 +741,7 @@ class SmartCaneAppController private constructor(
                             }
                         }
                         if (it.fallPending && !wasPending) {
-                            maybeSpeakFallEpisode("疑似跌倒，按键可取消。")
+                            maybeSpeakFallEpisode("检测到疑似跌倒，请恢复正常握杖姿态后继续使用。")
                         }
                         maybeSpeakHardwareRisk(it)
                     }
@@ -778,11 +778,7 @@ class SmartCaneAppController private constructor(
             return
         }
         if (riskType.contains("left")) {
-            val limit = when (level) {
-                "high" -> Int.MAX_VALUE
-                "medium" -> 35
-                else -> 55
-            }
+            val limit = 35
             if (state.leftCm == null) {
                 hardwareRiskEpisode.observeUnknown()
                 return
@@ -793,11 +789,7 @@ class SmartCaneAppController private constructor(
             }
         }
         if (riskType.contains("right")) {
-            val limit = when (level) {
-                "high" -> Int.MAX_VALUE
-                "medium" -> 35
-                else -> 55
-            }
+            val limit = 35
             if (state.rightCm == null) {
                 hardwareRiskEpisode.observeUnknown()
                 return
@@ -811,7 +803,7 @@ class SmartCaneAppController private constructor(
             val limit = when (level) {
                 "high" -> Int.MAX_VALUE
                 "medium" -> 40
-                else -> 80
+                else -> 105
             }
             if (state.frontCm == null) {
                 hardwareRiskEpisode.observeUnknown()
@@ -858,7 +850,9 @@ class SmartCaneAppController private constructor(
             riskType.contains("front") -> state.frontCm?.let { "前方${it}厘米有障碍" }
             riskType.contains("left") -> state.leftCm?.let { "左侧${it}厘米有障碍，请向右保持距离" }
             riskType.contains("right") -> state.rightCm?.let { "右侧${it}厘米有障碍，请向左保持距离" }
-            riskType.contains("ground") || riskType.contains("drop") -> "前方存在落差，请立即停下并探测台阶"
+            riskType == "ground_step" && state.direction.equals("up", ignoreCase = true) -> "前方上台阶，请立即停下并用盲杖确认"
+            riskType == "ground_step" && state.direction.equals("down", ignoreCase = true) -> "前方下台阶，请立即停下并用盲杖确认"
+            riskType.contains("ground") || riskType.contains("drop") -> "前方存在较大落差，请立即停下并探测台阶"
             riskType.contains("down_sensor") -> "下视传感器异常，请停下检查"
             riskType.contains("obstacle") -> nearestHardwareObstaclePrompt(state)
             else -> state.voicePrompt.takeIf { it.isNotBlank() }
@@ -1057,24 +1051,6 @@ class SmartCaneAppController private constructor(
 
     fun speakText(text: String) {
         speakText(text, listenAfter = false, priority = inferTtsPriority(text))
-    }
-
-    fun cancelPendingFall() {
-        if (!_uiState.value.fallPending) return
-        val deviceId = currentCaneDeviceId()
-        if (deviceId.isBlank()) {
-            _uiState.update { it.copy(message = "未绑定真实盲杖，无法发送取消指令") }
-            return
-        }
-        scope.launch {
-            when (val result = SmartCaneApiClient.cancelPendingFall(deviceId)) {
-                is ApiResult.Success -> if (result.data) {
-                    _uiState.update { it.copy(fallPending = false, fallStage = "slow_fall_cancel_requested", message = "已发送跌倒取消请求") }
-                    speakText("已取消。", priority = TtsPriority.EMERGENCY)
-                }
-                is ApiResult.Failure -> _uiState.update { it.copy(message = "取消失败：${result.message}") }
-            }
-        }
     }
 
     private fun speakText(text: String, priority: TtsPriority, bypassTextCooldown: Boolean = false) {

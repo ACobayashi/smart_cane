@@ -7,5 +7,6 @@ RiskState calculateRisk(const DistanceReadings &distances, const NearbyRiskSumma
                         const ImuFallState &imu);
 void resetGroundStepDetector();
 int groundBaselineDownCm();
+const char *groundDetectorState();
 const char *riskDirectionLabel(const RiskState &risk);
 void printRiskState(const RiskState &risk);

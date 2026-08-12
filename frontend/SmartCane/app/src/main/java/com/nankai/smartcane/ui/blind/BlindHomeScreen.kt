@@ -77,7 +77,6 @@ fun BlindHomeScreen(
     onRepeat: () -> Unit,
     onSos: () -> Unit,
     onDismissAlert: () -> Unit,
-    onCancelFall: () -> Unit,
     onNavigationPreference: (String) -> Unit,
     onOpenSettings: () -> Unit
 ) {
@@ -171,11 +170,15 @@ fun BlindHomeScreen(
             Spacer(Modifier.height(18.dp))
             if (fallPending) {
                 OutlinedButton(
-                    onClick = onCancelFall,
+                    onClick = {},
+                    enabled = false,
                     modifier = Modifier.fillMaxWidth().height(58.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFECACA))
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = Color(0xFFFECACA),
+                        disabledContentColor = Color(0xFFFECACA)
+                    )
                 ) {
-                    Text("取消疑似跌倒", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                    Text("跌倒保护已锁定，请恢复正常握杖姿态", fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 }
                 Spacer(Modifier.height(10.dp))
             }

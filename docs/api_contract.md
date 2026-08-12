@@ -91,6 +91,8 @@ Recommended values:
 - `keep_left`
 - `keep_right`
 - `none`
+- `up` (ground step only)
+- `down` (ground step/drop only)
 
 ## Sensor Values
 
@@ -285,11 +287,10 @@ Preferred full-chain frame upload from the ESP32-C5 or Android integration tools
 
 Current slanted-cane thresholds:
 
-- Front: low-risk distance warning below `110cm`; readings below `35cm` get stronger local buzzer/vibration but are still stored as low-risk distance events.
-- Left/right side: warning below `20cm`, danger below `12cm`, because normal sweeping can touch nearby objects.
-- Front sensor: `front_obstacle` is low risk below `110cm`; near-collision readings below `35cm` are urgent locally but low-weight on the shared map.
-- Down sensor: `down_obstacle` low risk below `20cm`; `20-90cm` is normal; `ground_drop` / `ground_step` medium risk only when the down-facing valid distance is strictly above `90cm`.
-- Risk tier policy: SOS and `fall_detected` are `high`; `ground_drop` and `ground_step` are `medium`; ordinary ToF sweep risks (`front_obstacle`, `left_obstacle`, `right_obstacle`, `down_obstacle`) are `low`.
+- Front: warning at `<=105cm`, danger at `<=40cm`.
+- Left/right side: enter an obstacle alert only at `<=35cm`; normal sweeping above that never becomes a side alert. The separate `80cm` side-safe distance is used only to choose a safer turn around a front obstacle.
+- Down sensor: `ground_step` / `ground_drop` are firmware-confirmed posture-compensated ground-state events. `ground_step.direction` is `up` or `down`; no fixed absolute down-distance rule exists.
+- Risk tier policy: SOS and `fall_detected` are `high`; `ground_drop` and `ground_step` are `medium`; ordinary front/side ToF sweep risks are `low`.
 - Ordinary one-shot ToF obstacles are useful for immediate phone feedback but have low `map_weight`; fall/SOS have the highest map weight, ground drop and user mark are stored as collaborative map points, and prolonged/approaching obstacle alerts use small map weights.
 
 ```json
@@ -534,8 +535,7 @@ Optional simulator-compatible upload:
 
 A should upload:
 
-- `ground_drop` immediately when down-facing ToF detects a clear drop/pit.
-- `down_obstacle` below `20cm`; no step/drop alarm from `20-90cm`; `ground_drop` / `ground_step` only when down-facing distance is strictly above `90cm` after confirmation.
+- `ground_step + up` announces an upward step; `ground_step + down` announces a downward step; `ground_drop` announces a larger downward drop. The backend must not infer any of these from absolute `down_cm`.
 - `front_obstacle` / `left_obstacle` / `right_obstacle` as low-risk distance events after local de-duplication; they keep a small map weight.
 - `user_mark` when touch electrode 1 is long-pressed.
 - `sos` when the SOS button is held.

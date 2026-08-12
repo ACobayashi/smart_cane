@@ -86,15 +86,16 @@ For an independent product build, keep the ESP32-C5 on a reachable Wi-Fi/hotspot
 
 Local safety does not depend on Wi-Fi:
 
-- Samples four ToF distances every `500 ms`.
+- Samples four ToF distances every `100 ms`; VL53L1X uses a 20 ms timing budget.
 - Detects front warning/danger by distance thresholds.
-- Detects close ground obstacles below `20 cm`; treats `20-90 cm` as normal; detects steps, pits, or suspended ground only when the down-facing valid distance is strictly above `90 cm`.
+- Front warning/danger is `<=105/<=40 cm`; side obstacle entry is exactly `<=35 cm`.
+- Detects up/down steps from BMI270-compensated down distance relative to a stable normal-use ground baseline: up step at `-9 cm`, down step at `+11 cm`, deep drop at `+30 cm`, two of the latest three samples. Absolute down distance is never a step rule.
 - Fuses nearby history when available.
 - Drives obstacle vibration through PCA9685 `CH0` on TCA `CH6` in current single-motor bench mode.
 - Uses the buzzer only for high-risk cases, ground drops, and SOS.
 - Debounces the physical button. Short press uploads `voice_request` for the blind Android app; long press after `2 s` uploads `sos`.
 - Reads MPR121 touch electrodes 0-5.
-- Reads BMI270 acceleration and raises `fall_detected` on large vertical motion/freefall/impact plus a still sideways posture. Fall alert uses buzzer and backend upload only, no vibration.
+- Reads BMI270 acceleration and gyro. A fall can start only after normal-use posture, then requires fast `>=45°` tilt plus one dynamic signal, followed by sideways stillness for `1.9 s`. Fall lock mutes ordinary distance vibration/buzzer/uploads until stable normal-use posture returns for `1.2 s`.
 
 ## Route And Risk Recording
 
@@ -171,7 +172,7 @@ Use `scan`, `pca`, `imu`, `read`, `vib all`, and `beep` for real hardware checks
 4. Put an obstacle in front: Serial prints one risk event, the CH0 motor vibrates, and high danger also beeps.
 5. Keep the obstacle still: the same place/same risk is not printed repeatedly.
 6. Open left/right side space or move to another grid cell: the CH0 motor uses different pulse counts to indicate the cue and a new event can be recorded.
-7. Point the down-facing sensor below `20 cm`: `down_obstacle` is uploaded as low risk. Keep it between `20-90 cm`: no step/drop alarm. Move it strictly above `90 cm` for 2 confirmed frames: `ground_drop`/`ground_step` triggers stop feedback. No-target is reported separately as `down_no_target`.
+7. Hold normal use posture for about 0.7 s to learn ground baseline. A compensated `-9 cm` ground change triggers `ground_step direction=up`; `+11 cm` triggers `ground_step direction=down`; `+30 cm` triggers `ground_drop`. A normal cane lift/sweep that returns to baseline is cancelled without an alert.
 8. Run `mark` or long-press touch E1: backend records a user risk point.
 9. Run `path`: local walked route/risk ring buffer is printed.
 10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`: the second cane sees the historical risk area.

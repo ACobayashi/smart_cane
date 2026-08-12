@@ -172,10 +172,10 @@ Cloud LLM and speech services are optional. Put keys only in `backend/.env`; nev
 1. Start the backend.
 2. Flash the Arduino firmware with `SMARTCANE_DEVICE_ID="cane_001"`.
 3. Run `status` or `read` in Serial Monitor to print one ToF/risk snapshot.
-4. Put an obstacle in front. The firmware samples every `500 ms`, prints one changed risk event, and uses vibration to suggest slow/left/right handling. One-shot distance obstacles are low-risk map points.
+4. Put an obstacle in front. The firmware samples every `100 ms` (VL53L1X timing budget: `20 ms`), prints one changed risk event, and uses vibration to suggest slow/left/right handling. One-shot distance obstacles are low-risk map points.
 5. Keep the cane still with the same obstacle. The same place/same risk is not printed, vibrated, or uploaded repeatedly.
 6. Leave more space on the left or right, clear the risk and trigger it again, or move into another location grid. The matching motor suggests the safer bypass direction and a new event can be recorded.
-7. Lower the down-facing distance below `20 cm` to simulate a close curb/protrusion; the firmware uploads `down_obstacle` as low risk. Keep the down-facing distance from `20-90 cm` for normal ground/no step alert. Raise the valid down-facing distance strictly above `90 cm` for two confirmed frames to simulate a pit/drop; the firmware uploads `ground_drop`. No-target readings are reported separately as `down_no_target`.
+7. Hold the cane at its normal use angle for about 0.7 s so the firmware learns the compensated ground baseline. A `-9 cm` compensated change reports `ground_step` with `direction=up`; `+11 cm` reports `ground_step` with `direction=down`; `+30 cm` reports `ground_drop`. Absolute down distance alone never raises a step alert.
 8. Long-press touch electrode E1 or run `mark`. The backend records `user_mark` at the current route point.
 9. Run `path` to print the local route/risk ring buffer.
 10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`. The second cane receives historical risk statistics and fuses them into local risk.

@@ -6,6 +6,10 @@ struct ImuFallState {
   bool available = false;
   bool mock = false;
   bool fallActive = false;
+  // True from the lying-confirmation stage until the cane is again held in
+  // the learned normal-use pose.  The sketch uses this as the global safety
+  // lock that suppresses ordinary distance feedback and uploads.
+  bool fallLock = false;
   bool eventPending = false;
   uint8_t address = 0;
   int16_t axRaw = 0;
@@ -26,6 +30,7 @@ struct ImuFallState {
   float rollDeg = 0.0f;
   float postureDeg = 0.0f;
   float angleChangeDeg = 0.0f;
+  float tiltRateDps = 0.0f;
   float confidence = 0.0f;
   const char *stage = "idle";
   const char *reason = "not_started";
@@ -38,7 +43,6 @@ bool imuFallRescan();
 void imuFallUpdate();
 bool imuFallConsumeEvent(ImuFallState &out);
 ImuFallState imuFallCurrent();
-void imuFallClear();
 void imuFallPrintStatus();
 void imuFallPrintRaw();
 void imuFallSetStream(bool enabled);

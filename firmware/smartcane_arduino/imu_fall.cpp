@@ -30,15 +30,15 @@ static const uint8_t BMI270_CONFIG_CHUNK_BYTES = 16;
 enum FallDetectorStage {
   FALL_STAGE_NORMAL,
   FALL_STAGE_CANDIDATE,
-  FALL_STAGE_POST_FALL_WAIT,
-  FALL_STAGE_CONFIRMED
+  FALL_STAGE_LYING_WAIT,
+  FALL_STAGE_CONFIRMED,
+  FALL_STAGE_RECOVERY
 };
 
 static ImuFallState state;
 static unsigned long lastSampleMs = 0;
 static FallDetectorStage fallStage = FALL_STAGE_NORMAL;
 static unsigned long candidateStartedMs = 0;
-static unsigned long postFallStartedMs = 0;
 static unsigned long stillLyingSinceMs = 0;
 static unsigned long lastFallEventMs = 0;
 static unsigned long lastRawStreamPrintMs = 0;
@@ -49,7 +49,11 @@ static float baselineAxG = 0.0f;
 static float baselineAyG = 0.0f;
 static float baselineAzG = 1.0f;
 static float baselinePostureDeg = 0.0f;
-static uint8_t candidateTriggerBits = 0;
+static bool normalUseReady = false;
+static unsigned long normalUseSinceMs = 0;
+static float previousAngleFromBaseline = 0.0f;
+static float previousTotalG = 1.0f;
+static unsigned long previousMotionMs = 0;
 
 static bool readAccel();
 static void printDebugRegisters();
@@ -58,9 +62,8 @@ static void printStreamSample();
 static void resetFallCandidate() {
   fallStage = FALL_STAGE_NORMAL;
   candidateStartedMs = 0;
-  postFallStartedMs = 0;
   stillLyingSinceMs = 0;
-  candidateTriggerBits = 0;
+  state.fallLock = false;
 }
 
 static void rememberAccel() {
@@ -362,6 +365,17 @@ static bool readAccel() {
   }
   state.angleChangeDeg = angleFromBaseline;
 
+  float sampleSeconds = previousMotionMs == 0 ? 0.0f : (now - previousMotionMs) / 1000.0f;
+  state.tiltRateDps = sampleSeconds > 0.005f
+      ? fabsf(angleFromBaseline - previousAngleFromBaseline) / sampleSeconds
+      : 0.0f;
+  float jerkGPerSec = sampleSeconds > 0.005f
+      ? fabsf(state.totalG - previousTotalG) / sampleSeconds
+      : 0.0f;
+  previousAngleFromBaseline = angleFromBaseline;
+  previousTotalG = state.totalG;
+  previousMotionMs = now;
+
   bool baselineStill = state.gyroDps <= SMARTCANE_FALL_BASELINE_STILL_GYRO_DPS &&
                        state.totalG >= SMARTCANE_FALL_BASELINE_ACC_MIN_G &&
                        state.totalG <= SMARTCANE_FALL_BASELINE_ACC_MAX_G &&
@@ -375,17 +389,25 @@ static bool readAccel() {
     state.angleChangeDeg = angleFromBaseline;
   }
 
+  // A fall may only start from a recently demonstrated normal cane-use pose.
+  // A cane already lying on a desk therefore cannot manufacture a fall event.
+  bool normalUseSample = fallStage == FALL_STAGE_NORMAL &&
+                         baselineStill && angleFromBaseline <= SMARTCANE_FALL_CANCEL_UPRIGHT_DEG;
+  if (normalUseSample) {
+    if (normalUseSinceMs == 0) normalUseSinceMs = now;
+    if (now - normalUseSinceMs >= SMARTCANE_FALL_NORMAL_USE_READY_MS) normalUseReady = true;
+  } else if (fallStage == FALL_STAGE_NORMAL) {
+    normalUseSinceMs = 0;
+    normalUseReady = false;
+  }
+
   bool accelTrigger = state.totalG > SMARTCANE_FALL_ACCEL_HIGH_G ||
-                      state.totalG < SMARTCANE_FALL_ACCEL_LOW_G;
+                       state.totalG < SMARTCANE_FALL_ACCEL_LOW_G;
   bool gyroTrigger = state.gyroDps > SMARTCANE_FALL_GYRO_TRIGGER_DPS;
-  bool fastAngleTrigger = angleFromBaseline > SMARTCANE_FALL_FAST_ANGLE_DEG &&
-                          state.gyroDps > SMARTCANE_FALL_STILL_GYRO_DPS;
-  uint8_t triggerCount = (accelTrigger ? 1 : 0) +
-                         (gyroTrigger ? 1 : 0) +
-                         (fastAngleTrigger ? 1 : 0);
-  uint8_t triggerBits = (accelTrigger ? 0x01 : 0) |
-                        (gyroTrigger ? 0x02 : 0) |
-                        (fastAngleTrigger ? 0x04 : 0);
+  bool tiltRateTrigger = state.tiltRateDps > SMARTCANE_FALL_FAST_TILT_RATE_DPS;
+  bool jerkTrigger = jerkGPerSec > 2.2f;
+  bool dynamicEvidence = accelTrigger || gyroTrigger || tiltRateTrigger || jerkTrigger;
+  bool fastTilt = angleFromBaseline >= SMARTCANE_FALL_FAST_ANGLE_DEG && dynamicEvidence;
   bool lyingAngle = angleFromBaseline > SMARTCANE_FALL_LYING_ANGLE_DEG ||
                     postureDeg > SMARTCANE_FALL_LYING_ANGLE_DEG;
   bool stillLying = lyingAngle &&
@@ -403,14 +425,19 @@ static bool readAccel() {
         recoverySinceMs = now;
       } else if (now - recoverySinceMs >= SMARTCANE_FALL_RECOVERY_MS) {
         state.fallActive = false;
-        state.stage = "recovered";
-        state.reason = "upright_still_after_fall";
+        state.fallLock = false;
+        state.stage = "normal_use_recovered";
+        state.reason = "normal_use_pose_stable_after_fall";
         state.confidence = 0.25f;
         resetFallCandidate();
+        normalUseReady = false;
+        normalUseSinceMs = now;
       }
     } else {
       recoverySinceMs = 0;
-      state.stage = "confirmed";
+      fallStage = FALL_STAGE_CONFIRMED;
+      state.fallLock = true;
+      state.stage = "fall_confirmed";
       state.reason = "confirmed_fall";
       state.confidence = 0.92f;
     }
@@ -420,41 +447,38 @@ static bool readAccel() {
 
   switch (fallStage) {
     case FALL_STAGE_NORMAL:
-      if (triggerCount >= 2) {
+      if (normalUseReady && fastTilt) {
         fallStage = FALL_STAGE_CANDIDATE;
         candidateStartedMs = now;
-        postFallStartedMs = 0;
         stillLyingSinceMs = 0;
-        candidateTriggerBits = triggerBits;
         state.stage = "fall_candidate";
-        state.reason = "two_of_three_motion_triggers";
-        state.confidence = accelTrigger ? 0.62f : 0.56f;
+        state.reason = "normal_use_fast_tilt_with_dynamic_evidence";
+        state.confidence = accelTrigger ? 0.68f : 0.60f;
       } else {
         state.stage = "normal";
-        state.reason = "normal_motion";
+        state.reason = normalUseReady ? "normal_use" : "learning_normal_use";
         state.confidence = 0.20f;
       }
       break;
 
     case FALL_STAGE_CANDIDATE:
-      candidateTriggerBits |= triggerBits;
       if (uprightAgain && now - candidateStartedMs > 250) {
         resetFallCandidate();
         state.stage = "normal";
         state.reason = "candidate_cancelled_upright";
         state.confidence = 0.18f;
       } else if (now - candidateStartedMs > SMARTCANE_FALL_CANDIDATE_WINDOW_MS) {
-        fallStage = FALL_STAGE_POST_FALL_WAIT;
-        postFallStartedMs = now;
+        fallStage = FALL_STAGE_LYING_WAIT;
         stillLyingSinceMs = 0;
-        state.stage = "post_fall_wait";
-        state.reason = "waiting_for_still_lying";
+        state.fallLock = true;
+        state.stage = "fall_lying_wait";
+        state.reason = "candidate_window_expired_waiting_lying";
         state.confidence = 0.58f;
       } else if (lyingAngle) {
-        fallStage = FALL_STAGE_POST_FALL_WAIT;
-        postFallStartedMs = now;
+        fallStage = FALL_STAGE_LYING_WAIT;
         stillLyingSinceMs = 0;
-        state.stage = "post_fall_wait";
+        state.fallLock = true;
+        state.stage = "fall_lying_wait";
         state.reason = "candidate_reached_lying_angle";
         state.confidence = 0.66f;
       } else {
@@ -464,48 +488,54 @@ static bool readAccel() {
       }
       break;
 
-    case FALL_STAGE_POST_FALL_WAIT:
+    case FALL_STAGE_LYING_WAIT:
       if (uprightAgain) {
         resetFallCandidate();
         state.stage = "normal";
         state.reason = "post_fall_cancelled_upright";
         state.confidence = 0.18f;
-      } else if (now - postFallStartedMs > SMARTCANE_FALL_POST_WAIT_TIMEOUT_MS) {
-        resetFallCandidate();
-        state.stage = "normal";
-        state.reason = "post_fall_timeout_not_still";
-        state.confidence = 0.22f;
       } else if (stillLying) {
         if (stillLyingSinceMs == 0) {
           stillLyingSinceMs = now;
         }
-        state.stage = "post_fall_wait";
+        state.fallLock = true;
+        state.stage = "fall_lying_wait";
         state.reason = "still_lying_confirming";
         state.confidence = 0.78f;
         if (now - stillLyingSinceMs >= SMARTCANE_FALL_CONFIRM_MS &&
             now - lastFallEventMs >= SMARTCANE_FALL_UPLOAD_COOLDOWN_MS) {
           fallStage = FALL_STAGE_CONFIRMED;
           state.fallActive = true;
+          state.fallLock = true;
           state.eventPending = true;
-          state.stage = "confirmed";
-          state.reason = "confirmed_fall_two_of_three";
-          state.confidence = (candidateTriggerBits & 0x01) ? 0.92f : 0.88f;
+          state.stage = "fall_confirmed";
+          state.reason = "confirmed_fast_tilt_then_still_lying";
+          state.confidence = accelTrigger ? 0.92f : 0.88f;
           lastFallEventMs = now;
           recoverySinceMs = 0;
           stillLyingSinceMs = 0;
         }
       } else {
         stillLyingSinceMs = 0;
-        state.stage = "post_fall_wait";
+        state.fallLock = true;
+        state.stage = "fall_lying_wait";
         state.reason = "waiting_for_still_lying";
         state.confidence = 0.60f;
       }
       break;
 
     case FALL_STAGE_CONFIRMED:
+      fallStage = FALL_STAGE_RECOVERY;
+      state.fallLock = true;
+      state.stage = "fall_recovery";
+      state.reason = "waiting_for_normal_use_pose";
+      state.confidence = 0.92f;
+      break;
+    case FALL_STAGE_RECOVERY:
     default:
-      state.stage = "confirmed";
-      state.reason = "confirmed_fall";
+      state.fallLock = true;
+      state.stage = "fall_recovery";
+      state.reason = "waiting_for_normal_use_pose";
       state.confidence = 0.92f;
       break;
   }
@@ -518,7 +548,7 @@ static bool readAccel() {
     baselinePostureDeg = baselinePostureDeg * 0.98f + postureDeg * 0.02f;
   }
 
-  if (fallStage == FALL_STAGE_CONFIRMED && !state.fallActive) {
+  if ((fallStage == FALL_STAGE_CONFIRMED || fallStage == FALL_STAGE_RECOVERY) && !state.fallActive) {
       resetFallCandidate();
   }
 
@@ -631,15 +661,6 @@ bool imuFallConsumeEvent(ImuFallState &out) {
 
 ImuFallState imuFallCurrent() {
   return state;
-}
-
-void imuFallClear() {
-  state.fallActive = false;
-  state.eventPending = false;
-  state.stage = state.available ? "normal" : "idle";
-  state.reason = state.available ? "manual_clear" : state.reason;
-  recoverySinceMs = 0;
-  resetFallCandidate();
 }
 
 void imuFallPrintStatus() {

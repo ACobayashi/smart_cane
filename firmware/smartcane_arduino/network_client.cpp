@@ -90,7 +90,6 @@ static const char* publicRiskLevelForBackend(const char* riskType, RiskLevel loc
     if (strcmp(riskType, "front_obstacle") == 0 ||
         strcmp(riskType, "left_obstacle") == 0 ||
         strcmp(riskType, "right_obstacle") == 0 ||
-        strcmp(riskType, "down_obstacle") == 0 ||
         strcmp(riskType, "history_risk") == 0 ||
         strcmp(riskType, "prolonged_obstacle") == 0 ||
         strcmp(riskType, "approaching_obstacle") == 0 ||
@@ -103,7 +102,6 @@ static const char* publicRiskLevelForBackend(const char* riskType, RiskLevel loc
 static bool isGroundRiskType(const char* riskType) {
     return strcmp(riskType, "ground_drop") == 0 ||
         strcmp(riskType, "ground_step") == 0 ||
-        strcmp(riskType, "down_obstacle") == 0 ||
         strcmp(riskType, "down_no_target") == 0 ||
         strcmp(riskType, "down_sensor_unavailable") == 0;
 }
@@ -355,33 +353,6 @@ bool networkAvailable() {
     return wifiConfigured() && WiFi.status() == WL_CONNECTED;
 }
 
-bool fetchDeviceCommand(String &command) {
-    command = "";
-    if (!networkAvailable()) {
-        return false;
-    }
-    HTTPClient http;
-    String path = String("/api/device-commands/next?device_id=") + SMARTCANE_DEVICE_ID;
-    http.setConnectTimeout(SMARTCANE_HTTP_TIMEOUT_MS);
-    http.setTimeout(SMARTCANE_HTTP_TIMEOUT_MS);
-    if (!http.begin(makeUrl(path.c_str()))) {
-        return false;
-    }
-    int code = http.GET();
-    if (code < 200 || code >= 300) {
-        http.end();
-        return false;
-    }
-    DynamicJsonDocument doc(512);
-    DeserializationError error = deserializeJson(doc, http.getString());
-    http.end();
-    if (error || doc["command"].isNull()) {
-        return false;
-    }
-    command = doc["command"]["command"].as<String>();
-    return command.length() > 0;
-}
-
 void networkClientUpdate() {
     if (!wifiConfigured()) {
         return;
@@ -512,7 +483,7 @@ bool uploadSensorFrame(const RiskState& risk,
     bool fallPending,
     bool fallDetected,
     const char* explicitFallStage) {
-    DynamicJsonDocument doc(1280);
+    DynamicJsonDocument doc(1536);
     doc["device_id"] = SMARTCANE_DEVICE_ID;
     doc["lat"] = location.lat;
     doc["lng"] = location.lng;
@@ -529,6 +500,9 @@ bool uploadSensorFrame(const RiskState& risk,
     doc["location_quality"] = location.quality;
     bool hasRiskType = strcmp(risk.riskType, "none") != 0 &&
         strcmp(risk.riskType, "sensor_unreliable") != 0;
+    doc["risk_type"] = hasRiskType ? risk.riskType : "none";
+    doc["risk_level"] = publicRiskLevelForBackend(risk.riskType, risk.level);
+    doc["direction"] = risk.direction;
     doc["manual_risk_type"] = hasRiskType ? risk.riskType : "none";
     doc["manual_risk_level"] = publicRiskLevelForBackend(risk.riskType, risk.level);
     doc["manual_risk_reason"] = risk.reason;
@@ -546,6 +520,15 @@ bool uploadSensorFrame(const RiskState& risk,
     doc["accel_total_g"] = fall.totalG;
     doc["pitch_deg"] = fall.pitchDeg;
     doc["roll_deg"] = fall.rollDeg;
+    doc["gyro_x_dps"] = fall.gxDps;
+    doc["gyro_y_dps"] = fall.gyDps;
+    doc["gyro_z_dps"] = fall.gzDps;
+    doc["gyro_dps"] = fall.gyroDps;
+    doc["ground_state"] = risk.groundState;
+    doc["compensated_down_cm"] = risk.compensatedDownCm;
+    doc["ground_baseline_cm"] = risk.groundBaselineCm;
+    doc["height_delta_cm"] = risk.heightDeltaCm;
+    doc["cane_motion"] = risk.caneMotion;
     bool fallAlert = fallDetected ||
         (alertType != nullptr && strcmp(alertType, "fall_detected") == 0);
     doc["fall_event_id"] = fallEventId != nullptr ? fallEventId : nullptr;
