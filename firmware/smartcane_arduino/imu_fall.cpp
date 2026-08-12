@@ -81,6 +81,35 @@ static void resetFallCandidate() {
   state.triggerAtMs = 0;
 }
 
+static void beginFallCandidate(unsigned long now, float angleFromBaseline, float jerkGPerSec,
+                               bool accelTrigger, const char *reason) {
+  fallStage = FALL_STAGE_CANDIDATE;
+  candidateStartedMs = now;
+  stillLyingSinceMs = 0;
+  // Lock as soon as the abnormal motion sequence begins. A formal event is
+  // intentionally delayed until the relative lying posture is still for 2 s.
+  state.fallLock = true;
+  state.triggerTotalG = state.totalG;
+  state.triggerGyroDps = state.gyroDps;
+  state.triggerAngleDeg = angleFromBaseline;
+  state.triggerTiltRateDps = state.tiltRateDps;
+  state.triggerJerkGPerSec = jerkGPerSec;
+  state.triggerAtMs = now;
+  state.stage = "fall_candidate";
+  state.reason = reason;
+  state.confidence = accelTrigger ? 0.68f : 0.60f;
+  Serial.print(F("[FALL] lock candidate reason="));
+  Serial.print(reason);
+  Serial.print(F(" g="));
+  Serial.print(state.triggerTotalG, 2);
+  Serial.print(F(" gyro="));
+  Serial.print(state.triggerGyroDps, 1);
+  Serial.print(F(" angle="));
+  Serial.print(state.triggerAngleDeg, 1);
+  Serial.print(F(" tilt_rate="));
+  Serial.println(state.triggerTiltRateDps, 1);
+}
+
 static void rememberAccel() {
 }
 
@@ -430,8 +459,16 @@ static bool readAccel() {
   bool gyroTrigger = state.gyroDps > SMARTCANE_FALL_GYRO_TRIGGER_DPS;
   bool tiltRateTrigger = state.tiltRateDps > SMARTCANE_FALL_FAST_TILT_RATE_DPS;
   bool jerkTrigger = jerkGPerSec > 2.2f;
-  bool dynamicEvidence = accelTrigger || gyroTrigger || tiltRateTrigger || jerkTrigger;
-  bool fastTilt = angleFromBaseline >= SMARTCANE_FALL_FAST_ANGLE_DEG && dynamicEvidence;
+  // A fast large relative tilt is sufficient to start a fall candidate; an
+  // impact is useful evidence but is deliberately not mandatory. This covers
+  // the common soft-cushion/controlled fall where acceleration is damped.
+  bool rapidTiltStart = angleFromBaseline >= SMARTCANE_FALL_FAST_ANGLE_DEG &&
+      (tiltRateTrigger || gyroTrigger);
+  // If the impact and tilt arrive in separate BMI270 samples, retain the
+  // impact-assisted path at a smaller angle. It remains only a fallback.
+  bool impactAssistedTiltStart = (accelTrigger || jerkTrigger) &&
+      angleFromBaseline >= SMARTCANE_FALL_CANDIDATE_ANGLE_DEG;
+  bool abnormalMotionStart = rapidTiltStart || impactAssistedTiltStart;
   // The cane is intentionally held at an angle, and BMI270 axes vary with the
   // enclosure. Only a change from the learned normal-use vector represents
   // lying down; absolute pitch/roll must never be used as the lying test.
@@ -475,22 +512,10 @@ static bool readAccel() {
       {
         bool normalUseArmed = normalUseReady && lastNormalUseQualifiedMs != 0 &&
             now - lastNormalUseQualifiedMs <= SMARTCANE_FALL_NORMAL_USE_LAUNCH_WINDOW_MS;
-        if (normalUseArmed && fastTilt) {
-        fallStage = FALL_STAGE_CANDIDATE;
-        candidateStartedMs = now;
-        stillLyingSinceMs = 0;
-        // Lock immediately on the large abnormal motion. Formal fall
-        // notification still waits for the separate still-lying confirmation.
-        state.fallLock = true;
-        state.triggerTotalG = state.totalG;
-        state.triggerGyroDps = state.gyroDps;
-        state.triggerAngleDeg = angleFromBaseline;
-        state.triggerTiltRateDps = state.tiltRateDps;
-        state.triggerJerkGPerSec = jerkGPerSec;
-        state.triggerAtMs = now;
-        state.stage = "fall_candidate";
-        state.reason = "normal_use_fast_tilt_lock_waiting_lying";
-        state.confidence = accelTrigger ? 0.68f : 0.60f;
+        if (normalUseArmed && abnormalMotionStart) {
+        beginFallCandidate(now, angleFromBaseline, jerkGPerSec, accelTrigger,
+                           rapidTiltStart ? "normal_use_rapid_tilt_lock_waiting_lying"
+                                          : "normal_use_impact_assisted_tilt_lock_waiting_lying");
         } else {
         state.stage = "normal";
         state.reason = normalUseArmed ? "normal_use" : "learning_normal_use";
@@ -506,6 +531,14 @@ static bool readAccel() {
         state.stage = "normal";
         state.reason = "candidate_cancelled_upright";
         state.confidence = 0.18f;
+      } else if (lyingAngle) {
+        fallStage = FALL_STAGE_LYING_WAIT;
+        stillLyingSinceMs = 0;
+        state.fallLock = true;
+        state.stage = "fall_lying_wait";
+        state.reason = "candidate_reached_lying_angle";
+        state.confidence = 0.66f;
+        Serial.println(F("[FALL] lying posture reached; hold still 2000ms to confirm"));
       } else if (now - candidateStartedMs > SMARTCANE_FALL_CANDIDATE_WINDOW_MS) {
         // A large normal cane swing can reach the fast-tilt threshold, but a
         // fall must become a relative lying posture promptly. Release this
@@ -515,13 +548,6 @@ static bool readAccel() {
         state.stage = "normal";
         state.reason = "candidate_expired_without_lying";
         state.confidence = 0.18f;
-      } else if (lyingAngle) {
-        fallStage = FALL_STAGE_LYING_WAIT;
-        stillLyingSinceMs = 0;
-        state.fallLock = true;
-        state.stage = "fall_lying_wait";
-        state.reason = "candidate_reached_lying_angle";
-        state.confidence = 0.66f;
       } else {
         state.stage = "fall_candidate";
         state.reason = "motion_candidate_window";

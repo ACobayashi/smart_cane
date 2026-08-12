@@ -525,8 +525,16 @@ bool uploadSensorFrame(const RiskState& risk,
     doc["gyro_z_dps"] = fall.gzDps;
     doc["gyro_dps"] = fall.gyroDps;
     doc["ground_state"] = risk.groundState;
-    doc["compensated_down_cm"] = risk.compensatedDownCm;
-    doc["ground_baseline_cm"] = risk.groundBaselineCm;
+    if (risk.compensatedDownCm >= 0.0f) {
+        doc["compensated_down_cm"] = risk.compensatedDownCm;
+    } else {
+        doc["compensated_down_cm"] = nullptr;
+    }
+    if (risk.groundBaselineCm >= 0.0f) {
+        doc["ground_baseline_cm"] = risk.groundBaselineCm;
+    } else {
+        doc["ground_baseline_cm"] = nullptr;
+    }
     doc["height_delta_cm"] = risk.heightDeltaCm;
     doc["cane_motion"] = risk.caneMotion;
     bool fallAlert = fallDetected ||
