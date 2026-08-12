@@ -52,6 +52,7 @@ GROUND_BASE_CM = 55
 GROUND_DROP_THRESHOLD_CM = 30
 GROUND_DROP_DELTA_CM = 11
 DEFAULT_NEARBY_RADIUS_M = 80.0
+REALTIME_NEARBY_WARNING_RADIUS_M = 10.0
 ROUTE_RISK_BUFFER_M = 8.0
 WALKING_NAVIGATION_MAX_DISTANCE_M = 3000.0
 RISK_POINT_CLUSTER_RADIUS_M = 12.0
@@ -4934,7 +4935,7 @@ def nearby_warning_text(distance_m: float, risk_level: str, direction: str, even
 def nearby_risk_warning(
     lat: float = Query(..., ge=-90, le=90),
     lng: float = Query(..., ge=-180, le=180),
-    radius: float = Query(50.0, gt=0, le=5000),
+    radius: float = Query(REALTIME_NEARBY_WARNING_RADIUS_M, gt=0, le=5000),
     min_level: str = Query("medium", pattern="^(low|medium|high)$"),
     exclude_device_id: Optional[str] = Query(None),
     bearing_deg: Optional[float] = Query(None, ge=0, lt=360),
@@ -4945,10 +4946,11 @@ def nearby_risk_warning(
     Risk points are clustered from all canes. When bearing_deg is supplied, only
     points inside the user's forward field of view are considered.
     """
+    effective_radius = min(radius, REALTIME_NEARBY_WARNING_RADIUS_M)
     min_rank = LEVEL_RANK[min_level]
     excluded_device = (exclude_device_id or "").strip()
     candidates: list[tuple[int, float, float, int, dict[str, Any], str, Optional[float]]] = []
-    for event in active_risk_points(lat, lng, radius, limit=500):
+    for event in active_risk_points(lat, lng, effective_radius, limit=500):
         if should_suppress_self_history_warning(event, excluded_device):
             continue
         level = str(event.get("riskLevel") or "low")
@@ -4974,7 +4976,8 @@ def nearby_risk_warning(
         return {
             "success": True,
             "found": False,
-            "radius_m": radius,
+            "radius_m": effective_radius,
+            "requested_radius_m": radius,
             "min_level": min_level,
             "exclude_device_id": exclude_device_id,
             "bearing_deg": bearing_deg,
@@ -4990,7 +4993,8 @@ def nearby_risk_warning(
     return {
         "success": True,
         "found": True,
-        "radius_m": radius,
+        "radius_m": effective_radius,
+        "requested_radius_m": radius,
         "min_level": min_level,
         "exclude_device_id": exclude_device_id,
         "bearing_deg": bearing_deg,

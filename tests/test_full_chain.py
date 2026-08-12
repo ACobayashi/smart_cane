@@ -560,6 +560,33 @@ def test_sos_becomes_historical_risk_point(tmp_path, monkeypatch):
     assert "SOS" in warning["warning"]["voicePrompt"]
 
 
+def test_non_navigation_warning_excludes_risk_points_beyond_ten_meters(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "ten_meter_warning.db")
+    main.init_db()
+    main.store_event(main.EventCreate(
+        device_id="cane_other",
+        lat=31.000135,
+        lng=121.0,
+        risk_type="ground_drop",
+        risk_level="high",
+        extra_json={"source": "esp32c5"},
+    ))
+
+    warning = main.nearby_risk_warning(
+        lat=31.0,
+        lng=121.0,
+        radius=50,
+        min_level="medium",
+        exclude_device_id="cane_real",
+        bearing_deg=None,
+    )
+
+    assert warning["found"] is False
+    assert warning["radius_m"] == main.REALTIME_NEARBY_WARNING_RADIUS_M
+    assert warning["requested_radius_m"] == 50
+    assert main.active_risk_points(31.0, 121.0, radius=50, limit=10)
+
+
 def test_expired_sos_stays_historical_but_is_not_a_current_alert(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "expired_sos.db")
     main.init_db()

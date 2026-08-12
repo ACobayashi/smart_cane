@@ -460,7 +460,7 @@ object SmartCaneApiClient {
     suspend fun getNearbyRiskWarning(
         latitude: Double,
         longitude: Double,
-        radiusM: Int = 50,
+        radiusM: Int = 10,
         minLevel: String = "medium",
         bearingDeg: Float? = null,
         excludeDeviceId: String? = null

@@ -1,10 +1,32 @@
 package com.nankai.smartcane.viewmodel
 
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RiskEpisodeTrackerTest {
+    @Test
+    fun nonNavigationRiskWarningUsesTenMeterRadius() {
+        assertEquals(10, NON_NAVIGATION_RISK_WARNING_RADIUS_M)
+    }
+
+    @Test
+    fun navigationStateDisablesNonNavigationRiskPolling() {
+        assertTrue(isNavigationInProgress("active"))
+        assertTrue(isNavigationInProgress("replanning"))
+        assertTrue(isNavigationInProgress("off_route"))
+        assertFalse(isNavigationInProgress("idle"))
+        assertFalse(isNavigationInProgress("arrived"))
+    }
+
+    @Test
+    fun realtimeRisksOutrankHistoricalRoadWarnings() {
+        assertTrue(hardwareRiskTtsPriority("front_obstacle").rank > TtsPriority.ROAD_RISK.rank)
+        assertTrue(hardwareRiskTtsPriority("ground_drop").rank > TtsPriority.ROAD_RISK.rank)
+        assertEquals(TtsPriority.STEP, hardwareRiskTtsPriority("ground_step"))
+    }
+
     @Test
     fun sustainedRiskOnlyEntersOnce() {
         val tracker = RiskEpisodeTracker()

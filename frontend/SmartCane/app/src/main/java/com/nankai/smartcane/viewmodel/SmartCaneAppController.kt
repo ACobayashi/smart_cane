@@ -88,7 +88,6 @@ class SmartCaneAppController private constructor(
     private var blindPollingJob: Job? = null
     private var companionPollingJob: Job? = null
     private var alertPollingJob: Job? = null
-    private var nearbyRiskPollingJob: Job? = null
     private var hardwareRiskPollingJob: Job? = null
     private var sosAlarmJob: Job? = null
     private var blindRiskMonitorJob: Job? = null
@@ -103,12 +102,12 @@ class SmartCaneAppController private constructor(
     private var lastAlertId: Int = 0
     private var alertBaselineReady = false
     private var suppressHardwareRiskUntilAfterFall: Long = 0L
+    private var realtimeHardwareRiskActive = false
     private val hardwareRiskEpisode = RiskEpisodeTracker()
     private val fallRiskEpisode = RiskEpisodeTracker()
     private var fallHardwareEpisodeObserved = false
     private var lastNearbyRiskText: String? = null
     private var lastNearbyRiskTextSpokenAt: Long = 0L
-    private val announcedNearbyRiskIds = mutableSetOf<Int>()
     private val nearbyRiskSpeechTimes: MutableMap<Int, Long> = mutableMapOf()
     private var selfSosReplayDemoEnabled = true
     private var selfSosReplayStateMachine = SelfSosReplayStateMachine()
@@ -166,9 +165,6 @@ class SmartCaneAppController private constructor(
         _uiState.value.currentRelation?.caneDevice?.deviceId
             ?: DemoData.defaultCane.deviceId.takeIf { _uiState.value.currentUser?.isDemo == true }
             ?: ""
-
-    private fun isFromCurrentCane(deviceId: String): Boolean =
-        deviceId.split(",").map { it.trim() }.contains(currentCaneDeviceId())
 
     private val _uiState = MutableStateFlow(AppUiState(storedState = preferences.state.value))
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
@@ -458,6 +454,10 @@ class SmartCaneAppController private constructor(
                     delay(6_000L)
                     continue
                 }
+                if (isNavigationInProgress(state.navigationStatus)) {
+                    delay(6_000L)
+                    continue
+                }
 
                 val location = latestPhoneLocation()
                 if (location == null) {
@@ -488,7 +488,7 @@ class SmartCaneAppController private constructor(
                 when (val result = SmartCaneApiClient.getNearbyRiskWarning(
                     location.latitude,
                     location.longitude,
-                    radiusM = 50,
+                    radiusM = NON_NAVIGATION_RISK_WARNING_RADIUS_M,
                     bearingDeg = location.bearing.takeIf { location.hasBearing() },
                     excludeDeviceId = deviceId
                 )) {
@@ -517,6 +517,8 @@ class SmartCaneAppController private constructor(
     }
 
     private fun maybeSpeakNearbyRiskWarning(warning: NearbyRiskWarningDto) {
+        if (isNavigationInProgress(_uiState.value.navigationStatus)) return
+        if (realtimeHardwareRiskActive || activeTtsPriority?.rank?.let { it > TtsPriority.ROAD_RISK.rank } == true) return
         val currentDeviceId = currentCaneDeviceId().trim()
         val isOwnFallRisk = currentDeviceId.isNotEmpty() &&
             warning.riskType == "fall_detected" &&
@@ -589,7 +591,7 @@ class SmartCaneAppController private constructor(
             lastNearbyRiskTextSpokenAt = now
         }
         _uiState.update { it.copy(message = "附近风险点：${directionText}${distanceCm}厘米", lastSpokenText = text) }
-        speakText(text)
+        speakText(text, priority = TtsPriority.ROAD_RISK)
     }
 
     @Suppress("MissingPermission")
@@ -759,20 +761,24 @@ class SmartCaneAppController private constructor(
 
     private fun maybeSpeakHardwareRisk(state: DeviceStateDto) {
         if (!state.online || isNonHardwareSource(state.source)) {
+            realtimeHardwareRiskActive = false
             hardwareRiskEpisode.observeUnknown()
             return
         }
 
         val level = state.riskLevel.lowercase(Locale.US)
         if (level !in setOf("low", "medium", "high")) {
+            realtimeHardwareRiskActive = false
             hardwareRiskEpisode.observeUnknown()
             return
         }
         val riskType = state.riskType.lowercase(Locale.US)
         if (riskType == "none" || riskType == "history_risk") {
+            realtimeHardwareRiskActive = false
             hardwareRiskEpisode.observeTrustedClear()
             return
         }
+        realtimeHardwareRiskActive = true
         if (riskType == "fall_detected") {
             maybeSpeakFallEpisode("检测到跌倒")
             return
@@ -780,10 +786,12 @@ class SmartCaneAppController private constructor(
         if (riskType.contains("left")) {
             val limit = 35
             if (state.leftCm == null) {
+                realtimeHardwareRiskActive = false
                 hardwareRiskEpisode.observeUnknown()
                 return
             }
             if (state.leftCm > limit) {
+                realtimeHardwareRiskActive = false
                 hardwareRiskEpisode.observeTrustedClear()
                 return
             }
@@ -791,10 +799,12 @@ class SmartCaneAppController private constructor(
         if (riskType.contains("right")) {
             val limit = 35
             if (state.rightCm == null) {
+                realtimeHardwareRiskActive = false
                 hardwareRiskEpisode.observeUnknown()
                 return
             }
             if (state.rightCm > limit) {
+                realtimeHardwareRiskActive = false
                 hardwareRiskEpisode.observeTrustedClear()
                 return
             }
@@ -806,10 +816,12 @@ class SmartCaneAppController private constructor(
                 else -> 105
             }
             if (state.frontCm == null) {
+                realtimeHardwareRiskActive = false
                 hardwareRiskEpisode.observeUnknown()
                 return
             }
             if (state.frontCm > limit) {
+                realtimeHardwareRiskActive = false
                 hardwareRiskEpisode.observeTrustedClear()
                 return
             }
@@ -818,13 +830,12 @@ class SmartCaneAppController private constructor(
         hardwareRiskEpisode.observeActive()
         val now = System.currentTimeMillis()
         if (now < suppressHardwareRiskUntilAfterFall) return
-        if (_uiState.value.voiceState != VoiceState.Idle) return
 
         val prompt = hardwareRiskPrompt(state) ?: state.voicePrompt.takeIf { it.isNotBlank() } ?: return
         if (!hardwareRiskEpisode.enter(riskType)) return
 
         _uiState.update { it.copy(message = "硬件实时风险：${riskLevelLabel(level)}", voiceTranscript = prompt) }
-        speakText(prompt, priority = inferTtsPriority(prompt))
+        speakText(prompt, priority = hardwareRiskTtsPriority(riskType))
     }
 
     private fun maybeSpeakFallEpisode(text: String) {
@@ -868,53 +879,6 @@ class SmartCaneAppController private constructor(
         )
         val nearest = candidates.minByOrNull { it.second } ?: return null
         return "${nearest.first}${nearest.second}厘米有障碍"
-    }
-
-    private fun startNearbyRiskPolling() {
-        if (nearbyRiskPollingJob?.isActive == true) return
-        nearbyRiskPollingJob = scope.launch {
-            while (true) {
-                maybeAnnounceNearbyRisk()
-                delay(4_000L)
-            }
-        }
-    }
-
-    private fun stopNearbyRiskPolling() {
-        nearbyRiskPollingJob?.cancel()
-        nearbyRiskPollingJob = null
-        locationUpdatesActive = false
-        runCatching {
-            (appContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager)
-                ?.removeUpdates(phoneLocationListener ?: return@runCatching)
-        }
-    }
-
-    private suspend fun maybeAnnounceNearbyRisk() {
-        if (_uiState.value.currentMode != AppMode.Blind) return
-        if (_uiState.value.voiceState != VoiceState.Idle) return
-
-        ensureLocationUpdates()
-        val location = currentPhoneLocation() ?: return
-        when (val result = SmartCaneApiClient.getMapRiskPoints(location.latitude, location.longitude, 5)) {
-            is ApiResult.Success -> {
-                val point = result.data
-                    .filterNot { announcedNearbyRiskIds.contains(it.id) }
-                    .filterNot { isFromCurrentCane(it.deviceId) }
-                    .filter { riskLevelRank(it.riskLevel) >= riskLevelRank("medium") }
-                    .filter { isWithinFiveMeters(location, it.latitude, it.longitude, it.distanceMeters) }
-                    .maxWithOrNull(compareBy({ riskLevelRank(it.riskLevel) }, { it.id }))
-                    ?: return
-                val text = "接近道路风险点，请减速确认"
-                val now = System.currentTimeMillis()
-                if (text == lastNearbyRiskText && now - lastNearbyRiskTextSpokenAt < 600_000L) return
-                announcedNearbyRiskIds += point.id
-                lastNearbyRiskText = text
-                lastNearbyRiskTextSpokenAt = now
-                speakText(text)
-            }
-            is ApiResult.Failure -> Unit
-        }
     }
 
     private fun ensureLocationUpdates() {
@@ -986,20 +950,6 @@ class SmartCaneAppController private constructor(
     private fun hasLocationPermission(): Boolean =
         ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-
-    private fun isWithinFiveMeters(location: Location, latitude: Double?, longitude: Double?, backendDistanceMeters: Double?): Boolean {
-        backendDistanceMeters?.let { return it <= 5.0 }
-        if (latitude == null || longitude == null) return true
-        val distance = FloatArray(1)
-        Location.distanceBetween(location.latitude, location.longitude, latitude, longitude, distance)
-        return distance.first() <= 5f
-    }
-
-    private fun riskLevelRank(level: String): Int = when (level.lowercase(Locale.US)) {
-        "high" -> 3
-        "medium" -> 2
-        else -> 1
-    }
 
     private fun riskLevelLabel(level: String): String = when (level.lowercase(Locale.US)) {
         "high" -> "高"
@@ -1683,6 +1633,20 @@ internal class RiskEpisodeTracker(
 
     fun observeUnknown() {
         trustedClearCount = 0
+    }
+}
+
+internal const val NON_NAVIGATION_RISK_WARNING_RADIUS_M = 10
+
+internal fun isNavigationInProgress(status: String): Boolean =
+    status.lowercase(Locale.US) in setOf("active", "replanning", "off_route")
+
+internal fun hardwareRiskTtsPriority(riskType: String): TtsPriority {
+    val normalized = riskType.lowercase(Locale.US)
+    return if (normalized.contains("ground") || normalized.contains("drop") || normalized.contains("down_sensor")) {
+        TtsPriority.STEP
+    } else {
+        TtsPriority.OBSTACLE_STOP
     }
 }
 
