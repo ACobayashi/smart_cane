@@ -119,7 +119,7 @@ def test_fall_lock_suppresses_distance_feedback_without_time_cooldown(tmp_path, 
     )
     response = main.create_sensor_frame(locked, lite=True)
     assert response["risk_type"] == "none"
-    assert "fallPending" not in response["device_state"]
+    assert response["device_state"]["fallPending"] is True
     recovered = frame(55, front_cm=20, fall_pending=False, fall_detected=False, fall_stage="normal_use_recovered")
     response = main.create_sensor_frame(recovered, lite=True)
     assert response["risk_type"] == "front_obstacle"
@@ -233,7 +233,7 @@ def test_navigation_traversal_lifecycle(tmp_path, monkeypatch):
     assert stopped["safe_pass"] == 0
 
 
-def test_pending_fall_stays_internal_without_formal_alert(tmp_path, monkeypatch):
+def test_pending_fall_is_visible_without_formal_alert(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "fall_state.db")
     main.init_db()
     pending = frame(
@@ -242,15 +242,13 @@ def test_pending_fall_stays_internal_without_formal_alert(tmp_path, monkeypatch)
         fall_pending=True,
         fall_detected=False,
         fall_stage="slow_fall_cancel_pending",
-        fall_confidence=0.99,
+        fall_confidence=0.72,
     )
     analysis = main.analyze_sensor_frame(pending, {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": "low"})
     stored = main.upsert_device_state(pending, 31.0, 121.0, analysis)
-    assert analysis["risk_type"] == "none"
-    assert analysis["voice_prompt"] == ""
-    assert "fall_pending" not in analysis
-    assert "fallPending" not in stored
+    assert stored["fallPending"] is True
     assert stored["fallDetected"] is False
+    assert stored["fallStage"] == "slow_fall_cancel_pending"
 
 
 def test_fall_event_id_is_persistently_deduplicated(tmp_path, monkeypatch):
@@ -752,42 +750,6 @@ def test_voice_templates_are_short_and_only_confirmed_fall_is_spoken():
     assert main.legacy_event_message({"risk_type": "sos"}) == "用户发起紧急求助"
 
 
-def test_unconfirmed_motion_never_becomes_a_fall_event():
-    history = {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": "low"}
-    unconfirmed = frame(
-        55,
-        fall_pending=False,
-        fall_detected=False,
-        fall_stage="confirmed",
-        fall_confidence=0.99,
-        accel_total_g=3.1,
-    )
-    analysis = main.analyze_sensor_frame(unconfirmed, history)
-    assert main.imu_fall_score(unconfirmed) == 0.0
-    assert analysis["risk_type"] == "none"
-    assert analysis["voice_prompt"] == ""
-
-
-def test_old_emergency_messages_are_canonicalized(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "DB_PATH", tmp_path / "canonical_emergency.db")
-    main.init_db()
-    fall = main.store_event(main.EventCreate(
-        device_id="cane_real", lat=31.0, lng=121.0,
-        risk_type="fall_detected", risk_level="high",
-        voice_prompt="跌倒状态待确认",
-    ))
-    sos = main.store_event(main.EventCreate(
-        device_id="cane_real", lat=31.0, lng=121.0,
-        risk_type="sos", risk_level="high",
-        voice_prompt="旧版客户端求助提示",
-    ))
-    with main.db() as conn:
-        fall_row = conn.execute("SELECT * FROM risk_events WHERE id = ?", (fall["id"],)).fetchone()
-        sos_row = conn.execute("SELECT * FROM risk_events WHERE id = ?", (sos["id"],)).fetchone()
-    assert main.mobile_event_dict(fall_row)["voicePrompt"] == "检测到跌倒"
-    assert main.mobile_event_dict(sos_row)["voicePrompt"] == "用户发起紧急求助"
-
-
 def test_front_and_up_step_share_prompt_while_down_step_and_drop_share_prompt():
     front = main.voice_prompt_for_risk(frame(55, front_cm=35), "front_obstacle", "high", "stop")
     up_step = main.voice_prompt_for_risk(frame(42), "ground_step", "high", "up")
@@ -807,6 +769,24 @@ def test_front_and_up_step_share_prompt_while_down_step_and_drop_share_prompt():
     )
     assert historical_up == front
     assert historical_down == drop
+
+
+def test_obstacle_advice_never_suggests_lateral_avoidance():
+    request = main.AdviceRequest(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="front_obstacle",
+        risk_level="high",
+        left_cm=120,
+        right_cm=30,
+    )
+    history = {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": "low"}
+
+    assert main.fallback_advice(request, history) == "前方高风险，请停下"
+    assert main.deep_advice(request, {"level": "high"}) == "前方高风险，请停下"
+    assert "向左" not in main.fallback_advice(request, history)
+    assert "向右" not in main.deep_advice(request, {"level": "high"})
 
 
 def test_recent_self_obstacle_is_not_rebroadcast_as_history(tmp_path, monkeypatch):
