@@ -10,8 +10,10 @@
 // BMI270 minimal register path for acceleration + gyro fall detection.
 static const uint8_t REG_CHIP_ID = 0x00;
 static const uint8_t REG_STATUS = 0x03;
-static const uint8_t REG_GYR_X_LSB = 0x0C;
-static const uint8_t REG_ACC_X_LSB = 0x12;
+// BMI270 normal-data register layout (not the OIS register map):
+// 0x0C..0x11 = ACC_X/Y/Z, 0x12..0x17 = GYR_X/Y/Z.
+static const uint8_t REG_ACC_X_LSB = 0x0C;
+static const uint8_t REG_GYR_X_LSB = 0x12;
 static const uint8_t REG_INTERNAL_STATUS = 0x21;
 static const uint8_t REG_ACC_CONF = 0x40;
 static const uint8_t REG_ACC_RANGE = 0x41;
@@ -280,18 +282,21 @@ static bool detectAndConfigureBmi270() {
 
 static bool readAccel() {
   uint8_t bytes[12] = {0};
-  if (!readReg(REG_GYR_X_LSB, bytes, sizeof(bytes))) {
+  // Read the contiguous normal-data block from ACC_X.  Starting at 0x0C
+  // preserves each axis LSB/MSB shadow pair and must not be confused with
+  // the separate OIS output map at the same address range.
+  if (!readReg(REG_ACC_X_LSB, bytes, sizeof(bytes))) {
     state.available = false;
     state.reason = "read_failed";
     return false;
   }
 
-  state.gxRaw = (int16_t)((uint16_t)bytes[1] << 8 | bytes[0]);
-  state.gyRaw = (int16_t)((uint16_t)bytes[3] << 8 | bytes[2]);
-  state.gzRaw = (int16_t)((uint16_t)bytes[5] << 8 | bytes[4]);
-  state.axRaw = (int16_t)((uint16_t)bytes[7] << 8 | bytes[6]);
-  state.ayRaw = (int16_t)((uint16_t)bytes[9] << 8 | bytes[8]);
-  state.azRaw = (int16_t)((uint16_t)bytes[11] << 8 | bytes[10]);
+  state.axRaw = (int16_t)((uint16_t)bytes[1] << 8 | bytes[0]);
+  state.ayRaw = (int16_t)((uint16_t)bytes[3] << 8 | bytes[2]);
+  state.azRaw = (int16_t)((uint16_t)bytes[5] << 8 | bytes[4]);
+  state.gxRaw = (int16_t)((uint16_t)bytes[7] << 8 | bytes[6]);
+  state.gyRaw = (int16_t)((uint16_t)bytes[9] << 8 | bytes[8]);
+  state.gzRaw = (int16_t)((uint16_t)bytes[11] << 8 | bytes[10]);
 
   if (state.axRaw == 0 && state.ayRaw == 0 && state.azRaw == 0) {
     state.axG = 0.0f;

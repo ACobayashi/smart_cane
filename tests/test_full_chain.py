@@ -506,6 +506,7 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     firmware = (ROOT / "firmware" / "smartcane_arduino" / "risk_logic.cpp").read_text(encoding="utf-8")
     config = (ROOT / "firmware" / "smartcane_arduino" / "config.h").read_text(encoding="utf-8")
     sketch = (ROOT / "firmware" / "smartcane_arduino" / "smartcane_arduino.ino").read_text(encoding="utf-8")
+    imu = (ROOT / "firmware" / "smartcane_arduino" / "imu_fall.cpp").read_text(encoding="utf-8")
     assert "SMARTCANE_STEP_UP_ENTER_CM 9" in config
     assert "SMARTCANE_STEP_DOWN_ENTER_CM 11" in config
     assert "SMARTCANE_DEEP_DROP_CM 30" in config
@@ -515,7 +516,10 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "lastHeightDeltaCm <= -SMARTCANE_STEP_UP_ENTER_CM" in firmware
     assert "cm > SMARTCANE_DOWN_LONG_DISTANCE_ALARM_CM" not in firmware
     assert "rawCm >= SMARTCANE_DOWN_NO_TARGET_CM" in firmware
-    assert "FALL_STAGE_CANDIDATE" in (ROOT / "firmware" / "smartcane_arduino" / "imu_fall.cpp").read_text(encoding="utf-8")
+    assert "FALL_STAGE_CANDIDATE" in imu
+    assert "REG_ACC_X_LSB = 0x0C" in imu
+    assert "REG_GYR_X_LSB = 0x12" in imu
+    assert "readReg(REG_ACC_X_LSB, bytes, sizeof(bytes))" in imu
     assert "SMARTCANE_FALL_CONFIRM_MS 1900" in config
     assert "fall_confirmed" in sketch and "fall_detected" in sketch
     assert "fallLockActive" in sketch
