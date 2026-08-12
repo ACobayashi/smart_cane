@@ -1416,6 +1416,7 @@ void loop() {
       // vibrationUpdate() turns it off and no repeat is scheduled.
       if (!lockedFall.fallActive) {
         vibrationStopAll();
+        buzzerStop();
       }
     } else {
       currentRisk = stabilizeRisk(calculateRisk(distances, nearby, imuFallCurrent()));

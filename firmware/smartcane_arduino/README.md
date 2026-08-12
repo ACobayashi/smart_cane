@@ -95,7 +95,7 @@ Local safety does not depend on Wi-Fi:
 - Uses the buzzer only for high-risk cases, ground drops, and SOS.
 - Debounces the physical button. Short press uploads `voice_request` for the blind Android app; long press after `2 s` uploads `sos`.
 - Reads MPR121 touch electrodes 0-5.
-- Reads BMI270 acceleration and gyro. After `0.5 s` of learned normal-use posture, a rapid `>=45°` relative tilt immediately locks ordinary distance/step feedback; acceleration impact is only an additional fallback for a slower `>=30°` tilt. A formal fall then requires any relative lying posture `>=58°` held still for `2 s`—left, right, or face-up orientation is not restricted. It gives exactly one continuous `2 s` buzzer and vibration alert, then stays silent until normal-use posture is stable again for `1.2 s`.
+- Reads BMI270 acceleration and gyro. After `0.5 s` of learned normal-use posture, a rapid `>=45°` relative tilt locks ordinary distance/step feedback; reaching the lying angle during the same motion also locks even if a soft cushion has damped the impact. Acceleration impact is only an additional fallback for a slower `>=30°` tilt. A formal fall then requires any relative lying posture `>=58°` held still for `2 s`—left, right, or face-up orientation is not restricted. It stops any ordinary cue, then gives exactly one continuous `2 s` buzzer and vibration alert, and stays silent until normal-use posture is stable again for `1.2 s`.
 
 ## Route And Risk Recording
 

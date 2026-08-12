@@ -535,11 +535,15 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "SMARTCANE_FALL_CONFIRM_MS 2000" in config
     assert "SMARTCANE_FALL_CANDIDATE_ANGLE_DEG 30.0f" in config
     assert "SMARTCANE_FALL_CANDIDATE_WINDOW_MS 2500" in config
+    assert "SMARTCANE_FALL_GYRO_TRIGGER_DPS 35.0f" in config
+    assert "SMARTCANE_FALL_FAST_TILT_RATE_DPS 45.0f" in config
     assert "SMARTCANE_FALL_NORMAL_USE_LAUNCH_WINDOW_MS 1200" in config
     assert "bool normalUseArmed = normalUseReady" in imu
     assert "bool rapidTiltStart = angleFromBaseline >= SMARTCANE_FALL_FAST_ANGLE_DEG" in imu
     assert "bool impactAssistedTiltStart = (accelTrigger || jerkTrigger)" in imu
+    assert "bool directLyingTransitionStart = angleFromBaseline >= SMARTCANE_FALL_LYING_ANGLE_DEG" in imu
     assert "normal_use_rapid_tilt_lock_waiting_lying" in imu
+    assert "normal_use_direct_lying_tilt_lock_waiting_lying" in imu
     assert "normal_use_impact_assisted_tilt_lock_waiting_lying" in imu
     assert "beginFallCandidate" in imu
     assert "hold still 2000ms to confirm" in imu
@@ -553,6 +557,7 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "beep(SMARTCANE_FALL_ALERT_BUZZ_MS);" in sketch
     assert "vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, SMARTCANE_FALL_ALERT_VIB_MS);" in sketch
     assert "if (!lockedFall.fallActive)" in sketch
+    assert "buzzerStop();" in sketch
     assert "patternActive = false;" in (ROOT / "firmware" / "smartcane_arduino" / "buzzer.cpp").read_text(encoding="utf-8")
     network = (ROOT / "firmware" / "smartcane_arduino" / "network_client.cpp").read_text(encoding="utf-8")
     assert "if (risk.groundBaselineCm >= 0.0f)" in network

@@ -464,11 +464,18 @@ static bool readAccel() {
   // the common soft-cushion/controlled fall where acceleration is damped.
   bool rapidTiltStart = angleFromBaseline >= SMARTCANE_FALL_FAST_ANGLE_DEG &&
       (tiltRateTrigger || gyroTrigger);
+  // Some fast controlled falls settle between two 50 ms samples. The measured
+  // gyro can then already be low, but a recent normal-use posture has changed
+  // directly into a lying vector. This is still a tilt transition, not an
+  // impact requirement; the independent two-second lying check prevents a
+  // normal cane sweep from becoming a formal fall.
+  bool directLyingTransitionStart = angleFromBaseline >= SMARTCANE_FALL_LYING_ANGLE_DEG &&
+      (state.tiltRateDps >= 18.0f || state.gyroDps >= 18.0f);
   // If the impact and tilt arrive in separate BMI270 samples, retain the
   // impact-assisted path at a smaller angle. It remains only a fallback.
   bool impactAssistedTiltStart = (accelTrigger || jerkTrigger) &&
       angleFromBaseline >= SMARTCANE_FALL_CANDIDATE_ANGLE_DEG;
-  bool abnormalMotionStart = rapidTiltStart || impactAssistedTiltStart;
+  bool abnormalMotionStart = rapidTiltStart || directLyingTransitionStart || impactAssistedTiltStart;
   // The cane is intentionally held at an angle, and BMI270 axes vary with the
   // enclosure. Only a change from the learned normal-use vector represents
   // lying down; absolute pitch/roll must never be used as the lying test.
@@ -515,6 +522,7 @@ static bool readAccel() {
         if (normalUseArmed && abnormalMotionStart) {
         beginFallCandidate(now, angleFromBaseline, jerkGPerSec, accelTrigger,
                            rapidTiltStart ? "normal_use_rapid_tilt_lock_waiting_lying"
+                                          : directLyingTransitionStart ? "normal_use_direct_lying_tilt_lock_waiting_lying"
                                           : "normal_use_impact_assisted_tilt_lock_waiting_lying");
         } else {
         state.stage = "normal";

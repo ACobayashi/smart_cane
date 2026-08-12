@@ -44,6 +44,12 @@ bool buzzerIsEnabled() {
   return buzzerEnabled;
 }
 
+void buzzerStop() {
+  singleBeepActive = false;
+  patternActive = false;
+  digitalWrite(SMARTCANE_BUZZER_PIN, idleLevel());
+}
+
 void beep(uint16_t ms) {
   if (!buzzerEnabled) {
     digitalWrite(SMARTCANE_BUZZER_PIN, idleLevel());
