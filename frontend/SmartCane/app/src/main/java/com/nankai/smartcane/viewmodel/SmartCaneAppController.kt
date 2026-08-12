@@ -798,8 +798,8 @@ class SmartCaneAppController private constructor(
             riskType == "sos" -> "已发起紧急求助"
             riskType == "voice_request" -> event.voicePrompt.ifBlank { "请说出您的需求" }
             riskType.contains("front") -> "前方有障碍或上台阶，请停下"
-            riskType.contains("left") -> event.voicePrompt.ifBlank { "左侧有障碍，请向右" }
-            riskType.contains("right") -> event.voicePrompt.ifBlank { "右侧有障碍，请向左" }
+            riskType.contains("left") -> "左侧有障碍"
+            riskType.contains("right") -> "右侧有障碍"
             riskType == "ground_step_up" || event.voicePrompt.contains("上台阶") -> "前方有障碍或上台阶，请停下"
             riskType == "ground_step_down" || event.voicePrompt.contains("下台阶") -> "前方有下台阶或落差，请停下"
             riskType.contains("ground") || riskType.contains("drop") -> "前方有下台阶或落差，请停下"

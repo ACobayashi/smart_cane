@@ -3446,11 +3446,6 @@ def fallback_advice(req: AdviceRequest, history: dict[str, Any]) -> str:
     if req.risk_type in {"ground_drop", "ground_step", "down_no_target", "down_sensor_unavailable"}:
         return "前方有落差，请停下"
     if req.risk_level == "high":
-        if req.left_cm is not None and req.right_cm is not None:
-            if req.left_cm > req.right_cm and req.left_cm > 90:
-                return "前方高风险，请向左"
-            if req.right_cm > req.left_cm and req.right_cm > 90:
-                return "前方高风险，请向右"
         return "前方高风险，请停下"
     if req.risk_level == "medium":
         return "前方中风险，请减速"
@@ -3464,11 +3459,6 @@ def deep_advice(req: AdviceRequest, deep: dict[str, Any]) -> str:
     if level == "high":
         if req.risk_type in {"ground_drop", "ground_step", "down_no_target", "down_sensor_unavailable"}:
             return "前方有落差，请停下"
-        if req.left_cm is not None and req.right_cm is not None:
-            if req.left_cm > req.right_cm and req.left_cm > 90:
-                return "前方高风险，请向左"
-            if req.right_cm > req.left_cm and req.right_cm > 90:
-                return "前方高风险，请向右"
         return "前方高风险，请停下"
     if level == "medium":
         return "前方中风险，请减速"

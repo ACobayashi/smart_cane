@@ -129,8 +129,8 @@ private data class MapRiskMarker(
 
 private val demoEvents = listOf(
     RiskEvent(38, "cane_003", "front_obstacle", "low", "front", 1285, "前方约 128 厘米有障碍物，请减速并准备绕行。", "14:30:35"),
-    RiskEvent(37, "cane_002", "left_obstacle", "high", "left", 422, "左侧约 42 厘米有障碍物，请向右侧保持距离。", "14:30:33"),
-    RiskEvent(36, "cane_003", "right_obstacle", "medium", "right", 1196, "右侧约 119 厘米有障碍物，请向左侧保持距离。", "14:30:31"),
+    RiskEvent(37, "cane_002", "left_obstacle", "high", "left", 422, "左侧约 42 厘米有障碍物。", "14:30:33"),
+    RiskEvent(36, "cane_003", "right_obstacle", "medium", "right", 1196, "右侧约 119 厘米有障碍物。", "14:30:31"),
     RiskEvent(35, "cane_001", "ground_drop", "high", "down", 1200, "前方地面高度变化明显，可能有台阶或坑洼，请停止前进并用盲杖确认。", "14:30:29")
 )
 
