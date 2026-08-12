@@ -560,6 +560,52 @@ def test_sos_becomes_historical_risk_point(tmp_path, monkeypatch):
     assert "SOS" in warning["warning"]["voicePrompt"]
 
 
+def test_expired_sos_stays_historical_but_is_not_a_current_alert(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "expired_sos.db")
+    main.init_db()
+    old_timestamp = (main.datetime.now(main.timezone.utc) - main.timedelta(minutes=10)).isoformat(timespec="seconds")
+    main.store_event(main.EventCreate(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="sos",
+        risk_level="high",
+        voice_prompt="SOS 已发送",
+        timestamp=old_timestamp,
+        extra_json={"source": "esp32c5"},
+    ))
+
+    state = main.latest_device_state(device_id="cane_real")["state"]
+    alerts = main.latest_alerts(role="blind", userId=None, deviceId="cane_real", sinceId=0, limit=20)
+    points = main.active_risk_points(31.0, 121.0, radius=20, limit=10)
+
+    assert state["riskType"] == "none"
+    assert state["riskLevel"] == "low"
+    assert state["voicePrompt"] == "当前未发现明显风险"
+    assert alerts["alerts"] == []
+    assert any(point["riskType"] == "sos" for point in points)
+
+
+def test_recent_sos_is_still_delivered_as_a_current_alert(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "recent_sos.db")
+    main.init_db()
+    main.store_event(main.EventCreate(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="sos",
+        risk_level="high",
+        voice_prompt="SOS 已发送",
+        extra_json={"source": "esp32c5"},
+    ))
+
+    state = main.latest_device_state(device_id="cane_real")["state"]
+    alerts = main.latest_alerts(role="blind", userId=None, deviceId="cane_real", sinceId=0, limit=20)
+
+    assert state["riskType"] == "sos"
+    assert any(alert["riskType"] == "sos" for alert in alerts["alerts"])
+
+
 def test_low_obstacle_second_report_promotes_to_history_warning(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "low_promotion.db")
     main.init_db()

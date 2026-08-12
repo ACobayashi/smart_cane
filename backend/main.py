@@ -840,6 +840,13 @@ def device_state_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     item = row_to_dict(row)
     last_seen = parse_time(item.get("updated_at"))
     online = bool(last_seen and (datetime.now(timezone.utc) - last_seen).total_seconds() <= DEVICE_OFFLINE_SECONDS)
+    risk_type, risk_level, risk_score, voice_prompt = current_alert_state(
+        item.get("risk_type"),
+        item.get("risk_level"),
+        item.get("risk_score"),
+        item.get("voice_prompt"),
+        item.get("updated_at"),
+    )
     return {
         "deviceId": item["device_id"],
         "deviceName": item.get("device_name") or item["device_id"],
@@ -855,10 +862,10 @@ def device_state_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "downCm": item.get("down_cm"),
         "direction": item.get("direction") or "none",
         "headingDeg": item.get("heading_deg"),
-        "riskType": item.get("risk_type") or "none",
-        "riskLevel": item.get("risk_level") or "low",
-        "riskScore": item.get("risk_score") or 0,
-        "voicePrompt": item.get("voice_prompt") or "当前未发现明显风险",
+        "riskType": risk_type,
+        "riskLevel": risk_level,
+        "riskScore": risk_score,
+        "voicePrompt": voice_prompt,
         "source": item.get("source") or "unknown",
         "fallEventId": item.get("fall_event_id"),
         "fallPending": bool(item.get("fall_pending")),
@@ -1038,6 +1045,43 @@ def parse_time(value: str | None) -> Optional[datetime]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+VOLATILE_DEVICE_STATE_RISK_TYPES = {"sos", "fall_detected", "voice_request"}
+ALERT_ACTIVE_TTL_SECONDS = {
+    "sos": 5 * 60,
+    "fall_detected": 3 * 60,
+    "voice_request": 60,
+}
+
+
+def is_alert_still_active(risk_type: str, timestamp: str | None, now: Optional[datetime] = None) -> bool:
+    ttl_seconds = ALERT_ACTIVE_TTL_SECONDS.get(str(risk_type))
+    if ttl_seconds is None:
+        return True
+    parsed = parse_time(timestamp)
+    if parsed is None:
+        return False
+    current = now or datetime.now(timezone.utc)
+    return (current - parsed).total_seconds() <= ttl_seconds
+
+
+def current_alert_state(
+    risk_type: Any,
+    risk_level: Any,
+    risk_score: Any,
+    voice_prompt: Any,
+    timestamp: str | None,
+) -> tuple[str, str, float, str]:
+    normalized_type = str(risk_type or "none")
+    if normalized_type in VOLATILE_DEVICE_STATE_RISK_TYPES and not is_alert_still_active(normalized_type, timestamp):
+        return "none", "low", 0, "当前未发现明显风险"
+    return (
+        normalized_type,
+        str(risk_level or "low"),
+        risk_score or 0,
+        str(voice_prompt or "当前未发现明显风险"),
+    )
 
 
 def bearing_between_deg(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -3960,6 +4004,13 @@ def latest_device_state(device_id: Optional[str] = Query(None, min_length=1)) ->
     if not event:
         return {"success": True, "found": False, "state": None}
     item = mobile_event_dict(event)
+    risk_type, risk_level, risk_score, voice_prompt = current_alert_state(
+        item.get("riskType"),
+        item.get("riskLevel"),
+        item.get("riskScore"),
+        item.get("voicePrompt") or item.get("message"),
+        item.get("timestamp"),
+    )
     return {
         "success": True,
         "found": True,
@@ -3977,10 +4028,10 @@ def latest_device_state(device_id: Optional[str] = Query(None, min_length=1)) ->
             "leftCm": item.get("leftCm"),
             "rightCm": item.get("rightCm"),
             "downCm": item.get("downCm"),
-            "riskType": item.get("riskType"),
-            "riskLevel": item.get("riskLevel"),
-            "riskScore": item.get("riskScore") or 0,
-            "voicePrompt": item.get("voicePrompt") or item.get("message"),
+            "riskType": risk_type,
+            "riskLevel": risk_level,
+            "riskScore": risk_score,
+            "voicePrompt": voice_prompt,
             "source": "latest_event",
         },
     }
@@ -4537,11 +4588,15 @@ def latest_alerts(
             tuple(params + [limit]),
         ).fetchall()
 
-    alerts = [
-        alert_event_payload(row, role)
-        for row in rows
-        if role in alert_target_roles(str(row["risk_type"]))
-    ]
+    now = datetime.now(timezone.utc)
+    alerts = []
+    for row in rows:
+        risk_type = str(row["risk_type"])
+        if role not in alert_target_roles(risk_type):
+            continue
+        if not is_alert_still_active(risk_type, row["timestamp"], now):
+            continue
+        alerts.append(alert_event_payload(row, role))
 
     return {
         "success": True,
