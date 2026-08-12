@@ -106,9 +106,7 @@ class SmartCaneAppController private constructor(
     private val hardwareRiskEpisode = RiskEpisodeTracker()
     private val fallRiskEpisode = RiskEpisodeTracker()
     private var fallHardwareEpisodeObserved = false
-    private var lastNearbyRiskText: String? = null
-    private var lastNearbyRiskTextSpokenAt: Long = 0L
-    private val nearbyRiskSpeechTimes: MutableMap<Int, Long> = mutableMapOf()
+    private val nearbyRiskSpeechCooldown = RiskPointSpeechCooldown()
     private var selfSosReplayDemoEnabled = true
     private var selfSosReplayStateMachine = SelfSosReplayStateMachine()
     private var navigationReceiverRegistered = false
@@ -537,7 +535,7 @@ class SmartCaneAppController private constructor(
         )
         if (isSelfSosReplay && _uiState.value.voiceState == VoiceState.Listening) return
 
-        val shouldPlaySelfSosReplay = if (isSelfSosReplay) {
+        if (isSelfSosReplay) {
             Log.d(
                 SELF_SOS_REPLAY_LOG_TAG,
                 "SELF_SOS_REPLAY before update state=${selfSosReplayStateMachine.state} " +
@@ -568,28 +566,16 @@ class SmartCaneAppController private constructor(
                     "isNewGeneration=${transition.isNewGeneration}"
             )
             if (!transition.shouldPlay) return
-            true
-        } else {
-            false
         }
 
         val now = System.currentTimeMillis()
-        if (!shouldPlaySelfSosReplay) {
-            val lastSpokenAt = nearbyRiskSpeechTimes[warning.eventId] ?: 0L
-            if (now - lastSpokenAt < 300_000L) return
-        }
         if (_uiState.value.voiceState == VoiceState.Listening) return
+        if (!nearbyRiskSpeechCooldown.tryAcquire(warning.eventId, now)) return
 
         val distanceCm = (warning.distanceM * 100).toInt().coerceAtLeast(1)
         val directionText = warning.relativeDirectionText.ifBlank { "前方" }
         val fallback = "${directionText}${distanceCm}厘米${riskLevelLabel(warning.riskLevel)}风险"
         val text = warning.voicePrompt.ifBlank { fallback }
-        if (!shouldPlaySelfSosReplay) {
-            if (text == lastNearbyRiskText && now - lastNearbyRiskTextSpokenAt < 600_000L) return
-            nearbyRiskSpeechTimes[warning.eventId] = now
-            lastNearbyRiskText = text
-            lastNearbyRiskTextSpokenAt = now
-        }
         _uiState.update { it.copy(message = "附近风险点：${directionText}${distanceCm}厘米", lastSpokenText = text) }
         speakText(text, priority = TtsPriority.ROAD_RISK)
     }
@@ -723,7 +709,6 @@ class SmartCaneAppController private constructor(
                 }
                 when (val result = SmartCaneApiClient.getLatestDeviceState(deviceId)) {
                     is ApiResult.Success -> result.data.state?.let {
-                        val wasPending = _uiState.value.fallPending
                         _uiState.update { state -> state.copy(fallPending = it.fallPending, fallStage = it.fallStage) }
                         val trustedHardwareState = it.online &&
                             !isNonHardwareSource(it.source) &&
@@ -741,9 +726,6 @@ class SmartCaneAppController private constructor(
                             } else {
                                 fallRiskEpisode.observeUnknown()
                             }
-                        }
-                        if (it.fallPending && !wasPending) {
-                            maybeSpeakFallEpisode("检测到疑似跌倒，请恢复正常握杖姿态后继续使用。")
                         }
                         maybeSpeakHardwareRisk(it)
                     }
@@ -858,12 +840,14 @@ class SmartCaneAppController private constructor(
         val riskType = state.riskType.lowercase(Locale.US)
         return when {
             riskType == "fall_detected" -> "检测到跌倒"
-            riskType.contains("front") -> state.frontCm?.let { "前方${it}厘米有障碍" }
+            riskType.contains("front") -> "前方有障碍或上台阶，请停下"
             riskType.contains("left") -> state.leftCm?.let { "左侧${it}厘米有障碍，请向右保持距离" }
             riskType.contains("right") -> state.rightCm?.let { "右侧${it}厘米有障碍，请向左保持距离" }
-            riskType == "ground_step" && state.direction.equals("up", ignoreCase = true) -> "前方上台阶，请立即停下并用盲杖确认"
-            riskType == "ground_step" && state.direction.equals("down", ignoreCase = true) -> "前方下台阶，请立即停下并用盲杖确认"
-            riskType.contains("ground") || riskType.contains("drop") -> "前方存在较大落差，请立即停下并探测台阶"
+            riskType == "ground_step_up" ||
+                (riskType == "ground_step" && state.direction.equals("up", ignoreCase = true)) -> "前方有障碍或上台阶，请停下"
+            riskType == "ground_step_down" ||
+                (riskType == "ground_step" && state.direction.equals("down", ignoreCase = true)) -> "前方有下台阶或落差，请停下"
+            riskType.contains("ground") || riskType.contains("drop") -> "前方有下台阶或落差，请停下"
             riskType.contains("down_sensor") -> "下视传感器异常，请停下检查"
             riskType.contains("obstacle") -> nearestHardwareObstaclePrompt(state)
             else -> state.voicePrompt.takeIf { it.isNotBlank() }
@@ -1025,7 +1009,7 @@ class SmartCaneAppController private constructor(
         fromQueue: Boolean = false,
         bypassTextCooldown: Boolean = false
     ) {
-        val cleanText = text.trim()
+        val cleanText = compactSpeechText(text)
         if (cleanText.isBlank()) return
         val now = System.currentTimeMillis()
         val key = speechKey(cleanText)
@@ -1568,7 +1552,6 @@ class SmartCaneAppController private constructor(
         private const val NAVIGATION_LOCATION_MAX_AGE_MS = 90 * 1000L
         private const val LOCATION_MAX_ACCURACY_M = 80f
         private const val NAVIGATION_LOCATION_MAX_ACCURACY_M = 50f
-
         @Volatile private var INSTANCE: SmartCaneAppController? = null
         fun get(context: Context): SmartCaneAppController {
             return INSTANCE ?: synchronized(this) {
@@ -1599,10 +1582,49 @@ internal fun alertSpeechForRole(
     sosAlarmActive: Boolean
 ): String? {
     if (riskType == "sos") {
-        return if (role == "companion") "盲人用户发起紧急求助，请查看" else null
+        return if (role == "companion") "用户发起紧急求助" else null
     }
     if (role != "blind" || sosAlarmActive) return null
     return if (riskType == "fall_detected") "检测到跌倒" else voicePrompt.ifBlank { message }
+}
+
+internal const val MAX_SPEECH_CHARACTERS = 15
+internal const val RISK_POINT_SPEECH_COOLDOWN_MS = 5 * 60 * 1000L
+
+internal fun compactSpeechText(text: String): String {
+    val normalized = text.trim().replace(Regex("\\s+"), "")
+    if (normalized.isBlank()) return ""
+    if (normalized.contains("疑似跌倒")) return ""
+    val corrected = when {
+        normalized.contains("AndroidApp") && normalized.contains("紧急求助") -> "用户发起紧急求助"
+        normalized.contains("语音请求失败") -> "语音请求失败，请重试"
+        normalized.contains("语音识别暂时不可用") -> "语音识别失败，请重试"
+        normalized.contains("后端暂时不可用") -> "后端暂不可用"
+        normalized.contains("当前位置不稳定") -> "定位不稳定，请重试"
+        normalized.contains("重新规划失败") -> "规划失败，请停下"
+        else -> normalized
+    }
+    if (corrected.length <= MAX_SPEECH_CHARACTERS) return corrected
+    val firstClause = corrected.split(Regex("[。；;，,]"))
+        .firstOrNull()
+        .orEmpty()
+        .trim()
+    val candidate = firstClause.takeIf { it.isNotBlank() } ?: corrected
+    return candidate.take(MAX_SPEECH_CHARACTERS).trimEnd('，', '。', ',', ';', '；')
+}
+
+internal class RiskPointSpeechCooldown(
+    private val cooldownMs: Long = RISK_POINT_SPEECH_COOLDOWN_MS
+) {
+    private val spokenAtByRiskPoint = mutableMapOf<Int, Long>()
+
+    fun tryAcquire(riskPointId: Int, now: Long): Boolean {
+        val lastSpokenAt = spokenAtByRiskPoint[riskPointId]
+        if (lastSpokenAt != null && now - lastSpokenAt < cooldownMs) return false
+        spokenAtByRiskPoint.entries.removeAll { now - it.value >= cooldownMs }
+        spokenAtByRiskPoint[riskPointId] = now
+        return true
+    }
 }
 
 internal class RiskEpisodeTracker(

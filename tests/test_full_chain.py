@@ -557,7 +557,8 @@ def test_sos_becomes_historical_risk_point(tmp_path, monkeypatch):
     assert any(point["riskType"] == "sos" for point in points)
     warning = main.nearby_risk_warning(lat=31.0, lng=121.00002, radius=50, min_level="medium", exclude_device_id="cane_real", bearing_deg=None)
     assert warning["found"] is True
-    assert "SOS" in warning["warning"]["voicePrompt"]
+    assert "求助风险" in warning["warning"]["voicePrompt"]
+    assert len(warning["warning"]["voicePrompt"]) <= 15
 
 
 def test_non_navigation_warning_excludes_risk_points_beyond_ten_meters(tmp_path, monkeypatch):
@@ -650,7 +651,48 @@ def test_low_obstacle_second_report_promotes_to_history_warning(tmp_path, monkey
     warning = main.nearby_risk_warning(lat=31.0, lng=121.00002, radius=50, min_level="medium", exclude_device_id=None, bearing_deg=None)
     assert warning["found"] is True
     assert warning["warning"]["riskLevel"] == "medium"
-    assert "重复出现的障碍风险点" in warning["warning"]["voicePrompt"]
+    assert "有障碍" in warning["warning"]["voicePrompt"]
+    assert len(warning["warning"]["voicePrompt"]) <= 15
+
+
+def test_voice_templates_are_short_and_only_confirmed_fall_is_spoken():
+    pending = frame(55, fall_pending=True, fall_detected=False, fall_stage="fall_candidate")
+    confirmed = frame(55, fall_pending=False, fall_detected=True, fall_stage="fall_confirmed")
+    assert main.voice_prompt_for_risk(pending, "none", "low", "none") != "检测到跌倒"
+    assert main.voice_prompt_for_risk(confirmed, "fall_detected", "high", "stop") == "检测到跌倒"
+
+    prompts = [
+        main.legacy_event_message({"risk_type": "sos"}),
+        main.voice_prompt_for_risk(frame(55, front_cm=35), "front_obstacle", "high", "stop"),
+        main.voice_prompt_for_risk(frame(55), "ground_drop", "high", "down"),
+        main.nearby_warning_text(8.0, "high", "front", {"riskType": "sos"}),
+        main.route_voice_prompt(None),
+        main.route_voice_prompt({"distance_m": 500, "risk": {}, "steps": []}),
+        main.voice_route_failure_prompt({"infocode": "20803"}),
+    ]
+    assert all(len(prompt) <= 15 for prompt in prompts)
+    assert main.legacy_event_message({"risk_type": "sos"}) == "用户发起紧急求助"
+
+
+def test_front_and_up_step_share_prompt_while_down_step_and_drop_share_prompt():
+    front = main.voice_prompt_for_risk(frame(55, front_cm=35), "front_obstacle", "high", "stop")
+    up_step = main.voice_prompt_for_risk(frame(42), "ground_step", "high", "up")
+    down_step = main.voice_prompt_for_risk(frame(68), "ground_step", "high", "down")
+    drop = main.voice_prompt_for_risk(frame(86), "ground_drop", "high", "down")
+
+    assert front == up_step == "前方有障碍或上台阶，请停下"
+    assert down_step == drop == "前方有下台阶或落差，请停下"
+    assert len(front) <= 15
+    assert len(drop) <= 15
+
+    historical_up = main.nearby_warning_text(
+        8.0, "high", "front", {"riskType": "ground_step", "voicePrompt": up_step}
+    )
+    historical_down = main.nearby_warning_text(
+        8.0, "high", "front", {"riskType": "ground_step", "voicePrompt": down_step}
+    )
+    assert historical_up == front
+    assert historical_down == drop
 
 
 def test_recent_self_obstacle_is_not_rebroadcast_as_history(tmp_path, monkeypatch):

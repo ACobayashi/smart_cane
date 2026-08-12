@@ -1073,7 +1073,7 @@ fun SosPage() {
                 state = SosUiState.Error("尚未绑定或发现真实盲杖设备")
                 return@launch
             }
-            state = when (val result = SmartCaneApiClient.postSos(SosRequestDto(deviceId, null, null, "用户通过 Android App 发起紧急求助（位置不可用）"))) {
+            state = when (val result = SmartCaneApiClient.postSos(SosRequestDto(deviceId, null, null, "用户发起紧急求助"))) {
                 is ApiResult.Success -> if (result.data.success) {
                     SosUiState.Success(result.data.message.ifBlank { "SOS 已发送" }, currentTimeText())
                 } else {

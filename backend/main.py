@@ -356,7 +356,7 @@ class LegacySosCreate(BaseModel):
     deviceId: str = Field(..., min_length=1)
     latitude: Optional[float] = None
     longitude: Optional[float] = None
-    message: str = "\u7528\u6237\u901a\u8fc7 Android App \u53d1\u8d77\u7d27\u6025\u6c42\u52a9"
+    message: str = "用户发起紧急求助"
 
 
 class LegacyTelemetryCreate(BaseModel):
@@ -1163,28 +1163,30 @@ def legacy_event_message(item: dict[str, Any]) -> str:
     distance = event_distance_mm(item)
     cm_text = f"{int(round(distance / 10))} \u5398\u7c73" if distance is not None else "\u672a\u77e5\u8ddd\u79bb"
     if risk_type == "sos":
-        return "\u6536\u5230 Android App \u7d27\u6025\u6c42\u52a9\uff0c\u8bf7\u5c3d\u5feb\u8054\u7cfb\u4f7f\u7528\u8005\u3002"
+        return "用户发起紧急求助"
     if risk_type == "fall_detected":
-        return "\u68c0\u6d4b\u5230\u7591\u4f3c\u8dcc\u5012\uff0c\u5df2\u5411\u76f2\u4eba\u7aef\u548c\u966a\u62a4\u7aef\u53d1\u9001\u7d27\u6025\u544a\u8b66\u3002"
+        return "检测到跌倒"
     if risk_type == "voice_request":
-        return "\u76f2\u6756\u6309\u94ae\u5df2\u89e6\u53d1\u8bed\u97f3\u4ea4\u4e92\uff0c\u8bf7\u5728\u76f2\u4eba\u7aef\u8bf4\u51fa\u76ee\u7684\u5730\u6216\u6307\u4ee4\u3002"
+        return "请说目的地或指令"
     if risk_type == "prolonged_obstacle":
-        return "\u540c\u4e00\u969c\u788d\u6301\u7eed\u51fa\u73b0\uff0c\u5efa\u8bae\u966a\u62a4\u8005\u5173\u6ce8\u4f7f\u7528\u8005\u4f4d\u7f6e\u548c\u72b6\u6001\u3002"
+        return "障碍持续，请停下探测"
     if risk_type == "approaching_obstacle":
-        return "\u524d\u65b9\u969c\u788d\u8ddd\u79bb\u6b63\u5728\u6301\u7eed\u7f29\u77ed\uff0c\u5efa\u8bae\u51cf\u901f\u6216\u505c\u6b62\u786e\u8ba4\u3002"
-    if risk_type == "ground_drop":
-        return f"\u4e0b\u89c6\u8ddd\u79bb\u7ea6 {cm_text}\uff0c\u53ef\u80fd\u6709\u53f0\u9636\u3001\u5751\u6d3c\u6216\u843d\u5dee\uff0c\u8bf7\u505c\u6b62\u524d\u8fdb\u3002"
+        return "障碍逼近，请立即减速"
+    if risk_type in {"ground_drop", "ground_step_down"}:
+        return "前方有下台阶或落差，请停下"
+    if risk_type in {"ground_step", "ground_step_up"}:
+        return "前方有障碍或上台阶，请停下"
     if risk_type == "front_obstacle":
-        return f"\u524d\u65b9\u7ea6 {cm_text} \u6709\u969c\u788d\uff0c\u8bf7\u51cf\u901f\u5e76\u51c6\u5907\u7ed5\u884c\u3002"
+        return "前方有障碍或上台阶，请停下"
     if risk_type == "left_obstacle":
-        return f"\u5de6\u4fa7\u7ea6 {cm_text} \u6709\u969c\u788d\uff0c\u8bf7\u5411\u53f3\u4fa7\u4fdd\u6301\u8ddd\u79bb\u3002"
+        return f"左侧{cm_text}有障碍"
     if risk_type == "right_obstacle":
-        return f"\u53f3\u4fa7\u7ea6 {cm_text} \u6709\u969c\u788d\uff0c\u8bf7\u5411\u5de6\u4fa7\u4fdd\u6301\u8ddd\u79bb\u3002"
+        return f"右侧{cm_text}有障碍"
     if risk_type == "user_mark":
-        return "\u7528\u6237\u624b\u52a8\u6807\u8bb0\u4e86\u4e00\u4e2a\u98ce\u9669\u70b9\u3002"
+        return "风险点已记录"
     if risk_type == "history_risk":
-        return "\u9644\u8fd1\u5b58\u5728\u5386\u53f2\u9ad8\u98ce\u9669\u70b9\uff0c\u8bf7\u51cf\u901f\u786e\u8ba4\u3002"
-    return "\u6682\u65e0\u660e\u786e\u98ce\u9669\uff0c\u8bf7\u4fdd\u6301\u8c28\u614e\u3002"
+        return "附近有历史风险，请减速"
+    return "前方安全，请谨慎通行"
 
 
 def legacy_event_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -3106,7 +3108,7 @@ def route_risk_text(risk: dict[str, Any], buffer_m: int = 8) -> str:
 def alert_title(risk_type: str) -> str:
     return {
         "sos": "\u7528\u6237\u4e3b\u52a8 SOS",
-        "fall_detected": "\u7591\u4f3c\u8dcc\u5012\u544a\u8b66",
+        "fall_detected": "跌倒告警",
         "voice_request": "\u8bed\u97f3\u4ea4\u4e92\u8bf7\u6c42",
         "prolonged_obstacle": "\u6301\u7eed\u969c\u788d\u63d0\u9192",
         "approaching_obstacle": "\u969c\u788d\u903c\u8fd1\u63d0\u9192",
@@ -3115,52 +3117,42 @@ def alert_title(risk_type: str) -> str:
 
 def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, direction: str) -> str:
     if risk_type == "voice_request":
-        return "\u5df2\u6536\u5230\u76f2\u6756\u6309\u94ae\u8bf7\u6c42\uff0c\u8bf7\u8bf4\u51fa\u76ee\u7684\u5730\u6216\u64cd\u4f5c\u6307\u4ee4\u3002"
+        return "请说目的地或指令"
     if risk_type == "sos":
-        return "SOS \u5df2\u53d1\u9001\uff0c\u5df2\u901a\u77e5\u966a\u62a4\u7aef\uff0c\u8bf7\u505c\u5728\u5b89\u5168\u4f4d\u7f6e\u7b49\u5f85\u8054\u7cfb\u3002"
+        return "求助已发送，请安全等候"
     if risk_type == "fall_detected":
-        return "\u68c0\u6d4b\u5230\u7591\u4f3c\u8dcc\u5012\uff0c\u5df2\u901a\u77e5\u76f2\u4eba\u7aef\u548c\u966a\u62a4\u7aef\uff0c\u8bf7\u4fdd\u6301\u539f\u5730\u3002"
+        return "检测到跌倒"
     if risk_type == "prolonged_obstacle":
-        return "\u540c\u4e00\u969c\u788d\u6301\u7eed\u51fa\u73b0\uff0c\u5df2\u901a\u77e5\u966a\u62a4\u7aef\uff0c\u8bf7\u505c\u6b62\u5e76\u91cd\u65b0\u63a2\u6d4b\u3002"
+        return "障碍持续，请停下探测"
     if risk_type == "approaching_obstacle":
-        return "\u969c\u788d\u8ddd\u79bb\u6b63\u5728\u7f29\u77ed\uff0c\u8bf7\u7acb\u5373\u51cf\u901f\uff0c\u5fc5\u8981\u65f6\u505c\u6b62\u3002"
+        return "障碍逼近，请立即减速"
     if risk_type == "ground_step" and direction == "up":
-        return "前方上台阶，请立即停下并用盲杖确认。"
+        return "前方有障碍或上台阶，请停下"
     if risk_type == "ground_step" and direction == "down":
-        return "前方下台阶，请立即停下并用盲杖确认。"
+        return "前方有下台阶或落差，请停下"
     if risk_type in {"ground_drop", "ground_step", "ground_step_down", "ground_step_up"}:
-        return "检测到前方落差，请立即停下并探测台阶。"
+        return "前方有下台阶或落差，请停下"
     if risk_type == "down_no_target":
         return ""
     if risk_type == "down_sensor_unavailable":
-        return "下视传感器异常，请停下检查。"
+        return "下视异常，请停下"
     if risk_type == "front_obstacle":
-        if direction == "turn_left":
-            return f"\u524d\u65b9 {frame.front_cm or '-'} \u5398\u7c73\u6709\u969c\u788d\uff0c\u5de6\u4fa7\u76f8\u5bf9\u66f4\u5b89\u5168\u3002"
-        if direction == "turn_right":
-            return f"\u524d\u65b9 {frame.front_cm or '-'} \u5398\u7c73\u6709\u969c\u788d\uff0c\u53f3\u4fa7\u76f8\u5bf9\u66f4\u5b89\u5168\u3002"
-        return f"\u524d\u65b9 {frame.front_cm or '-'} \u5398\u7c73\u6709\u969c\u788d\uff0c\u8bf7\u505c\u6b62\u786e\u8ba4\u3002"
+        return "前方有障碍或上台阶，请停下"
     if risk_type == "left_obstacle":
-        return f"\u5de6\u4fa7 {frame.left_cm or '-'} \u5398\u7c73\u6709\u969c\u788d\uff0c\u8bf7\u5411\u53f3\u4fdd\u6301\u8ddd\u79bb\u3002"
+        return f"左侧{frame.left_cm or '-'}厘米有障碍"
     if risk_type == "right_obstacle":
-        return f"\u53f3\u4fa7 {frame.right_cm or '-'} \u5398\u7c73\u6709\u969c\u788d\uff0c\u8bf7\u5411\u5de6\u4fdd\u6301\u8ddd\u79bb\u3002"
+        return f"右侧{frame.right_cm or '-'}厘米有障碍"
     if risk_type == "history_risk":
-        return "\u9644\u8fd1\u6709\u591a\u4eba\u8bb0\u5f55\u7684\u5386\u53f2\u98ce\u9669\u70b9\uff0c\u8bf7\u51cf\u901f\u786e\u8ba4\u3002"
+        return "附近有历史风险，请减速"
     if risk_type == "user_mark":
-        return "\u98ce\u9669\u70b9\u5df2\u8bb0\u5f55\uff0c\u5e76\u4f1a\u540c\u6b65\u7ed9\u540e\u7eed\u7528\u6237\u3002"
-    return "\u5f53\u524d\u672a\u53d1\u73b0\u660e\u663e\u969c\u788d\uff0c\u8bf7\u7ee7\u7eed\u8c28\u614e\u524d\u8fdb\u3002"
+        return "风险点已记录"
+    return "前方安全，请谨慎通行"
 
 
 def route_voice_prompt(best: Optional[dict[str, Any]]) -> str:
     if not best:
-        return "暂时没有找到可用的步行路线。"
-    risk = best.get("risk", {})
-    distance_m = int(best.get("distance_m") or 0)
-    base = f"导航开始，全程约{route_distance_text(distance_m)}，{route_risk_text(risk)}"
-    direction = route_direction_text(best)
-    if direction:
-        return f"{base}。首先{direction}。"
-    return f"{base}。请按路线谨慎前进。"
+        return "未找到步行路线"
+    return "导航开始，请按提示前进"
 
 
 async def generate_route_advice(
@@ -3183,7 +3175,7 @@ async def generate_route_advice(
             "role": "system",
             "content": (
                 "You are a navigation safety assistant for a smart cane. "
-                "Return one short Chinese voice prompt, under 55 Chinese characters. "
+                "Return one short Chinese voice prompt, no more than 15 Chinese characters. "
                 "Mention stop/slow/left/right only when supported by sensor or route risk data."
             ),
         },
@@ -3426,37 +3418,37 @@ def ai_enabled() -> bool:
 
 def fallback_advice(req: AdviceRequest, history: dict[str, Any]) -> str:
     if req.risk_type == "sos":
-        return "SOS already sent. Stay where you are if safe."
+        return "求助已发送，请安全等候"
     if req.risk_type in {"ground_drop", "ground_step", "down_no_target", "down_sensor_unavailable"}:
-        return "Stop. Check the ground ahead before moving."
+        return "前方有落差，请停下"
     if req.risk_level == "high":
         if req.left_cm is not None and req.right_cm is not None:
             if req.left_cm > req.right_cm and req.left_cm > 90:
-                return "High risk ahead. Turn left slowly."
+                return "前方高风险，请向左"
             if req.right_cm > req.left_cm and req.right_cm > 90:
-                return "High risk ahead. Turn right slowly."
-        return "High risk ahead. Stop and probe carefully."
+                return "前方高风险，请向右"
+        return "前方高风险，请停下"
     if req.risk_level == "medium":
-        return "Slow down. Keep scanning left and right."
+        return "前方中风险，请减速"
     if history["high_count"] >= 2:
-        return "Nearby history has high risks. Slow down."
-    return "Path looks clear. Continue carefully."
+        return "附近有高风险，请减速"
+    return "前方安全，请谨慎通行"
 
 
 def deep_advice(req: AdviceRequest, deep: dict[str, Any]) -> str:
     level = deep.get("level", "low")
     if level == "high":
         if req.risk_type in {"ground_drop", "ground_step", "down_no_target", "down_sensor_unavailable"}:
-            return "\u6df1\u5ea6\u6a21\u578b\u63d0\u793a\u843d\u5dee\u98ce\u9669\uff0c\u8bf7\u505c\u6b62\u63a2\u8def\u3002"
+            return "前方有落差，请停下"
         if req.left_cm is not None and req.right_cm is not None:
             if req.left_cm > req.right_cm and req.left_cm > 90:
-                return "\u6df1\u5ea6\u6a21\u578b\u63d0\u793a\u9ad8\u98ce\u9669\uff0c\u8bf7\u5411\u5de6\u6162\u884c\u3002"
+                return "前方高风险，请向左"
             if req.right_cm > req.left_cm and req.right_cm > 90:
-                return "\u6df1\u5ea6\u6a21\u578b\u63d0\u793a\u9ad8\u98ce\u9669\uff0c\u8bf7\u5411\u53f3\u6162\u884c\u3002"
-        return "\u6df1\u5ea6\u6a21\u578b\u63d0\u793a\u9ad8\u98ce\u9669\uff0c\u8bf7\u505c\u6b62\u3002"
+                return "前方高风险，请向右"
+        return "前方高风险，请停下"
     if level == "medium":
-        return "\u6df1\u5ea6\u6a21\u578b\u63d0\u793a\u4e2d\u98ce\u9669\uff0c\u8bf7\u51cf\u901f\u786e\u8ba4\u3002"
-    return "\u6df1\u5ea6\u6a21\u578b\u63d0\u793a\u98ce\u9669\u8f83\u4f4e\uff0c\u8bf7\u8c28\u614e\u524d\u8fdb\u3002"
+        return "前方中风险，请减速"
+    return "前方低风险，请留意"
 
 
 async def call_chat_completion(messages: list[dict[str, str]], temperature: float = 0.2) -> tuple[Optional[str], dict[str, Any]]:
@@ -3489,7 +3481,7 @@ async def generate_advice(req: AdviceRequest, history: dict[str, Any], deep: dic
             "role": "system",
             "content": (
                 "You are a safety assistant for a smart cane. "
-                "Return one short practical instruction in Chinese, no markdown, no diagnosis, under 40 Chinese characters. "
+                "Return one practical instruction in Chinese, no markdown, no diagnosis, no more than 15 Chinese characters. "
                 "Prefer stop/slow/left/right guidance based on sensor data."
             ),
         },
@@ -4918,18 +4910,19 @@ def nearby_warning_text(distance_m: float, risk_level: str, direction: str, even
     distance_text = max(1, int(round(distance_m)))
     risk_type = str(event.get("riskType") or event.get("risk_type") or "history_risk")
     report_count = int(event.get("reportCount") or event.get("report_count") or 1)
+    saved_prompt = str(event.get("voicePrompt") or event.get("voice_prompt") or event.get("message") or "")
     if risk_type == "sos":
-        return f"{direction_text}\u7ea6 {distance_text} \u7c73\u5904\u66fe\u89e6\u53d1 SOS \u9ad8\u98ce\u9669\u6c42\u52a9\uff0c\u8bf7\u7acb\u5373\u51cf\u901f\u5e76\u7559\u610f\u5468\u56f4\u3002"
-    if risk_type in {"ground_drop", "ground_step", "ground_step_down", "ground_step_up", "down_no_target", "down_sensor_unavailable"}:
-        return f"{direction_text}\u7ea6 {distance_text} \u7c73\u6709\u5386\u53f2\u843d\u5dee\u98ce\u9669\u70b9\uff0c\u8bf7\u505c\u4e0b\u5e76\u5148\u63a2\u6d4b\u8def\u9762\u3002"
-    if risk_type in {"front_obstacle", "left_obstacle", "right_obstacle", "prolonged_obstacle", "approaching_obstacle"}:
+        return f"{direction_text}{distance_text}米有求助风险"
+    if risk_type == "ground_step_up" or (risk_type == "ground_step" and "上台阶" in saved_prompt):
+        return "前方有障碍或上台阶，请停下"
+    if risk_type in {"ground_drop", "ground_step", "ground_step_down", "down_no_target", "down_sensor_unavailable"}:
+        return "前方有下台阶或落差，请停下"
+    if risk_type == "front_obstacle":
+        return "前方有障碍或上台阶，请停下"
+    if risk_type in {"left_obstacle", "right_obstacle", "prolonged_obstacle", "approaching_obstacle"}:
         if report_count >= LOW_OBSTACLE_PROMOTION_COUNT or risk_level in {"medium", "high"}:
-            return f"{direction_text}\u7ea6 {distance_text} \u7c73\u6709\u91cd\u590d\u51fa\u73b0\u7684\u969c\u788d\u98ce\u9669\u70b9\uff0c\u8bf7\u51cf\u901f\u786e\u8ba4\u3002"
-    base = f"{direction_text}\u7ea6 {distance_text} \u7c73\u6709{level_text}\u98ce\u9669\uff0c\u8bf7\u6ce8\u610f\u907f\u8ba9\u3002"
-    detail = str(event.get("voicePrompt") or event.get("message") or "").strip()
-    if detail and detail not in base:
-        return f"{base}{detail}"
-    return base
+            return f"{direction_text}{distance_text}米有障碍"
+    return f"{direction_text}{distance_text}米有{level_text}风险"
 
 @app.get("/api/risks/nearby-warning")
 def nearby_risk_warning(
@@ -5280,22 +5273,22 @@ def voice_route_failure_prompt(detail: Any) -> str:
         infocode = str(detail.get("infocode") or "")
         info = str(detail.get("info") or "")
         if infocode == "20803" or info == "OVER_DIRECTION_RANGE":
-            return "语音已识别，但步行路线距离过长。请确认当前定位，或说一个更近的目的地。"
+            return "目的地过远，请换一个"
         if infocode == "20800":
-            return "语音已识别，但起点或终点不在高德步行规划范围内。请换一个附近地点。"
+            return "超出步行导航范围"
         if infocode == "20801":
-            return "语音已识别，但起点或终点附近没有可规划道路。请换一个更明确的位置。"
+            return "附近无可用路线"
         if infocode == "10001":
-            return "语音已识别，但高德服务 Key 不正确或已过期。"
+            return "地图服务配置错误"
         if infocode == "10002":
-            return "语音已识别，但高德 Web 服务没有开通对应接口权限。"
-        return f"语音已识别，但高德路线规划失败：{info or infocode or '未知错误'}。"
+            return "地图服务未授权"
+        return "路线规划失败，请重试"
     text = str(detail or "").strip()
     if "destination coordinate" in text or "destination_text" in text:
-        return "语音已识别，但没有听清目的地。请再说一次要去哪里。"
+        return "请再说一次目的地"
     if "origin coordinate" in text:
-        return "语音已识别，但当前定位不可用。请开启定位后再试。"
-    return "语音已识别，但路线规划暂时失败。请稍后再试。"
+        return "定位不可用，请重试"
+    return "路线规划失败，请重试"
 
 
 @app.post("/api/voice/transcribe")
