@@ -105,10 +105,6 @@ class SmartCaneAppController private constructor(
     private val hardwareEventBaselines = mutableMapOf<String, Int>()
     private val spokenEventIds = EventSpeechGate()
     private val nearbyRiskSpeechCooldown = RiskPointSpeechCooldown()
-    private val nearbyRiskSpeechHistory = appContext.getSharedPreferences(
-        "nearby_risk_speech_history",
-        Context.MODE_PRIVATE
-    )
     private var selfSosReplayDemoEnabled = true
     private var selfSosReplayStateMachine = SelfSosReplayStateMachine()
     private var navigationReceiverRegistered = false
@@ -572,10 +568,7 @@ class SmartCaneAppController private constructor(
 
         val now = System.currentTimeMillis()
         if (_uiState.value.voiceState == VoiceState.Listening) return
-        val persistedAt = nearbyRiskSpeechHistory.getLong("risk_${warning.eventId}", 0L)
-        if (!canSpeakRiskPoint(persistedAt, now)) return
         if (!nearbyRiskSpeechCooldown.tryAcquire(warning.eventId, now)) return
-        nearbyRiskSpeechHistory.edit().putLong("risk_${warning.eventId}", now).apply()
 
         val distanceCm = (warning.distanceM * 100).toInt().coerceAtLeast(1)
         val directionText = warning.relativeDirectionText.ifBlank { "前方" }
@@ -718,6 +711,7 @@ class SmartCaneAppController private constructor(
                 }
                 when (val result = SmartCaneApiClient.getLatestDeviceState(deviceId)) {
                     is ApiResult.Success -> result.data.state?.let {
+                        _uiState.update { state -> state.copy(fallPending = it.fallPending, fallStage = it.fallStage) }
                         realtimeHardwareRiskActive = it.online &&
                             !isNonHardwareSource(it.source) &&
                             it.riskType.lowercase(Locale.US) !in setOf("", "none", "history_risk")
@@ -1417,7 +1411,7 @@ class SmartCaneAppController private constructor(
                     deviceId,
                     location?.latitude,
                     location?.longitude,
-                    "用户发起紧急求助"
+                    "用户端发起 SOS 紧急求助，请立即联系并查看地图位置"
                 )
             )
             when (result) {
@@ -1543,10 +1537,9 @@ internal const val RISK_POINT_SPEECH_COOLDOWN_MS = 5 * 60 * 1000L
 internal fun compactSpeechText(text: String): String {
     val normalized = text.trim().replace(Regex("\\s+"), "")
     if (normalized.isBlank()) return ""
-    val canonical = normalized.trimEnd('。', '！', '!', '；', ';')
-    if (canonical.contains("跌倒") && canonical != "检测到跌倒") return ""
+    if (normalized.contains("疑似跌倒")) return ""
     val corrected = when {
-        normalized.contains("紧急求助") -> "用户发起紧急求助"
+        normalized.contains("AndroidApp") && normalized.contains("紧急求助") -> "用户发起紧急求助"
         normalized.contains("语音请求失败") -> "语音请求失败，请重试"
         normalized.contains("语音识别暂时不可用") -> "语音识别失败，请重试"
         normalized.contains("后端暂时不可用") -> "后端暂不可用"
@@ -1576,9 +1569,6 @@ internal class RiskPointSpeechCooldown(
         return true
     }
 }
-
-internal fun canSpeakRiskPoint(lastSpokenAt: Long, now: Long): Boolean =
-    lastSpokenAt <= 0L || now - lastSpokenAt >= RISK_POINT_SPEECH_COOLDOWN_MS
 
 internal class EventSpeechGate(
     private val retainedEventCount: Int = 512
@@ -1684,7 +1674,11 @@ data class AppUiState(
     val currentNavigationInstruction: String = "",
     val distanceToRouteM: Double = 0.0,
     val distanceToDestinationM: Double = 0.0,
-    val navigationArrived: Boolean = false,
+    val navigationArrived: Boolean = false
+    ,
+    val fallPending: Boolean = false,
+    val fallStage: String? = null
+    ,
     val activeNavigationRoute: NavigationRouteDto? = null,
     val alternativeNavigationRoutes: List<NavigationRouteDto> = emptyList(),
     val selectedRouteIndex: Int? = null

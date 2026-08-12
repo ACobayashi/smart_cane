@@ -172,6 +172,7 @@ fun SmartCaneRootApp() {
                 message = uiState.message,
                 voiceTranscript = uiState.voiceTranscript,
                 urgentAlert = uiState.urgentAlert,
+                fallPending = uiState.fallPending,
                 navigationPreference = uiState.navigationPreference,
                 onVoicePressStart = controller::startVoicePress,
                 onVoicePressEnd = controller::endVoicePress,

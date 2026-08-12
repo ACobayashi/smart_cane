@@ -32,8 +32,8 @@ class AlertSpeechRoleTest {
             alertSpeechForRole(
                 role = "companion",
                 riskType = "sos",
-                voicePrompt = "用户发起紧急求助",
-                message = "用户发起紧急求助",
+                voicePrompt = "用户端发起 SOS 紧急求助，请立即联系并查看地图位置",
+                message = "用户端发起 SOS 紧急求助，请立即联系并查看地图位置",
                 sosAlarmActive = false
             )
         )
@@ -41,9 +41,8 @@ class AlertSpeechRoleTest {
 
     @Test
     fun speechIsLimitedToFifteenCharactersAndCorrectsLegacySosText() {
-        assertEquals("用户发起紧急求助", compactSpeechText("收到旧版紧急求助，请尽快联系使用者。"))
-        assertEquals("", compactSpeechText("跌倒状态待确认"))
-        assertEquals("检测到跌倒。", compactSpeechText("检测到跌倒。"))
+        assertEquals("用户发起紧急求助", compactSpeechText("收到 Android App 紧急求助，请尽快联系使用者。"))
+        assertEquals("", compactSpeechText("检测到疑似跌倒，请恢复正常握杖姿态后继续使用。"))
         assertEquals(15, compactSpeechText("这是一条没有标点并且明显超过十五个字的语音播报内容").length)
     }
 
@@ -54,8 +53,6 @@ class AlertSpeechRoleTest {
         assertEquals(false, cooldown.tryAcquire(42, 300_999L))
         assertEquals(true, cooldown.tryAcquire(42, 301_000L))
         assertEquals(true, cooldown.tryAcquire(43, 301_001L))
-        assertFalse(canSpeakRiskPoint(1_000L, 300_999L))
-        assertTrue(canSpeakRiskPoint(1_000L, 301_000L))
     }
 
     @Test
@@ -64,8 +61,8 @@ class AlertSpeechRoleTest {
             alertSpeechForRole(
                 role = "blind",
                 riskType = "sos",
-                voicePrompt = "用户发起紧急求助",
-                message = "用户发起紧急求助",
+                voicePrompt = "用户端发起 SOS 紧急求助，请立即联系并查看地图位置",
+                message = "用户端发起 SOS 紧急求助，请立即联系并查看地图位置",
                 sosAlarmActive = false
             )
         )
