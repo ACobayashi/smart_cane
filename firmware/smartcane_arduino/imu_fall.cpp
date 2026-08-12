@@ -7,13 +7,16 @@
 #include "config.h"
 #include "i2c_bus.h"
 
-// BMI270 minimal register path for acceleration-only fall detection.
+// BMI270 minimal register path for acceleration + gyro fall detection.
 static const uint8_t REG_CHIP_ID = 0x00;
 static const uint8_t REG_STATUS = 0x03;
-static const uint8_t REG_ACC_X_LSB = 0x0C;
+static const uint8_t REG_GYR_X_LSB = 0x0C;
+static const uint8_t REG_ACC_X_LSB = 0x12;
 static const uint8_t REG_INTERNAL_STATUS = 0x21;
 static const uint8_t REG_ACC_CONF = 0x40;
 static const uint8_t REG_ACC_RANGE = 0x41;
+static const uint8_t REG_GYR_CONF = 0x42;
+static const uint8_t REG_GYR_RANGE = 0x43;
 static const uint8_t REG_INIT_CTRL = 0x59;
 static const uint8_t REG_INIT_ADDR_0 = 0x5B;
 static const uint8_t REG_INIT_DATA = 0x5E;
@@ -24,53 +27,43 @@ static const uint8_t BMI270_CMD_SOFT_RESET = 0xB6;
 static const uint8_t BMI270_INIT_OK = 0x01;
 static const uint8_t BMI270_CONFIG_CHUNK_BYTES = 16;
 
+enum FallDetectorStage {
+  FALL_STAGE_NORMAL,
+  FALL_STAGE_CANDIDATE,
+  FALL_STAGE_POST_FALL_WAIT,
+  FALL_STAGE_CONFIRMED
+};
+
 static ImuFallState state;
 static unsigned long lastSampleMs = 0;
-static unsigned long impactMs = 0;
-static unsigned long lyingSinceMs = 0;
-static unsigned long slowLyingSinceMs = 0;
-static unsigned long uprightStableSinceMs = 0;
-static unsigned long slowTiltStartedMs = 0;
-static bool slowTiltCandidate = false;
+static FallDetectorStage fallStage = FALL_STAGE_NORMAL;
+static unsigned long candidateStartedMs = 0;
+static unsigned long postFallStartedMs = 0;
+static unsigned long stillLyingSinceMs = 0;
 static unsigned long lastFallEventMs = 0;
 static unsigned long lastRawStreamPrintMs = 0;
 static unsigned long recoverySinceMs = 0;
 static bool streamRaw = false;
-static bool havePrevAccel = false;
-static float prevAxG = 0.0f;
-static float prevAyG = 0.0f;
-static float prevAzG = 1.0f;
-static float prevTotalG = 1.0f;
-static float candidatePeakG = 0.0f;
-static float candidateMinG = 10.0f;
-static bool candidateHadFreefall = false;
-static bool candidateHadImpact = false;
-static bool candidateHadVerticalDrop = false;
+static bool baselineReady = false;
+static float baselineAxG = 0.0f;
+static float baselineAyG = 0.0f;
+static float baselineAzG = 1.0f;
+static float baselinePostureDeg = 0.0f;
+static uint8_t candidateTriggerBits = 0;
 
 static bool readAccel();
 static void printDebugRegisters();
 static void printStreamSample();
 
 static void resetFallCandidate() {
-  impactMs = 0;
-  lyingSinceMs = 0;
-  slowLyingSinceMs = 0;
-  uprightStableSinceMs = 0;
-  slowTiltStartedMs = 0;
-  slowTiltCandidate = false;
-  candidatePeakG = 0.0f;
-  candidateMinG = 10.0f;
-  candidateHadFreefall = false;
-  candidateHadImpact = false;
-  candidateHadVerticalDrop = false;
+  fallStage = FALL_STAGE_NORMAL;
+  candidateStartedMs = 0;
+  postFallStartedMs = 0;
+  stillLyingSinceMs = 0;
+  candidateTriggerBits = 0;
 }
 
 static void rememberAccel() {
-  prevAxG = state.axG;
-  prevAyG = state.ayG;
-  prevAzG = state.azG;
-  prevTotalG = state.totalG;
-  havePrevAccel = true;
 }
 
 static void configureShuttleBoardPins() {
@@ -263,10 +256,12 @@ static bool detectAndConfigureBmi270() {
 
   writeReg(REG_PWR_CONF, 0x00);
   delay(10);
-  writeReg(REG_PWR_CTRL, 0x04);    // accel enable
+  writeReg(REG_PWR_CTRL, 0x06);    // accel + gyro enable
   delay(10);
   writeReg(REG_ACC_CONF, 0xA8);   // accel normal mode, about 100 Hz ODR
   writeReg(REG_ACC_RANGE, 0x01);  // +-4 g
+  writeReg(REG_GYR_CONF, 0xA8);   // gyro normal mode, about 100 Hz ODR
+  writeReg(REG_GYR_RANGE, 0x00);  // +-2000 deg/s
   delay(80);
   state.available = true;
   state.reason = "bmi270_ready";
@@ -281,24 +276,33 @@ static bool detectAndConfigureBmi270() {
 }
 
 static bool readAccel() {
-  uint8_t bytes[6] = {0};
-  if (!readReg(REG_ACC_X_LSB, bytes, sizeof(bytes))) {
+  uint8_t bytes[12] = {0};
+  if (!readReg(REG_GYR_X_LSB, bytes, sizeof(bytes))) {
     state.available = false;
     state.reason = "read_failed";
     return false;
   }
 
-  state.axRaw = (int16_t)((uint16_t)bytes[1] << 8 | bytes[0]);
-  state.ayRaw = (int16_t)((uint16_t)bytes[3] << 8 | bytes[2]);
-  state.azRaw = (int16_t)((uint16_t)bytes[5] << 8 | bytes[4]);
+  state.gxRaw = (int16_t)((uint16_t)bytes[1] << 8 | bytes[0]);
+  state.gyRaw = (int16_t)((uint16_t)bytes[3] << 8 | bytes[2]);
+  state.gzRaw = (int16_t)((uint16_t)bytes[5] << 8 | bytes[4]);
+  state.axRaw = (int16_t)((uint16_t)bytes[7] << 8 | bytes[6]);
+  state.ayRaw = (int16_t)((uint16_t)bytes[9] << 8 | bytes[8]);
+  state.azRaw = (int16_t)((uint16_t)bytes[11] << 8 | bytes[10]);
 
   if (state.axRaw == 0 && state.ayRaw == 0 && state.azRaw == 0) {
     state.axG = 0.0f;
     state.ayG = 0.0f;
     state.azG = 0.0f;
+    state.gxDps = 0.0f;
+    state.gyDps = 0.0f;
+    state.gzDps = 0.0f;
+    state.gyroDps = 0.0f;
     state.totalG = 0.0f;
     state.pitchDeg = 0.0f;
     state.rollDeg = 0.0f;
+    state.postureDeg = 0.0f;
+    state.angleChangeDeg = 0.0f;
     state.confidence = 0.0f;
     state.stage = "zero_data";
     state.reason = "accel_zero_data";
@@ -310,6 +314,13 @@ static bool readAccel() {
   state.axG = state.axRaw / 8192.0f;
   state.ayG = state.ayRaw / 8192.0f;
   state.azG = state.azRaw / 8192.0f;
+  // GYR_RANGE is configured to +-2000 dps, so one LSB is about 0.061 dps.
+  state.gxDps = state.gxRaw * 2000.0f / 32768.0f;
+  state.gyDps = state.gyRaw * 2000.0f / 32768.0f;
+  state.gzDps = state.gzRaw * 2000.0f / 32768.0f;
+  state.gyroDps = sqrtf(state.gxDps * state.gxDps +
+                        state.gyDps * state.gyDps +
+                        state.gzDps * state.gzDps);
   state.totalG = sqrtf(state.axG * state.axG + state.ayG * state.ayG + state.azG * state.azG);
 
   float safeTotal = state.totalG < 0.01f ? 0.01f : state.totalG;
@@ -323,62 +334,71 @@ static bool readAccel() {
   float postureDeg = tiltDeg;
   if (pitchAbsDeg > postureDeg) postureDeg = pitchAbsDeg;
   if (rollAbsDeg > postureDeg) postureDeg = rollAbsDeg;
+  state.postureDeg = postureDeg;
   state.updatedAtMs = millis();
 
   unsigned long now = millis();
-  float accelDeltaG = 0.0f;
-  float verticalDeltaG = 0.0f;
-  if (havePrevAccel) {
-    float dx = state.axG - prevAxG;
-    float dy = state.ayG - prevAyG;
-    float dz = state.azG - prevAzG;
-    accelDeltaG = sqrtf(dx * dx + dy * dy + dz * dz);
-    verticalDeltaG = fabsf(dz);
+  if (!baselineReady) {
+    baselineAxG = state.axG;
+    baselineAyG = state.ayG;
+    baselineAzG = state.azG;
+    baselinePostureDeg = postureDeg;
+    baselineReady = true;
   }
 
-  bool stableGravity = state.totalG >= SMARTCANE_FALL_STABLE_MIN_G &&
-                       state.totalG <= SMARTCANE_FALL_STABLE_MAX_G;
-  bool stillNow = havePrevAccel &&
-                  stableGravity &&
-                  accelDeltaG <= SMARTCANE_FALL_STILL_DELTA_G;
-  bool lying = stableGravity &&
-               (tiltDeg >= SMARTCANE_FALL_LIE_TILT_DEG ||
-                postureDeg >= SMARTCANE_FALL_POSTURE_DEG);
-  bool uprightUsage = stillNow && postureDeg <= 35.0f;
-  if (uprightUsage) {
-    if (uprightStableSinceMs == 0) {
-      uprightStableSinceMs = now;
-    }
+  float dot = state.axG * baselineAxG + state.ayG * baselineAyG + state.azG * baselineAzG;
+  float baseMag = sqrtf(baselineAxG * baselineAxG +
+                        baselineAyG * baselineAyG +
+                        baselineAzG * baselineAzG);
+  float denom = baseMag * safeTotal;
+  float angleFromBaseline = 0.0f;
+  if (denom > 0.01f) {
+    float ratio = dot / denom;
+    ratio = ratio > 1.0f ? 1.0f : ratio;
+    ratio = ratio < -1.0f ? -1.0f : ratio;
+    angleFromBaseline = acosf(ratio) * 57.2957795f;
+  } else {
+    angleFromBaseline = fabsf(postureDeg - baselinePostureDeg);
   }
-  bool wasUprightStable = uprightStableSinceMs != 0 &&
-                           now - uprightStableSinceMs >= SMARTCANE_FALL_SLOW_UPRIGHT_MS;
-  bool slowTiltMotion = wasUprightStable &&
-                        postureDeg >= 45.0f &&
-                        havePrevAccel &&
-                        accelDeltaG >= SMARTCANE_FALL_SLOW_MIN_MOTION_G;
-  if (slowTiltMotion) {
-    slowTiltCandidate = true;
-    slowTiltStartedMs = now;
-  }
-  if (slowTiltCandidate &&
-      slowTiltStartedMs != 0 &&
-      now - slowTiltStartedMs > SMARTCANE_FALL_SLOW_TILT_WINDOW_MS) {
-    slowTiltCandidate = false;
-    slowTiltStartedMs = 0;
-    slowLyingSinceMs = 0;
+  state.angleChangeDeg = angleFromBaseline;
+
+  bool baselineStill = state.gyroDps <= SMARTCANE_FALL_BASELINE_STILL_GYRO_DPS &&
+                       state.totalG >= SMARTCANE_FALL_BASELINE_ACC_MIN_G &&
+                       state.totalG <= SMARTCANE_FALL_BASELINE_ACC_MAX_G &&
+                       fallStage == FALL_STAGE_NORMAL &&
+                       !state.fallActive;
+  if (baselineStill && angleFromBaseline <= 12.0f) {
+    baselineAxG = baselineAxG * 0.96f + state.axG * 0.04f;
+    baselineAyG = baselineAyG * 0.96f + state.ayG * 0.04f;
+    baselineAzG = baselineAzG * 0.96f + state.azG * 0.04f;
+    baselinePostureDeg = baselinePostureDeg * 0.96f + postureDeg * 0.04f;
+    state.angleChangeDeg = angleFromBaseline;
   }
 
-  bool freefall = state.totalG <= SMARTCANE_FALL_FREEFALL_G;
-  bool hardImpact = state.totalG >= SMARTCANE_FALL_IMPACT_G;
-  bool abruptVertical = havePrevAccel &&
-                        accelDeltaG >= SMARTCANE_FALL_JERK_G &&
-                        verticalDeltaG >= SMARTCANE_FALL_VERTICAL_DELTA_G &&
-                        state.totalG >= SMARTCANE_FALL_VERTICAL_TRIGGER_G;
-  bool fallMotionCandidate = freefall || hardImpact || abruptVertical;
+  bool accelTrigger = state.totalG > SMARTCANE_FALL_ACCEL_HIGH_G ||
+                      state.totalG < SMARTCANE_FALL_ACCEL_LOW_G;
+  bool gyroTrigger = state.gyroDps > SMARTCANE_FALL_GYRO_TRIGGER_DPS;
+  bool fastAngleTrigger = angleFromBaseline > SMARTCANE_FALL_FAST_ANGLE_DEG &&
+                          state.gyroDps > SMARTCANE_FALL_STILL_GYRO_DPS;
+  uint8_t triggerCount = (accelTrigger ? 1 : 0) +
+                         (gyroTrigger ? 1 : 0) +
+                         (fastAngleTrigger ? 1 : 0);
+  uint8_t triggerBits = (accelTrigger ? 0x01 : 0) |
+                        (gyroTrigger ? 0x02 : 0) |
+                        (fastAngleTrigger ? 0x04 : 0);
+  bool lyingAngle = angleFromBaseline > SMARTCANE_FALL_LYING_ANGLE_DEG ||
+                    postureDeg > SMARTCANE_FALL_LYING_ANGLE_DEG;
+  bool stillLying = lyingAngle &&
+                    state.gyroDps < SMARTCANE_FALL_STILL_GYRO_DPS &&
+                    state.totalG > SMARTCANE_FALL_STILL_ACC_MIN_G &&
+                    state.totalG < SMARTCANE_FALL_STILL_ACC_MAX_G;
+  bool uprightAgain = angleFromBaseline < SMARTCANE_FALL_CANCEL_UPRIGHT_DEG &&
+                      state.gyroDps < SMARTCANE_FALL_STILL_GYRO_DPS &&
+                      state.totalG > SMARTCANE_FALL_STILL_ACC_MIN_G &&
+                      state.totalG < SMARTCANE_FALL_STILL_ACC_MAX_G;
 
   if (state.fallActive) {
-    bool uprightStable = stillNow && postureDeg <= (SMARTCANE_FALL_POSTURE_DEG - 25.0f);
-    if (uprightStable) {
+    if (uprightAgain) {
       if (recoverySinceMs == 0) {
         recoverySinceMs = now;
       } else if (now - recoverySinceMs >= SMARTCANE_FALL_RECOVERY_MS) {
@@ -398,87 +418,108 @@ static bool readAccel() {
     return true;
   }
 
-  if (fallMotionCandidate) {
-    if (impactMs == 0 || now - impactMs > SMARTCANE_FALL_CONFIRM_WINDOW_MS) {
-      resetFallCandidate();
-    }
-    impactMs = now;
-    lyingSinceMs = 0;
-    slowLyingSinceMs = 0;
-    candidatePeakG = state.totalG > candidatePeakG ? state.totalG : candidatePeakG;
-    candidateMinG = state.totalG < candidateMinG ? state.totalG : candidateMinG;
-    candidateHadFreefall = candidateHadFreefall || freefall;
-    candidateHadImpact = candidateHadImpact || hardImpact;
-    candidateHadVerticalDrop = candidateHadVerticalDrop || abruptVertical;
-    state.stage = freefall ? "freefall_candidate" :
-                  (hardImpact ? "impact_candidate" : "vertical_drop_candidate");
-    state.reason = "large_motion_candidate";
-    state.confidence = 0.45f;
-  } else if (impactMs != 0 && now - impactMs <= SMARTCANE_FALL_CONFIRM_WINDOW_MS) {
-    candidatePeakG = state.totalG > candidatePeakG ? state.totalG : candidatePeakG;
-    candidateMinG = state.totalG < candidateMinG ? state.totalG : candidateMinG;
-    bool diagonalDropSignature = candidateHadVerticalDrop &&
-                                 candidatePeakG >= SMARTCANE_FALL_VERTICAL_PEAK_G &&
-                                 candidateMinG <= SMARTCANE_FALL_VERTICAL_MIN_G;
-    bool strongFallSignature = candidateHadFreefall ||
-                               candidateHadImpact ||
-                               diagonalDropSignature;
+  switch (fallStage) {
+    case FALL_STAGE_NORMAL:
+      if (triggerCount >= 2) {
+        fallStage = FALL_STAGE_CANDIDATE;
+        candidateStartedMs = now;
+        postFallStartedMs = 0;
+        stillLyingSinceMs = 0;
+        candidateTriggerBits = triggerBits;
+        state.stage = "fall_candidate";
+        state.reason = "two_of_three_motion_triggers";
+        state.confidence = accelTrigger ? 0.62f : 0.56f;
+      } else {
+        state.stage = "normal";
+        state.reason = "normal_motion";
+        state.confidence = 0.20f;
+      }
+      break;
 
-    if (strongFallSignature && lying && stillNow) {
-      if (lyingSinceMs == 0) {
-        lyingSinceMs = now;
-      }
-      state.stage = "still_lying_candidate";
-      state.reason = "large_motion_then_still_tilted";
-      state.confidence = 0.72f;
-      if (now - lyingSinceMs >= SMARTCANE_FALL_LIE_MS &&
-          now - lastFallEventMs >= SMARTCANE_FALL_UPLOAD_COOLDOWN_MS) {
-        state.fallActive = true;
-        state.eventPending = true;
-        state.stage = "confirmed";
-        state.reason = "confirmed_fall";
-        state.confidence = 0.92f;
-        lastFallEventMs = now;
-        recoverySinceMs = 0;
+    case FALL_STAGE_CANDIDATE:
+      candidateTriggerBits |= triggerBits;
+      if (uprightAgain && now - candidateStartedMs > 250) {
         resetFallCandidate();
+        state.stage = "normal";
+        state.reason = "candidate_cancelled_upright";
+        state.confidence = 0.18f;
+      } else if (now - candidateStartedMs > SMARTCANE_FALL_CANDIDATE_WINDOW_MS) {
+        fallStage = FALL_STAGE_POST_FALL_WAIT;
+        postFallStartedMs = now;
+        stillLyingSinceMs = 0;
+        state.stage = "post_fall_wait";
+        state.reason = "waiting_for_still_lying";
+        state.confidence = 0.58f;
+      } else if (lyingAngle) {
+        fallStage = FALL_STAGE_POST_FALL_WAIT;
+        postFallStartedMs = now;
+        stillLyingSinceMs = 0;
+        state.stage = "post_fall_wait";
+        state.reason = "candidate_reached_lying_angle";
+        state.confidence = 0.66f;
+      } else {
+        state.stage = "fall_candidate";
+        state.reason = "motion_candidate_window";
+        state.confidence = 0.52f;
       }
-    } else {
-      if (!stillNow) {
-        lyingSinceMs = 0;
+      break;
+
+    case FALL_STAGE_POST_FALL_WAIT:
+      if (uprightAgain) {
+        resetFallCandidate();
+        state.stage = "normal";
+        state.reason = "post_fall_cancelled_upright";
+        state.confidence = 0.18f;
+      } else if (now - postFallStartedMs > SMARTCANE_FALL_POST_WAIT_TIMEOUT_MS) {
+        resetFallCandidate();
+        state.stage = "normal";
+        state.reason = "post_fall_timeout_not_still";
+        state.confidence = 0.22f;
+      } else if (stillLying) {
+        if (stillLyingSinceMs == 0) {
+          stillLyingSinceMs = now;
+        }
+        state.stage = "post_fall_wait";
+        state.reason = "still_lying_confirming";
+        state.confidence = 0.78f;
+        if (now - stillLyingSinceMs >= SMARTCANE_FALL_CONFIRM_MS &&
+            now - lastFallEventMs >= SMARTCANE_FALL_UPLOAD_COOLDOWN_MS) {
+          fallStage = FALL_STAGE_CONFIRMED;
+          state.fallActive = true;
+          state.eventPending = true;
+          state.stage = "confirmed";
+          state.reason = "confirmed_fall_two_of_three";
+          state.confidence = (candidateTriggerBits & 0x01) ? 0.92f : 0.88f;
+          lastFallEventMs = now;
+          recoverySinceMs = 0;
+          stillLyingSinceMs = 0;
+        }
+      } else {
+        stillLyingSinceMs = 0;
+        state.stage = "post_fall_wait";
+        state.reason = "waiting_for_still_lying";
+        state.confidence = 0.60f;
       }
-      state.stage = "motion_candidate";
-      state.reason = strongFallSignature ? "waiting_for_still_tilted" : "reject_sweep_or_small_motion";
-      state.confidence = strongFallSignature ? 0.55f : 0.25f;
-    }
-  } else {
-    if (impactMs != 0) {
+      break;
+
+    case FALL_STAGE_CONFIRMED:
+    default:
+      state.stage = "confirmed";
+      state.reason = "confirmed_fall";
+      state.confidence = 0.92f;
+      break;
+  }
+
+  if (fallStage == FALL_STAGE_NORMAL && baselineStill && state.gyroDps < 8.0f &&
+      state.totalG > SMARTCANE_FALL_BASELINE_ACC_MIN_G &&
+      state.totalG < SMARTCANE_FALL_BASELINE_ACC_MAX_G &&
+      angleFromBaseline < 8.0f) {
+    // Keep normal holding posture fresh; lying posture is never learned here.
+    baselinePostureDeg = baselinePostureDeg * 0.98f + postureDeg * 0.02f;
+  }
+
+  if (fallStage == FALL_STAGE_CONFIRMED && !state.fallActive) {
       resetFallCandidate();
-    }
-    if (slowTiltCandidate && lying && stillNow && now - lastFallEventMs >= SMARTCANE_FALL_UPLOAD_COOLDOWN_MS) {
-      if (slowLyingSinceMs == 0) {
-        slowLyingSinceMs = now;
-      }
-      state.stage = "slow_lying_candidate";
-      state.reason = "slow_tilt_then_still_lying";
-      state.confidence = 0.62f;
-      if (now - slowLyingSinceMs >= SMARTCANE_FALL_SLOW_LIE_MS) {
-        state.fallActive = true;
-        state.eventPending = true;
-        state.stage = "confirmed";
-        state.reason = "confirmed_slow_fall";
-        state.confidence = 0.86f;
-        lastFallEventMs = now;
-        recoverySinceMs = 0;
-        resetFallCandidate();
-      }
-    } else {
-      if (!slowTiltCandidate) {
-        slowLyingSinceMs = 0;
-      }
-      state.stage = "normal";
-      state.reason = "normal_motion";
-      state.confidence = 0.2f;
-    }
   }
 
   rememberAccel();
@@ -597,18 +638,8 @@ void imuFallClear() {
   state.eventPending = false;
   state.stage = state.available ? "normal" : "idle";
   state.reason = state.available ? "manual_clear" : state.reason;
-  impactMs = 0;
-  lyingSinceMs = 0;
-  slowLyingSinceMs = 0;
-  uprightStableSinceMs = 0;
-  slowTiltStartedMs = 0;
-  slowTiltCandidate = false;
   recoverySinceMs = 0;
-  candidatePeakG = 0.0f;
-  candidateMinG = 10.0f;
-  candidateHadFreefall = false;
-  candidateHadImpact = false;
-  candidateHadVerticalDrop = false;
+  resetFallCandidate();
 }
 
 void imuFallPrintStatus() {
@@ -624,6 +655,10 @@ void imuFallPrintStatus() {
   Serial.print(state.stage);
   Serial.print(F(" total_g="));
   Serial.print(state.totalG, 2);
+  Serial.print(F(" gyro="));
+  Serial.print(state.gyroDps, 1);
+  Serial.print(F(" angle_delta="));
+  Serial.print(state.angleChangeDeg, 1);
   Serial.print(F(" pitch="));
   Serial.print(state.pitchDeg, 1);
   Serial.print(F(" roll="));
@@ -644,6 +679,12 @@ void imuFallPrintRaw() {
   Serial.print(state.ayRaw);
   Serial.print(F(" az="));
   Serial.print(state.azRaw);
+  Serial.print(F(" gx="));
+  Serial.print(state.gxRaw);
+  Serial.print(F(" gy="));
+  Serial.print(state.gyRaw);
+  Serial.print(F(" gz="));
+  Serial.print(state.gzRaw);
   Serial.print(F(" ax_g="));
   Serial.print(state.axG, 3);
   Serial.print(F(" ay_g="));
@@ -652,6 +693,10 @@ void imuFallPrintRaw() {
   Serial.print(state.azG, 3);
   Serial.print(F(" total_g="));
   Serial.print(state.totalG, 3);
+  Serial.print(F(" gyro_dps="));
+  Serial.print(state.gyroDps, 1);
+  Serial.print(F(" angle_delta="));
+  Serial.print(state.angleChangeDeg, 1);
   Serial.print(F(" pitch="));
   Serial.print(state.pitchDeg, 1);
   Serial.print(F(" roll="));
@@ -672,6 +717,10 @@ static void printStreamSample() {
   Serial.print(state.pitchDeg, 0);
   Serial.print(F(" roll="));
   Serial.print(state.rollDeg, 0);
+  Serial.print(F(" gyro="));
+  Serial.print(state.gyroDps, 0);
+  Serial.print(F(" angle="));
+  Serial.print(state.angleChangeDeg, 0);
   Serial.print(F(" stage="));
   Serial.print(state.stage);
   Serial.print(F(" reason="));

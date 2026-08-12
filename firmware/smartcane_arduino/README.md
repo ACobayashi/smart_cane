@@ -11,7 +11,7 @@ It is designed for the hardware already tested in the supplied Arduino IDE scree
 - MPR121/HW-017 touch module on TCA `CH7` at `0x5A`
 - Active buzzer on `GPIO4`
 - ESP-SensairShuttle BMI270 motion sensor for fall detection
-- PCA9685 vibration feedback on the blue board through TCA `CH6`, channels `CH0/CH1/CH2`
+- PCA9685 vibration feedback on the blue board through TCA `CH6`; current bench firmware drives one physical motor on `CH0`
 
 All pins, I2C addresses, thresholds, Wi-Fi, backend URL, and device ID are in `config.h`.
 
@@ -37,14 +37,12 @@ Install these from Arduino IDE Library Manager:
 | VL53L1X right | TCA `CH4` |
 | VL53L1X down | TCA `CH5` |
 | PCA9685 blue board | TCA `CH6`, address `0x40` |
-| Left vibration motor | PCA9685 `CH0`: signal to `PWM/SIG`, red to `V+`, black/brown to `GND` |
-| Right vibration motor | PCA9685 `CH1`: signal to `PWM/SIG`, red to `V+`, black/brown to `GND` |
-| Center vibration motor | PCA9685 `CH2`: signal to `PWM/SIG`, red to `V+`, black/brown to `GND` |
+| Single vibration motor | PCA9685 `CH0`: signal to `PWM/SIG`, red to `V+`, black/brown to `GND` |
 | Buzzer | `GPIO4` |
 | Physical button | `GPIO5`, active low with internal pull-up; short press requests Android voice input, long press triggers SOS |
 | BMI270 | SensairShuttle BMI270/BMM350 ShuttleBoard; current hardware appears at I2C `0x69`; firmware probes both `0x68/0x69` and uploads the Bosch BMI270 config before reading acceleration |
 
-Keep each three-pin motor plug orientation unchanged: black/brown to `GND`, red to `V+`, and white/orange/yellow to signal/PWM. Do not put motor signals on ESP32 GPIO while using the full cane build; the blue PCA9685 board is controlled through I2C on TCA `CH6`. The actual motor plugs are on blue board positions `0/1/2`: left/right/center.
+Keep each three-pin motor plug orientation unchanged: black/brown to `GND`, red to `V+`, and white/orange/yellow to signal/PWM. Do not put motor signals on ESP32 GPIO while using the full cane build; the blue PCA9685 board is controlled through I2C on TCA `CH6`. The current bench test uses only blue board position `0` / `CH0`; left/right/center cues are pulse patterns on that one motor.
 
 For the blue PCA9685 shield, the green terminal `V+ / GND` is the motor power path. The PCA9685 chip itself also needs a valid logic `VCC / GND` path. On shield variants with `VCC select`, make sure only one side is selected. For ESP32-C5 tests, prefer the 3.3 V logic side when the board supports it; never short the 5 V and 3.3 V sides together. With the replacement motor board installed, keep the existing I2C wiring and verify `pca` shows `0x40` before testing `m1/m2/m3`.
 
@@ -92,7 +90,7 @@ Local safety does not depend on Wi-Fi:
 - Detects front warning/danger by distance thresholds.
 - Detects close ground obstacles below `20 cm`; treats `20-90 cm` as normal; detects steps, pits, or suspended ground only when the down-facing valid distance is strictly above `90 cm`.
 - Fuses nearby history when available.
-- Drives obstacle vibration through PCA9685 `CH0/CH1/CH2` on TCA `CH6`.
+- Drives obstacle vibration through PCA9685 `CH0` on TCA `CH6` in current single-motor bench mode.
 - Uses the buzzer only for high-risk cases, ground drops, and SOS.
 - Debounces the physical button. Short press uploads `voice_request` for the blind Android app; long press after `2 s` uploads `sos`.
 - Reads MPR121 touch electrodes 0-5.
@@ -147,10 +145,11 @@ btn
 mode
 path
 vib status
-vib left
-vib right
-vib center
-vib all
+vib status
+m1
+m2
+m3
+mall
 vib stop
 imu
 imuraw
@@ -169,9 +168,9 @@ Use `scan`, `pca`, `imu`, `read`, `vib all`, and `beep` for real hardware checks
 1. Start the backend.
 2. Flash `cane_001`.
 3. Run `status` or `read` once to see the current distances and risk state.
-4. Put an obstacle in front: Serial prints one risk event, center motor vibrates, and high danger also beeps.
+4. Put an obstacle in front: Serial prints one risk event, the CH0 motor vibrates, and high danger also beeps.
 5. Keep the obstacle still: the same place/same risk is not printed repeatedly.
-6. Open left/right side space or move to another grid cell: the left/right motor suggests the safer direction and a new event can be recorded.
+6. Open left/right side space or move to another grid cell: the CH0 motor uses different pulse counts to indicate the cue and a new event can be recorded.
 7. Point the down-facing sensor below `20 cm`: `down_obstacle` is uploaded as low risk. Keep it between `20-90 cm`: no step/drop alarm. Move it strictly above `90 cm` for 2 confirmed frames: `ground_drop`/`ground_step` triggers stop feedback. No-target is reported separately as `down_no_target`.
 8. Run `mark` or long-press touch E1: backend records a user risk point.
 9. Run `path`: local walked route/risk ring buffer is printed.

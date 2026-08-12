@@ -609,6 +609,10 @@ static void handleFallEvent(const ImuFallState &fall) {
   Serial.println(F("action=BUZZER_ONLY notify=blind_and_companion"));
   Serial.print(F("imu g="));
   Serial.print(fall.totalG, 2);
+  Serial.print(F(" gyro="));
+  Serial.print(fall.gyroDps, 1);
+  Serial.print(F(" angle_delta="));
+  Serial.print(fall.angleChangeDeg, 1);
   Serial.print(F(" pitch="));
   Serial.print(fall.pitchDeg, 1);
   Serial.print(F(" roll="));
@@ -623,28 +627,10 @@ static void handleFallEvent(const ImuFallState &fall) {
   beepPatternSos();
   recordPathPoint(fallRisk);
 
-  if (strcmp(fall.reason, "confirmed_slow_fall") == 0 ||
-      strcmp(fall.stage, "slow_lying_candidate") == 0) {
-    pendingSlowFallUpload = true;
-    pendingSlowFallUntilMs = millis() + SMARTCANE_FALL_SLOW_CANCEL_MS;
-    pendingSlowFallRisk = fallRisk;
-    pendingSlowFallState = fall;
-    currentRisk.level = RISK_HIGH;
-    currentRisk.riskType = "fall_pending";
-    currentRisk.direction = "stop";
-    currentRisk.reason = "slow_fall_cancel_pending";
-    stableRisk = currentRisk;
-    pendingRisk = currentRisk;
-    uploadSensorFrame(currentRisk, distances, location, fall, nullptr,
-                      "source=slow_fall_cancel_window", nullptr,
-                      activeFallEventId.c_str(), true, false,
-                      "slow_fall_cancel_pending");
-    Serial.println(F("[FALL] slow fall pending; short press or touch E2 cancels before companion upload"));
-    return;
-  }
-
-  String extra = String("{\"source\":\"bmi270_imu\",\"notify\":\"blind_and_companion\",\"fall_stage\":\"fall_fast\",\"imu_stage\":\"") +
+  String extra = String("{\"source\":\"bmi270_imu\",\"notify\":\"blind_and_companion\",\"fall_stage\":\"fall_confirmed\",\"imu_stage\":\"") +
                  fall.stage + "\",\"total_g\":" + String(fall.totalG, 2) +
+                 ",\"gyro_dps\":" + String(fall.gyroDps, 1) +
+                 ",\"angle_delta_deg\":" + String(fall.angleChangeDeg, 1) +
                  ",\"pitch_deg\":" + String(fall.pitchDeg, 1) +
                  ",\"roll_deg\":" + String(fall.rollDeg, 1) + "}";
   uploadRiskEvent("fall_detected",
@@ -657,7 +643,7 @@ static void handleFallEvent(const ImuFallState &fall) {
                   extra.c_str(),
                   activeFallEventId.c_str(),
                   true,
-                  "fast_fall_confirmed");
+                  "fall_confirmed_two_of_three");
 }
 
 static void checkPendingSlowFallUpload() {
@@ -1004,12 +990,17 @@ static void printVibrationStatus() {
   Serial.print(F(SMARTCANE_BUILD_TAG));
   Serial.print(F(" mode="));
   Serial.print(vibrationModeName());
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  Serial.print(F(" physical=single pca_ch="));
+  Serial.println(SMARTCANE_VIB_PRIMARY_CHANNEL);
+#else
   Serial.print(F(" pca_ch L/R/C="));
   Serial.print(SMARTCANE_VIB_LEFT_CHANNEL);
   Serial.print(F("/"));
   Serial.print(SMARTCANE_VIB_RIGHT_CHANNEL);
   Serial.print(F("/"));
   Serial.println(SMARTCANE_VIB_CENTER_CHANNEL);
+#endif
 }
 
 static void printPcaProbe() {
@@ -1143,19 +1134,36 @@ static void processCommand(String command) {
   } else if (command == "vib" || command == "vibration" || command == "motor" || command == "vib status") {
     printVibrationStatus();
   } else if (command == "vib left" || command == "motor 1" || command == "m1" || command == "1") {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+    Serial.println(F("[CMD] PCA9685 IIC single motor CH0 / short pulse 1"));
+#else
     Serial.println(F("[CMD] PCA9685 IIC motor 1 / left"));
-    vibrationPcaIicMotor(0, 700);
+#endif
+    vibrationPcaIicMotor(0, SMARTCANE_VIB_SINGLE_PULSE_MS);
   } else if (command == "vib right" || command == "motor 2" || command == "m2" || command == "2") {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+    Serial.println(F("[CMD] PCA9685 IIC single motor CH0 / test pulses 2"));
+#else
     Serial.println(F("[CMD] PCA9685 IIC motor 2 / right"));
+#endif
     vibrationPcaIicMotor(1, 700);
   } else if (command == "vib center" || command == "vib centre" || command == "motor 3" || command == "m3" || command == "3") {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+    Serial.println(F("[CMD] PCA9685 IIC single motor CH0 / test pulses 3"));
+#else
     Serial.println(F("[CMD] PCA9685 IIC motor 3 / center"));
+#endif
     vibrationPcaIicMotor(2, 700);
   } else if (command == "vib all" || command == "motor all" || command == "mall" || command == "a") {
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+    Serial.println(F("[CMD] PCA9685 IIC single motor CH0 / all-cue test"));
+    vibrationPcaIicMotor(2, 700);
+#else
     Serial.println(F("[CMD] PCA9685 IIC motor all"));
     vibrationPcaIicMotor(0, 700);
     vibrationPcaIicMotor(1, 700);
     vibrationPcaIicMotor(2, 700);
+#endif
   } else if (command == "vib stop" || command == "motor stop" || command == "mstop") {
     Serial.println(F("[CMD] PCA9685 IIC motor stop"));
     vibrationPcaIicStop();
@@ -1283,9 +1291,15 @@ static void printHelp() {
   Serial.println(F("  imu|imurescan print BMI270 fall detector status/rescan"));
   Serial.println(F("  imuraw        print one BMI270 raw accel sample"));
   Serial.println(F("  imustream on/off print brief BMI270 fall state"));
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  Serial.println(F("  vib status    show single physical motor on PCA9685 CH0"));
+  Serial.println(F("  m1/m2/m3      CH0 short one/two/three pulse tests"));
+  Serial.println(F("  mall|a        CH0 all-cue test; mstop stops immediately"));
+#else
   Serial.println(F("  vib left|right|center|all|stop|status"));
-  Serial.println(F("  pca|pca init  probe/reinitialize PCA9685 on configured TCA channel"));
   Serial.println(F("  m1/m2/m3/mall or 1/2/3/a drive motors; works even without New Line"));
+#endif
+  Serial.println(F("  pca|pca init  probe/reinitialize PCA9685 on configured TCA channel"));
   Serial.println(F("  beep|beep danger|beep sos|buzzer on|buzzer off"));
   Serial.println(F("  nearby        fetch /api/risks/nearby"));
   Serial.println(F("  deep          call backend /api/ai/deep-risk"));
@@ -1353,7 +1367,11 @@ void setup() {
   printHelp();
 #endif
   printStatus();
+#if SMARTCANE_VIB_MOTOR_COUNT <= 1
+  Serial.println(F("[SERIAL] ready; single motor CH0 commands: status pca vib m1 m2 m3 mstop"));
+#else
   Serial.println(F("[SERIAL] ready; commands: status wifi wifiscan read beep m1 m2 m3"));
+#endif
   printSerialHeartbeat();
   publishRiskEventIfNeeded(currentRisk);
 }

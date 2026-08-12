@@ -42,13 +42,15 @@ The bottom three-pin headers are labeled by row:
 | Red/middle row | `V+` |
 | Black/bottom row | `GND` |
 
-Firmware expects:
+Current firmware bench mode expects one physical motor only:
 
 | Motor | PCA9685 channel |
 | --- | --- |
-| Left motor | `CH0` |
-| Right motor | `CH1` |
-| Center motor | `CH2` |
+| Single vibration motor | `CH0` |
+
+`m1`, `m2`, `m3`, left/right/center, obstacle, ground-drop, and SOS cues all run through `CH0`.
+The firmware encodes them as different pulse patterns so you can test safely with one mounted motor.
+After the other motors are wired, change `SMARTCANE_VIB_MOTOR_COUNT` in `firmware/smartcane_arduino/config.h` back to `3`.
 
 If the motor plug has three wires, keep its original orientation:
 
@@ -76,9 +78,9 @@ mstop
 Expected behavior:
 
 - `scan` or `pca` finds PCA9685 at `0x40` on TCA channel `6`.
-- `m1` vibrates left only.
-- `m2` vibrates right only.
-- `m3` vibrates center only.
-- Each motor stops automatically after about 700 ms; `mstop` stops all outputs immediately.
+- `m1` vibrates the CH0 motor once.
+- `m2` vibrates the same CH0 motor twice.
+- `m3` vibrates the same CH0 motor three times.
+- `mstop` stops CH0 immediately.
 
 If a motor runs continuously, power off immediately and recheck the motor power/driver wiring.
