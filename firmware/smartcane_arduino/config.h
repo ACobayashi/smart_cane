@@ -7,7 +7,7 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-ground-startup-safe-20260812"
+#define SMARTCANE_BUILD_TAG "arduino-fall-lying-lock-20260812"
 #define SMARTCANE_DEVICE_ID "cane_001"
 #ifndef SMARTCANE_DEVICE_NAME
 #define SMARTCANE_DEVICE_NAME "智能盲杖01"
@@ -232,7 +232,11 @@
 #define SMARTCANE_FALL_FAST_ANGLE_DEG 45.0f
 #define SMARTCANE_FALL_CANDIDATE_ANGLE_DEG 30.0f
 #define SMARTCANE_FALL_FAST_TILT_RATE_DPS 45.0f
+// A fast fall must first cross the 58-degree entry angle.  Once it has done
+// so, permit a little post-impact settling while retaining the fall lock;
+// this lower hold angle is not an independent fall trigger.
 #define SMARTCANE_FALL_LYING_ANGLE_DEG 58.0f
+#define SMARTCANE_FALL_LYING_HOLD_ANGLE_DEG 40.0f
 #define SMARTCANE_FALL_STILL_GYRO_DPS 22.0f
 #define SMARTCANE_FALL_STILL_ACC_MIN_G 0.78f
 #define SMARTCANE_FALL_STILL_ACC_MAX_G 1.22f

@@ -181,7 +181,7 @@ Cloud LLM and speech services are optional. Put keys only in `backend/.env`; nev
 10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`. The second cane receives historical risk statistics and fuses them into local risk.
 11. Short-press the physical button or run `btn`: the cane uploads `voice_request`; the blind Android app enters voice interaction mode. The companion app does not receive this ordinary voice request.
 12. Hold the physical button for 2 seconds or run `sos`: the cane vibrates, beeps, prints SOS, uploads `sos`, and the backend distinguishes it from `fall_detected`.
-13. For fall detection, drop/tilt the BMI270 board onto a soft cushion and keep it sideways briefly. The cane uses buzzer only, uploads `fall_detected`, and the backend exposes it to both blind and companion app roles.
+13. For fall detection, first hold the cane in its normal use pose for at least 0.5 s, then make a rapid large tilt and leave the BMI270 board lying still for 2 s. The rapid tilt immediately silences all ordinary distance/step cues; a confirmed fall gives exactly one continuous 2 s buzzer and 2 s vibration, uploads `fall_detected`, and remains locked until the normal use pose is stable again.
 
 Serial commands are listed in `firmware/smartcane_arduino/README.md`.
 

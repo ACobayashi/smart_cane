@@ -540,6 +540,7 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "SMARTCANE_FALL_CANDIDATE_WINDOW_MS 2500" in config
     assert "SMARTCANE_FALL_GYRO_TRIGGER_DPS 35.0f" in config
     assert "SMARTCANE_FALL_FAST_TILT_RATE_DPS 45.0f" in config
+    assert "SMARTCANE_FALL_LYING_HOLD_ANGLE_DEG 40.0f" in config
     assert "SMARTCANE_FALL_NORMAL_USE_LAUNCH_WINDOW_MS 1200" in config
     assert "bool normalUseArmed = normalUseReady" in imu
     assert "bool rapidTiltStart = angleFromBaseline >= SMARTCANE_FALL_FAST_ANGLE_DEG" in imu
@@ -552,8 +553,13 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "hold still 2000ms to confirm" in imu
     assert "state.fallLock = true;" in imu
     assert "bool lyingAngle = angleFromBaseline >= SMARTCANE_FALL_LYING_ANGLE_DEG;" in imu
+    assert "bool lyingHoldAngle = angleFromBaseline >= SMARTCANE_FALL_LYING_HOLD_ANGLE_DEG;" in imu
+    assert "rapid_tilt_reached_lying_angle" in imu
+    assert "waiting_for_retained_lying_angle" in imu
+    vibration = (ROOT / "firmware" / "smartcane_arduino" / "vibration.cpp").read_text(encoding="utf-8")
+    assert "vibrateIndex(0, level, durationMs);" in vibration
     assert "candidate_expired_without_lying" in imu
-    assert "candidate_cancelled_lying_not_retained" in imu
+    assert "post_fall_cancelled_upright" in imu
     assert "triggerTotalG" in imu
     assert "fall_confirmed" in sketch and "fall_detected" in sketch
     assert "fallLockActive" in sketch

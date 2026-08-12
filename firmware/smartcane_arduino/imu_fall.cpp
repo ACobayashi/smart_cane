@@ -479,8 +479,12 @@ static bool readAccel() {
   // The cane is intentionally held at an angle, and BMI270 axes vary with the
   // enclosure. Only a change from the learned normal-use vector represents
   // lying down; absolute pitch/roll must never be used as the lying test.
+  // Entry uses the high angle so an ordinary cane lift cannot start a lying
+  // confirmation.  After that entry, a real landing may rebound or settle by
+  // several degrees; retain the lock down to the separate hold threshold.
   bool lyingAngle = angleFromBaseline >= SMARTCANE_FALL_LYING_ANGLE_DEG;
-  bool stillLying = lyingAngle &&
+  bool lyingHoldAngle = angleFromBaseline >= SMARTCANE_FALL_LYING_HOLD_ANGLE_DEG;
+  bool stillLying = lyingHoldAngle &&
                     state.gyroDps < SMARTCANE_FALL_STILL_GYRO_DPS &&
                     state.totalG > SMARTCANE_FALL_STILL_ACC_MIN_G &&
                     state.totalG < SMARTCANE_FALL_STILL_ACC_MAX_G;
@@ -520,10 +524,23 @@ static bool readAccel() {
         bool normalUseArmed = normalUseReady && lastNormalUseQualifiedMs != 0 &&
             now - lastNormalUseQualifiedMs <= SMARTCANE_FALL_NORMAL_USE_LAUNCH_WINDOW_MS;
         if (normalUseArmed && abnormalMotionStart) {
-        beginFallCandidate(now, angleFromBaseline, jerkGPerSec, accelTrigger,
-                           rapidTiltStart ? "normal_use_rapid_tilt_lock_waiting_lying"
-                                          : directLyingTransitionStart ? "normal_use_direct_lying_tilt_lock_waiting_lying"
-                                          : "normal_use_impact_assisted_tilt_lock_waiting_lying");
+          beginFallCandidate(now, angleFromBaseline, jerkGPerSec, accelTrigger,
+                             rapidTiltStart ? "normal_use_rapid_tilt_lock_waiting_lying"
+                                            : directLyingTransitionStart ? "normal_use_direct_lying_tilt_lock_waiting_lying"
+                                            : "normal_use_impact_assisted_tilt_lock_waiting_lying");
+          // The trigger sample in the user's real fall already crossed 58°.
+          // Do not wait for one more 50 ms sample to notice it: that sample
+          // can be a settling/rebound frame and used to release the lock back
+          // to ordinary obstacle reporting before the two-second check began.
+          if (lyingAngle) {
+            fallStage = FALL_STAGE_LYING_WAIT;
+            stillLyingSinceMs = 0;
+            state.fallLock = true;
+            state.stage = "fall_lying_wait";
+            state.reason = "rapid_tilt_reached_lying_angle";
+            state.confidence = 0.70f;
+            Serial.println(F("[FALL] lying posture reached; hold still 2000ms to confirm"));
+          }
         } else {
         state.stage = "normal";
         state.reason = normalUseArmed ? "normal_use" : "learning_normal_use";
@@ -570,14 +587,16 @@ static bool readAccel() {
         state.stage = "normal";
         state.reason = "post_fall_cancelled_upright";
         state.confidence = 0.18f;
-      } else if (!lyingAngle) {
-        // The relative lying pose was not retained, so it was not a fall that
-        // meets the product rule. Clear the temporary candidate lock.
-        resetFallCandidate();
-        resetNormalUseQualification();
-        state.stage = "normal";
-        state.reason = "candidate_cancelled_lying_not_retained";
-        state.confidence = 0.18f;
+      } else if (!lyingHoldAngle) {
+        // A fall that has crossed the 58-degree entry threshold can settle a
+        // little after landing. Keep ordinary distance alerts locked until it
+        // is genuinely upright again, but do not start the two-second timer
+        // until the retained lying angle is present.
+        stillLyingSinceMs = 0;
+        state.fallLock = true;
+        state.stage = "fall_lying_wait";
+        state.reason = "waiting_for_retained_lying_angle";
+        state.confidence = 0.60f;
       } else if (stillLying) {
         if (stillLyingSinceMs == 0) {
           stillLyingSinceMs = now;
