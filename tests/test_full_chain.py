@@ -523,8 +523,8 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     sketch = (ROOT / "firmware" / "smartcane_arduino" / "smartcane_arduino.ino").read_text(encoding="utf-8")
     imu = (ROOT / "firmware" / "smartcane_arduino" / "imu_fall.cpp").read_text(encoding="utf-8")
     assert "SMARTCANE_STEP_UP_ENTER_CM 9" in config
-    assert "SMARTCANE_STEP_DOWN_ENTER_CM 11" in config
-    assert "SMARTCANE_DEEP_DROP_CM 30" in config
+    assert "SMARTCANE_STEP_DOWN_ENTER_CM 50" in config
+    assert "SMARTCANE_DEEP_DROP_CM 70" in config
     assert "SMARTCANE_SIDE_ALERT_CM 35" in config
     assert "SMARTCANE_DOWN_NO_TARGET_CM 400" in config
     assert "lastHeightDeltaCm >= SMARTCANE_STEP_DOWN_ENTER_CM" in firmware

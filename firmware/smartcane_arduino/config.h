@@ -7,7 +7,7 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-fall-lying-lock-20260812"
+#define SMARTCANE_BUILD_TAG "arduino-step-down-50cm-20260812"
 #define SMARTCANE_DEVICE_ID "cane_001"
 #ifndef SMARTCANE_DEVICE_NAME
 #define SMARTCANE_DEVICE_NAME "智能盲杖01"
@@ -171,8 +171,13 @@
 // is the VL53L1X invalid/no-target sentinel and is never a drop.
 #define SMARTCANE_DOWN_NO_TARGET_CM 400
 #define SMARTCANE_STEP_UP_ENTER_CM 9
-#define SMARTCANE_STEP_DOWN_ENTER_CM 11
-#define SMARTCANE_DEEP_DROP_CM 30
+// Downward range is especially sensitive to a small hand lift because the
+// box and cane are held diagonally.  Require a 50 cm compensated increase
+// before announcing a downstairs edge/drop; the up-stair threshold remains
+// intentionally smaller so a raised step is still announced before contact.
+#define SMARTCANE_STEP_DOWN_ENTER_CM 50
+// Keep a distinct "large drop" class above the new downstairs threshold.
+#define SMARTCANE_DEEP_DROP_CM 70
 #define SMARTCANE_STEP_CLEAR_CM 5
 #define SMARTCANE_DOWN_BASELINE_TOLERANCE_CM 3
 #define SMARTCANE_DOWN_BASELINE_STABLE_FRAMES 7
