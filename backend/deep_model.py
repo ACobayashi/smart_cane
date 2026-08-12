@@ -7,9 +7,8 @@ from typing import Any
 
 MODEL_VERSION = "tiny-mlp-risk-tier-v4-baseline-step"
 
-DOWN_OBSTACLE_CM = 20.0
-FRONT_WARN_CM = 70.0
-FRONT_DANGER_CM = 35.0
+FRONT_WARN_CM = 105.0
+FRONT_DANGER_CM = 40.0
 
 
 @dataclass(frozen=True)
@@ -82,7 +81,7 @@ def make_features(req: Any, history: dict[str, Any]) -> DeepRiskFeatures:
 
     best_side = max(left, right)
     front_close = clamp((FRONT_WARN_CM - front) / max(1.0, FRONT_WARN_CM - FRONT_DANGER_CM))
-    side_blocked = clamp((95.0 - best_side) / 75.0)
+    side_blocked = clamp((35.0 - best_side) / 35.0)
     reported_risk = str(
         getattr(req, "risk_type", None)
         or getattr(req, "manual_risk_type", None)
@@ -154,11 +153,18 @@ def tiny_mlp(features: DeepRiskFeatures) -> float:
 
 def safety_floor(req: Any, history: dict[str, Any]) -> float:
     front = cm(getattr(req, "front_cm", None), 220.0)
-    down = cm(getattr(req, "down_cm", None), 30.0)
 
     floor = 0.0
-    if down < DOWN_OBSTACLE_CM:
-        floor = max(floor, 0.18)
+    # The down-facing channel is geometric, not an obstacle distance.  Only
+    # the firmware-confirmed ground event may raise a step/drop floor.
+    reported_risk = str(
+        getattr(req, "risk_type", None)
+        or getattr(req, "manual_risk_type", None)
+        or getattr(req, "alert_type", None)
+        or ""
+    )
+    if reported_risk in {"ground_step_down", "ground_step_up", "ground_step", "ground_drop"}:
+        floor = max(floor, 0.58)
     if front < FRONT_DANGER_CM:
         floor = max(floor, 0.74)
     elif front < FRONT_WARN_CM:
@@ -190,7 +196,6 @@ def level_for_request(req: Any, score: float) -> str:
         "front_obstacle",
         "left_obstacle",
         "right_obstacle",
-        "down_obstacle",
         "history_risk",
         "prolonged_obstacle",
         "approaching_obstacle",

@@ -69,6 +69,11 @@ struct RiskState {
   bool realtimeMedium = false;
   bool realtimeHigh = false;
   bool historyInfluenced = false;
+  float compensatedDownCm = -1.0f;
+  float groundBaselineCm = -1.0f;
+  float heightDeltaCm = 0.0f;
+  const char *groundState = "GROUND_NORMAL";
+  bool caneMotion = false;
   unsigned long detectedAtMs = 0;
 };
 

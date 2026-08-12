@@ -121,7 +121,7 @@ static void fillMock(DistanceReadings &out) {
       out.rightCm = 140;
       break;
     case MOCK_SCENARIO_GROUND_DROP:
-      out.downCm = SMARTCANE_GROUND_BASE_CM + SMARTCANE_DOWN_DROP_DELTA_CM + 5;
+      out.downCm = SMARTCANE_GROUND_BASE_CM + SMARTCANE_DEEP_DROP_CM + 5;
       break;
     case MOCK_SCENARIO_BLOCKED:
       out.frontCm = 42;

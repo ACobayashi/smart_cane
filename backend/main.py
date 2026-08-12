@@ -41,20 +41,16 @@ LEVEL_RANK = {"low": 0, "medium": 1, "high": 2}
 DEVICE_OFFLINE_SECONDS = 60
 AMAP_BASE_URL = "https://restapi.amap.com/v3"
 
-FRONT_WARN_CM = 80
+FRONT_WARN_CM = 105
 FRONT_DANGER_CM = 40
-SIDE_SAFE_CM = 55
-SIDE_NEAR_CM = 55
-SIDE_DANGER_CM = 30
+SIDE_SAFE_CM = 80
+SIDE_ALERT_CM = 35
+SIDE_NEAR_CM = SIDE_ALERT_CM
+SIDE_DANGER_CM = SIDE_ALERT_CM
 SIDE_BLOCKED_CM = 30
 GROUND_BASE_CM = 55
-GROUND_DROP_THRESHOLD_CM = 20
-GROUND_DROP_DELTA_CM = 20
-DOWN_OBSTACLE_CM = 20
-DOWN_DROP_CM = 20
-DOWN_NO_TARGET_CM = 390
-DOWN_STEP_EDGE_MIN_CM = 20
-DOWN_STEP_EDGE_MAX_CM = 389
+GROUND_DROP_THRESHOLD_CM = 30
+GROUND_DROP_DELTA_CM = 11
 DEFAULT_NEARBY_RADIUS_M = 80.0
 ROUTE_RISK_BUFFER_M = 8.0
 WALKING_NAVIGATION_MAX_DISTANCE_M = 3000.0
@@ -130,9 +126,6 @@ HARDWARE_PROFILE: dict[str, Any] = {
         "side_danger": SIDE_DANGER_CM,
         "ground_base": GROUND_BASE_CM,
         "ground_drop_threshold": GROUND_DROP_THRESHOLD_CM,
-        "down_obstacle": DOWN_OBSTACLE_CM,
-        "down_step_edge_min": DOWN_STEP_EDGE_MIN_CM,
-        "down_step_edge_max": DOWN_STEP_EDGE_MAX_CM,
     },
 }
 
@@ -266,6 +259,11 @@ class SensorFrameCreate(BaseModel):
     down_raw_cm: Optional[int] = Field(None, ge=0, le=450)
     down_valid: Optional[bool] = None
     down_status: Optional[str] = None
+    compensated_down_cm: Optional[float] = Field(None, ge=0, le=450)
+    ground_baseline_cm: Optional[float] = Field(None, ge=0, le=450)
+    height_delta_cm: Optional[float] = Field(None, ge=-450, le=450)
+    ground_state: Optional[str] = None
+    cane_motion: Optional[bool] = None
     risk_type: Optional[str] = None
     risk_level: Optional[str] = Field(None, pattern="^(low|medium|high)$")
     direction: Optional[str] = None
@@ -300,6 +298,10 @@ class SensorFrameCreate(BaseModel):
     safe_traversal_count: Optional[int] = None
     pitch_deg: Optional[float] = None
     roll_deg: Optional[float] = None
+    gyro_x_dps: Optional[float] = None
+    gyro_y_dps: Optional[float] = None
+    gyro_z_dps: Optional[float] = None
+    gyro_dps: Optional[float] = None
     alert_type: Optional[str] = None
     location_quality: Optional[str] = None
     location_provider: Optional[str] = None
@@ -347,12 +349,6 @@ class NavigationSessionUpdate(BaseModel):
     distance_delta_m: Optional[float] = Field(None, ge=0)
     risk_event_count_delta: int = Field(0, ge=0)
     safe_pass: Optional[bool] = None
-
-
-class DeviceCommandCreate(BaseModel):
-    device_id: str = Field(..., min_length=1)
-    command: str = Field(..., pattern="^(cancel_fall)$")
-    source: str = Field("android", min_length=1)
 
 
 class LegacySosCreate(BaseModel):
@@ -527,6 +523,7 @@ def init_db() -> None:
                 right_cm INTEGER,
                 down_cm INTEGER,
                 heading_deg REAL,
+                direction TEXT,
                 risk_type TEXT,
                 risk_level TEXT,
                 risk_score REAL,
@@ -747,6 +744,7 @@ def init_db() -> None:
         ensure_column(conn, "risk_points", "message", "TEXT")
         ensure_column(conn, "device_state", "device_name", "TEXT")
         ensure_column(conn, "device_state", "heading_deg", "REAL")
+        ensure_column(conn, "device_state", "direction", "TEXT")
         ensure_column(conn, "device_state", "risk_score", "REAL")
         ensure_column(conn, "device_state", "voice_prompt", "TEXT")
         ensure_column(conn, "device_state", "source", "TEXT")
@@ -855,6 +853,7 @@ def device_state_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "leftCm": item.get("left_cm"),
         "rightCm": item.get("right_cm"),
         "downCm": item.get("down_cm"),
+        "direction": item.get("direction") or "none",
         "headingDeg": item.get("heading_deg"),
         "riskType": item.get("risk_type") or "none",
         "riskLevel": item.get("risk_level") or "low",
@@ -877,9 +876,9 @@ def upsert_device_state(frame: SensorFrameCreate, lat: float, lng: float, analys
             INSERT INTO device_state (
                 device_id, device_name, updated_at, online, lat, lng, battery,
                 front_cm, left_cm, right_cm, down_cm, heading_deg,
-                risk_type, risk_level, risk_score, voice_prompt, source,
+                direction, risk_type, risk_level, risk_score, voice_prompt, source,
                 fall_event_id, fall_pending, fall_detected, fall_stage, fall_confidence
-            ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(device_id) DO UPDATE SET
                 device_name = COALESCE(NULLIF(excluded.device_name, ''), device_state.device_name),
                 updated_at = excluded.updated_at,
@@ -892,6 +891,7 @@ def upsert_device_state(frame: SensorFrameCreate, lat: float, lng: float, analys
                 right_cm = excluded.right_cm,
                 down_cm = excluded.down_cm,
                 heading_deg = excluded.heading_deg,
+                direction = excluded.direction,
                 risk_type = excluded.risk_type,
                 risk_level = excluded.risk_level,
                 risk_score = excluded.risk_score,
@@ -915,6 +915,7 @@ def upsert_device_state(frame: SensorFrameCreate, lat: float, lng: float, analys
                 frame.right_cm,
                 frame.down_cm,
                 frame.heading_deg,
+                analysis.get("direction") or "none",
                 analysis.get("risk_type") or "none",
                 analysis.get("risk_level") or "low",
                 analysis.get("risk_score") or 0,
@@ -943,8 +944,8 @@ def upsert_device_state_from_event(event: dict[str, Any]) -> Optional[dict[str, 
             INSERT INTO device_state (
                 device_id, device_name, updated_at, online, lat, lng, battery,
                 front_cm, left_cm, right_cm, down_cm, heading_deg,
-                risk_type, risk_level, risk_score, voice_prompt, source
-            ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                direction, risk_type, risk_level, risk_score, voice_prompt, source
+            ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(device_id) DO UPDATE SET
                 device_name = COALESCE(NULLIF(excluded.device_name, ''), device_state.device_name),
                 updated_at = excluded.updated_at,
@@ -956,6 +957,7 @@ def upsert_device_state_from_event(event: dict[str, Any]) -> Optional[dict[str, 
                 left_cm = COALESCE(excluded.left_cm, device_state.left_cm),
                 right_cm = COALESCE(excluded.right_cm, device_state.right_cm),
                 down_cm = COALESCE(excluded.down_cm, device_state.down_cm),
+                direction = excluded.direction,
                 risk_type = excluded.risk_type,
                 risk_level = excluded.risk_level,
                 risk_score = COALESCE(excluded.risk_score, device_state.risk_score),
@@ -973,6 +975,7 @@ def upsert_device_state_from_event(event: dict[str, Any]) -> Optional[dict[str, 
                 event.get("left_cm") if event.get("left_cm") is not None else event.get("leftCm"),
                 event.get("right_cm") if event.get("right_cm") is not None else event.get("rightCm"),
                 event.get("down_cm") if event.get("down_cm") is not None else event.get("downCm"),
+                event.get("direction") or "none",
                 event.get("risk_type") or event.get("riskType") or "none",
                 event.get("risk_level") or event.get("riskLevel") or event.get("level") or "low",
                 event.get("risk_score") if event.get("risk_score") is not None else event.get("riskScore"),
@@ -1356,7 +1359,6 @@ MAPPABLE_RISK_TYPES = {
     "right_obstacle",
     "ground_drop",
     "ground_step",
-    "down_obstacle",
     "down_no_target",
     "down_sensor_unavailable",
     "fall_detected",
@@ -1892,7 +1894,6 @@ def risk_level_for_analysis(risk_type: str, score: float) -> str:
     if risk_type in {"front_obstacle", "left_obstacle", "right_obstacle"}:
         return risk_level_from_score(score)
     if risk_type in {
-        "down_obstacle",
         "history_risk",
         "prolonged_obstacle",
         "approaching_obstacle",
@@ -1909,7 +1910,7 @@ def primary_distance_mm(risk_type: str, frame: SensorFrameCreate) -> Optional[in
         return frame.left_cm * 10
     if risk_type == "right_obstacle" and frame.right_cm is not None:
         return frame.right_cm * 10
-    if risk_type in {"ground_drop", "ground_step", "ground_step_down", "ground_step_up", "down_no_target", "down_sensor_unavailable", "down_obstacle", "fall_detected"} and frame.down_cm is not None:
+    if risk_type in {"ground_drop", "ground_step", "ground_step_down", "ground_step_up", "down_no_target", "down_sensor_unavailable", "fall_detected"} and frame.down_cm is not None:
         return frame.down_cm * 10
     if risk_type in {"prolonged_obstacle", "approaching_obstacle"} and frame.front_cm is not None:
         return frame.front_cm * 10
@@ -1921,7 +1922,7 @@ def front_score(front_cm: Optional[int]) -> float:
         return 0.0
     if front_cm <= FRONT_DANGER_CM:
         return clamp(72 + (FRONT_DANGER_CM - front_cm) * 0.35, 72, 90)
-    if front_cm < FRONT_WARN_CM:
+    if front_cm <= FRONT_WARN_CM:
         return clamp(10 + (FRONT_WARN_CM - front_cm) * 0.24, 10, 32)
     return 0.0
 
@@ -1929,10 +1930,10 @@ def front_score(front_cm: Optional[int]) -> float:
 def side_score(side_cm: Optional[int]) -> float:
     if side_cm is None:
         return 0.0
-    if side_cm <= SIDE_DANGER_CM:
-        return clamp(72 + (SIDE_DANGER_CM - side_cm) * 0.70, 72, 90)
-    if side_cm < SIDE_NEAR_CM:
-        return clamp(12 + (SIDE_NEAR_CM - side_cm) * 1.70, 12, 24)
+    # The firmware is authoritative for physical feedback, and normal sweep
+    # distances above 35 cm must not become server/app side-obstacle alerts.
+    if side_cm <= SIDE_ALERT_CM:
+        return clamp(20 + (SIDE_ALERT_CM - side_cm) * 4.0, 20, 90)
     return 0.0
 
 
@@ -1940,19 +1941,9 @@ def ground_score(down_cm: Optional[int]) -> float:
     return 0.0
 
 
-def down_obstacle_score(down_cm: Optional[int]) -> float:
-    if down_cm is None:
-        return 0.0
-    if down_cm < DOWN_OBSTACLE_CM:
-        return clamp(12 + (DOWN_OBSTACLE_CM - down_cm) * 0.8, 12, 28)
-    return 0.0
-
-
 def ground_step_score(down_cm: Optional[int]) -> float:
-    if down_cm is None:
-        return 0.0
-    if down_cm > DOWN_DROP_CM:
-        return clamp(55 + (down_cm - DOWN_DROP_CM) * 0.25, 55, 75)
+    # Retained for older callers only.  A slanted cane has no meaningful fixed
+    # down-distance threshold; only firmware direction/state may create a step.
     return 0.0
 
 
@@ -1969,13 +1960,13 @@ def history_score(history: dict[str, Any]) -> float:
 def choose_direction(frame: SensorFrameCreate, risk_type: str, level: str) -> str:
     if risk_type == "voice_request":
         return "none"
-    if risk_type in {"ground_drop", "ground_step", "ground_step_down", "ground_step_up", "fall_detected", "sos", "down_no_target", "down_sensor_unavailable"}:
+    if risk_type in {"ground_drop", "ground_step"}:
+        return frame.direction if frame.direction in {"up", "down"} else "stop"
+    if risk_type in {"ground_step_down", "ground_step_up", "fall_detected", "sos", "down_no_target", "down_sensor_unavailable"}:
         return "stop"
     if risk_type == "prolonged_obstacle":
         return "stop"
     if risk_type == "approaching_obstacle":
-        return "slow"
-    if risk_type == "down_obstacle":
         return "slow"
     if risk_type == "left_obstacle":
         return "keep_right"
@@ -2049,12 +2040,6 @@ def feedback_for_risk(risk_type: str, level: str, direction: str) -> dict[str, A
             "vibration": {"left": 70, "right": 70, "center": 85, "duration_ms": 650},
             "action": "stop",
         }
-    if risk_type == "down_obstacle":
-        return {
-            "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
-            "vibration": {"left": 30, "right": 30, "center": 45, "duration_ms": 300},
-            "action": "slow",
-        }
     if risk_type in {"front_obstacle", "left_obstacle", "right_obstacle"}:
         center_level = 45 if level == "low" else (70 if level == "medium" else 100)
         side_level = 45 if level == "low" else 80
@@ -2090,12 +2075,13 @@ def feedback_for_risk(risk_type: str, level: str, direction: str) -> dict[str, A
 
 
 def risk_reason_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, score: float) -> str:
-    if risk_type == "ground_step_down":
-        return f"down baseline delta >= 20cm, current down distance {frame.down_cm or '-'}cm"
-    if risk_type == "ground_step_up":
-        return f"down baseline delta <= -20cm, current down distance {frame.down_cm or '-'}cm"
     if risk_type == "ground_step":
-        return f"down distance {frame.down_cm or '-'}cm legacy ground_step"
+        return (
+            f"firmware compensated ground {frame.direction or '-'} step: "
+            f"baseline={frame.ground_baseline_cm if frame.ground_baseline_cm is not None else '-'}cm "
+            f"compensated={frame.compensated_down_cm if frame.compensated_down_cm is not None else '-'}cm "
+            f"delta={frame.height_delta_cm if frame.height_delta_cm is not None else '-'}cm"
+        )
     if risk_type == "none" or score <= 0:
         return "四路测距和 IMU 未发现需要提醒的风险"
     if risk_type == "voice_request":
@@ -2109,9 +2095,10 @@ def risk_reason_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, s
     if risk_type == "approaching_obstacle":
         return "前方距离在一段时间内持续缩短，存在逼近风险"
     if risk_type == "ground_drop":
-        return f"下视距离 {frame.down_cm or '-'}cm 超过地面基准 {GROUND_BASE_CM}cm + 落差阈值 {GROUND_DROP_THRESHOLD_CM}cm"
-    if risk_type == "down_obstacle":
-        return f"下视距离 {frame.down_cm or '-'}cm 小于近地障碍阈值 {DOWN_OBSTACLE_CM}cm"
+        return (
+            f"firmware compensated deep drop: baseline={frame.ground_baseline_cm if frame.ground_baseline_cm is not None else '-'}cm "
+            f"delta={frame.height_delta_cm if frame.height_delta_cm is not None else '-'}cm"
+        )
     if risk_type == "front_obstacle":
         return f"前方距离 {frame.front_cm or '-'}cm 小于斜持盲杖前向阈值 {FRONT_WARN_CM}/{FRONT_DANGER_CM}cm"
     if risk_type == "left_obstacle":
@@ -2136,8 +2123,6 @@ def map_weight_for_risk(risk_type: str, level: str, score: float) -> float:
         return 24.0
     if risk_type == "approaching_obstacle":
         return 22.0
-    if risk_type == "down_obstacle":
-        return 12.0
     if risk_type in {"front_obstacle", "left_obstacle", "right_obstacle"}:
         # Only confirmed medium/high obstacle events become shared map points.
         # Low-level sweep noise remains local vibration-only.
@@ -2150,153 +2135,39 @@ def map_weight_for_risk(risk_type: str, level: str, score: float) -> float:
 
 
 
-STEP_BASELINE_STABLE_FRAMES = 5
+STEP_BASELINE_STABLE_FRAMES = 7
 STEP_BASELINE_TOLERANCE_CM = 3
 STEP_CONFIRM_FRAMES = 2
-STEP_DELTA_CM = 20
-STEP_CLEAR_HYSTERESIS_CM = 12
-STEP_POSE_DELTA_DEG = 12.0
-STEP_SWING_G_DELTA = 0.45
+STEP_UP_ENTER_CM = 9
+STEP_DOWN_ENTER_CM = 11
+DEEP_DROP_CM = 30
+STEP_CLEAR_HYSTERESIS_CM = 5
+STEP_POSE_DELTA_DEG = 18.0
+STEP_SWING_G_DELTA = 0.18
 
 
 class DownStepTracker:
-    """Per-device stable-ground step detector.
+    """Compatibility guard for legacy frames without firmware ground state.
 
-    The backend mirrors the firmware state machine so periodic frames are not
-    reinterpreted with a fixed >90cm threshold.  It learns a stable down-facing
-    baseline, confirms 20cm front/back ground deltas over consecutive frames,
-    freezes the baseline while the user crosses the edge, then relearns on the
-    new stable ground.
+    Current ESP32 firmware owns the compensated, posture-aware detector.  The
+    backend never upgrades an arbitrary absolute `down_cm` to a step/drop.
     """
-
-    def __init__(self) -> None:
-        self.state = "NORMAL_GROUND"
-        self.baseline: Optional[float] = None
-        self.samples: list[float] = []
-        self.candidate_direction: Optional[str] = None
-        self.candidate_frames = 0
-        self.confirmed_direction: Optional[str] = None
-        self.last_pitch: Optional[float] = None
-        self.last_roll: Optional[float] = None
-        self.last_g: Optional[float] = None
-        self.fail_count = 0
-        self.stable_frames = 0
-
-    def pose_stable(self, frame: SensorFrameCreate) -> bool:
-        if frame.pitch_deg is None and frame.roll_deg is None and frame.accel_total_g is None:
-            return True
-        stable = True
-        if self.last_pitch is not None and frame.pitch_deg is not None:
-            stable = stable and abs(frame.pitch_deg - self.last_pitch) <= STEP_POSE_DELTA_DEG
-        if self.last_roll is not None and frame.roll_deg is not None:
-            stable = stable and abs(frame.roll_deg - self.last_roll) <= STEP_POSE_DELTA_DEG
-        if self.last_g is not None and frame.accel_total_g is not None:
-            stable = stable and abs(frame.accel_total_g - self.last_g) <= STEP_SWING_G_DELTA
-        if frame.pitch_deg is not None:
-            self.last_pitch = frame.pitch_deg
-        if frame.roll_deg is not None:
-            self.last_roll = frame.roll_deg
-        if frame.accel_total_g is not None:
-            self.last_g = frame.accel_total_g
-        return stable
-
-    def update_baseline(self, down_cm: float) -> None:
-        self.samples.append(down_cm)
-        if len(self.samples) > STEP_BASELINE_STABLE_FRAMES:
-            self.samples.pop(0)
-        if len(self.samples) >= STEP_BASELINE_STABLE_FRAMES and max(self.samples) - min(self.samples) <= STEP_BASELINE_TOLERANCE_CM:
-            self.baseline = sum(self.samples) / len(self.samples)
-            self.stable_frames = min(255, self.stable_frames + 1)
-        else:
-            self.stable_frames = 0
 
     def process(self, frame: SensorFrameCreate) -> dict[str, Any]:
         status = (frame.down_status or "ok").lower()
         down_value = frame.down_raw_cm if frame.down_raw_cm is not None else frame.down_cm
-        # VL53L1X sentinel: 400 means no valid target. It is diagnostic data,
-        # never a drop/step alarm.
-        if down_value == 400 or status in {"no_target", "out_of_range"}:
-            self.candidate_frames = 0
-            return {"risk_type": "none", "score": 0.0, "reason": "400cm/no-target sentinel ignored", "confidence": 0.0}
+        if down_value in {400, None} or status in {"no_target", "out_of_range"}:
+            return {"risk_type": "none", "score": 0.0, "reason": "no valid down target", "confidence": 0.0}
         if frame.down_valid is False or status in {"timeout", "offline", "disconnected", "unavailable", "invalid"}:
-            self.fail_count = min(255, self.fail_count + 1)
-            self.candidate_frames = 0
             return {"risk_type": "down_sensor_unavailable", "score": 58.0, "reason": "down sensor unavailable", "confidence": 0.70}
-        if down_value is None:
-            return {"risk_type": "none", "score": 0.0, "reason": "down distance absent", "confidence": 0.0}
-        down_cm = float(down_value)
-        self.fail_count = 0
-        pose_ok = self.pose_stable(frame)
-        if self.baseline is None:
-            if pose_ok:
-                self.update_baseline(down_cm)
-            return {"risk_type": "none", "score": 0.0, "reason": "learning stable down baseline", "confidence": 0.25}
-        delta = down_cm - self.baseline
-        if self.state == "NORMAL_GROUND":
-            if pose_ok and abs(delta) < STEP_DELTA_CM:
-                self.update_baseline(down_cm)
-                return {"risk_type": "none", "score": 0.0, "reason": f"baseline={self.baseline:.1f}cm delta={delta:.1f}cm", "confidence": 0.45}
-            if not pose_ok:
-                return {"risk_type": "none", "score": 0.0, "reason": "pose changing; baseline frozen", "confidence": 0.30}
-            direction = "down" if (delta >= STEP_DELTA_CM or down_cm > 150) else None
-            if direction:
-                self.state = "STEP_CANDIDATE_DOWN" if direction == "down" else "STEP_CANDIDATE_UP"
-                self.candidate_direction = direction
-                self.candidate_frames = 1
-            return {"risk_type": "none", "score": 0.0, "reason": f"step candidate delta={delta:.1f}cm", "confidence": 0.45}
-        if self.state.startswith("STEP_CANDIDATE"):
-            expected = self.candidate_direction
-            direction = "down" if (delta >= STEP_DELTA_CM or down_cm > 150) else None
-            if direction == expected and pose_ok:
-                self.candidate_frames += 1
-            else:
-                self.state = "NORMAL_GROUND"
-                self.candidate_frames = 0
-                self.candidate_direction = None
-                return {"risk_type": "none", "score": 0.0, "reason": "single-frame step delta rejected", "confidence": 0.35}
-            if self.candidate_frames >= STEP_CONFIRM_FRAMES:
-                self.state = "STEP_CONFIRMED"
-                self.confirmed_direction = expected
-                rtype = "ground_step_down" if expected == "down" else "ground_step_up"
-                prompt = "front/back ground delta confirmed"
-                return {"risk_type": rtype, "score": 62.0, "reason": f"{prompt}: baseline={self.baseline:.1f}cm current={down_cm:.1f}cm delta={delta:.1f}cm", "confidence": 0.86}
-            return {"risk_type": "none", "score": 0.0, "reason": "waiting consecutive step frames", "confidence": 0.45}
-        if self.state == "STEP_CONFIRMED":
-            self.state = "WAIT_NEW_GROUND"
-            rtype = "ground_step_down" if self.confirmed_direction == "down" else "ground_step_up"
-            return {"risk_type": rtype, "score": 62.0, "reason": "step confirmed; baseline frozen", "confidence": 0.82}
-        if self.state == "WAIT_NEW_GROUND":
-            if abs(delta) <= max(1, STEP_DELTA_CM - STEP_CLEAR_HYSTERESIS_CM):
-                self.state = "NORMAL_GROUND"
-                self.samples.clear()
-                if pose_ok:
-                    self.update_baseline(down_cm)
-                self.confirmed_direction = None
-                return {"risk_type": "none", "score": 0.0, "reason": "step cleared by hysteresis", "confidence": 0.45}
-            # Relearn a new baseline only after the new ground is stable.
-            if pose_ok:
-                self.samples.append(down_cm)
-                if len(self.samples) > STEP_BASELINE_STABLE_FRAMES:
-                    self.samples.pop(0)
-                if len(self.samples) >= STEP_BASELINE_STABLE_FRAMES and max(self.samples) - min(self.samples) <= STEP_BASELINE_TOLERANCE_CM:
-                    self.baseline = sum(self.samples) / len(self.samples)
-                    self.state = "NORMAL_GROUND"
-                    self.confirmed_direction = None
-                    self.candidate_frames = 0
-                    return {"risk_type": "none", "score": 0.0, "reason": "new ground baseline learned", "confidence": 0.45}
-            rtype = "ground_step_down" if self.confirmed_direction == "down" else "ground_step_up"
-            return {"risk_type": rtype, "score": 55.0, "reason": "waiting for new stable ground", "confidence": 0.70}
-        self.state = "NORMAL_GROUND"
-        return {"risk_type": "none", "score": 0.0, "reason": "state reset", "confidence": 0.2}
+        return {"risk_type": "none", "score": 0.0, "reason": "awaiting firmware posture-aware ground state", "confidence": 0.0}
 
 
 _DOWN_STEP_TRACKERS: dict[str, DownStepTracker] = {}
-_FALL_EVENT_IDS_SEEN: set[str] = set()
 
 
 def reset_runtime_detectors() -> None:
     _DOWN_STEP_TRACKERS.clear()
-    _FALL_EVENT_IDS_SEEN.clear()
 
 
 def analyze_down_step_frame(frame: SensorFrameCreate) -> dict[str, Any]:
@@ -2311,24 +2182,6 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
         fall_pending_suppressed = True
     else:
         fall_pending_suppressed = False
-        if frame.fall_event_id and frame.fall_event_id in _FALL_EVENT_IDS_SEEN:
-            return {
-                "risk_type": "none",
-                "risk_level": "low",
-                "risk_score": 0.0,
-                "map_weight": 0.0,
-                "mapWeight": 0.0,
-                "risk_reason": "duplicate fall_event_id ignored",
-                "riskReason": "duplicate fall_event_id ignored",
-                "risk_source_detail": "duplicate fall_event_id ignored",
-                "riskSourceDetail": "duplicate fall_event_id ignored",
-                "direction": "none",
-                "sensor": "none",
-                "distance_mm": None,
-                "voice_prompt": "",
-                "feedback": feedback_for_risk("none", "low", "none"),
-                "nearby_history": {"risk_count": history.get("risk_count", 0), "high_count": history.get("high_count", 0), "medium_count": history.get("medium_count", 0), "max_level": history.get("max_level", "low")},
-            }
         if frame.button_event == "short_press" or explicit_risk == "voice_request":
             risk_type = "voice_request"
             score = 1.0
@@ -2338,24 +2191,17 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
         elif frame.fall_detected is True or explicit_risk == "fall_detected" or imu_fall_score(frame) >= 90:
             risk_type = "fall_detected"
             score = 100.0 if frame.fall_detected is True else imu_fall_score(frame)
-            if frame.fall_event_id:
-                _FALL_EVENT_IDS_SEEN.add(frame.fall_event_id)
         elif explicit_risk in {"prolonged_obstacle", "approaching_obstacle"}:
             risk_type = str(explicit_risk)
             score = 34.0 if risk_type == "prolonged_obstacle" else 30.0
-        elif explicit_risk in {"ground_step_down", "ground_step_up", "down_no_target", "down_sensor_unavailable"}:
+        elif explicit_risk in {"ground_step_down", "ground_step_up"}:
+            # Older releases used type names to encode direction.  Preserve
+            # their records while publishing the current stable contract.
+            risk_type = "ground_step"
+            score = 58.0
+        elif explicit_risk in {"ground_step", "ground_drop", "down_no_target", "down_sensor_unavailable"}:
             risk_type = str(explicit_risk)
             score = 58.0
-        elif explicit_risk in {"ground_drop", "ground_step"}:
-            # Compatibility for older firmware: use the new baseline detector if no direction is supplied.
-            step = analyze_down_step_frame(frame)
-            risk_type = step["risk_type"] if step["risk_type"] != "none" else str(explicit_risk)
-            score = float(step.get("score") or 58.0)
-        elif explicit_risk == "down_obstacle":
-            # Deprecated: the down-facing sensor is reserved for ground
-            # discontinuity detection, not near-object obstacle alarms.
-            risk_type = "none"
-            score = 0.0
         elif frame.touch_electrode == 1 and frame.touch_event == "long_press":
             risk_type = "user_mark"
             score = max(45.0, history_score(history))
@@ -2370,7 +2216,7 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
             scores.pop("none", None)
             risk_type, score = max(scores.items(), key=lambda item: item[1]) if scores else ("none", 0.0)
             hist_score = history_score(history)
-            if score > 0 and risk_type not in {"ground_step_down", "ground_step_up", "down_no_target", "down_sensor_unavailable"}:
+            if score > 0 and risk_type not in {"ground_step", "ground_drop", "down_no_target", "down_sensor_unavailable"}:
                 score = max(score, min(100.0, score + hist_score * 0.12))
 
     public_risk_type = risk_type if score > 0 else "none"
@@ -2379,11 +2225,11 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
     feedback = feedback_for_risk(public_risk_type, level, direction)
     reason = frame.reason or risk_reason_for_risk(frame, public_risk_type, level, score)
     if fall_pending_suppressed:
-        reason = "slow fall is in cancel window; formal fall alert suppressed"
+        reason = "firmware is in lying confirmation; ordinary risks suppressed until recovery or formal fall"
     map_weight = round(map_weight_for_risk(public_risk_type, level, score), 1)
     confidence = frame.confidence
     if confidence is None:
-        confidence = 0.86 if public_risk_type in {"ground_step_down", "ground_step_up"} else (0.92 if public_risk_type == "fall_detected" else min(0.95, max(0.15, score / 100.0)))
+        confidence = 0.86 if public_risk_type in {"ground_step", "ground_drop"} else (0.92 if public_risk_type == "fall_detected" else min(0.95, max(0.15, score / 100.0)))
     return {
         "risk_type": public_risk_type,
         "risk_level": level,
@@ -2406,7 +2252,6 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
             "ground_step_up": "tof_down",
             "down_no_target": "tof_down",
             "down_sensor_unavailable": "tof_down",
-            "down_obstacle": "tof_down",
             "user_mark": "touch",
             "sos": "sos_button",
             "fall_detected": "bmi270_imu",
@@ -2720,7 +2565,7 @@ def min_distance_to_polyline_m(lat: float, lng: float, points: list[dict[str, fl
 
 ROAD_FIXED_RISK_TYPES = {"ground_step_down", "ground_step_up", "ground_drop", "ground_step", "confirmed_user_mark", "fixed_obstacle"}
 ROAD_TEMPORARY_RISK_TYPES = {"temporary_obstacle", "construction", "approaching_obstacle"}
-ROAD_EXCLUDED_RISK_TYPES = {"fall_detected", "sos", "voice_request", "fall_cancelled", "down_sensor_unavailable", "down_no_target"}
+ROAD_EXCLUDED_RISK_TYPES = {"fall_detected", "sos", "voice_request", "down_sensor_unavailable", "down_no_target"}
 
 
 def road_segment_length(points: list[dict[str, float]]) -> float:
@@ -3234,18 +3079,16 @@ def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, 
         return "\u540c\u4e00\u969c\u788d\u6301\u7eed\u51fa\u73b0\uff0c\u5df2\u901a\u77e5\u966a\u62a4\u7aef\uff0c\u8bf7\u505c\u6b62\u5e76\u91cd\u65b0\u63a2\u6d4b\u3002"
     if risk_type == "approaching_obstacle":
         return "\u969c\u788d\u8ddd\u79bb\u6b63\u5728\u7f29\u77ed\uff0c\u8bf7\u7acb\u5373\u51cf\u901f\uff0c\u5fc5\u8981\u65f6\u505c\u6b62\u3002"
-    if risk_type == "ground_step_down":
-        return "检测到前方落差，请立即停下并探测台阶。"
-    if risk_type == "ground_step_up":
-        return "检测到前方上台阶，请停下并抬脚确认。"
-    if risk_type in {"ground_drop", "ground_step"}:
+    if risk_type == "ground_step" and direction == "up":
+        return "前方上台阶，请立即停下并用盲杖确认。"
+    if risk_type == "ground_step" and direction == "down":
+        return "前方下台阶，请立即停下并用盲杖确认。"
+    if risk_type in {"ground_drop", "ground_step", "ground_step_down", "ground_step_up"}:
         return "检测到前方落差，请立即停下并探测台阶。"
     if risk_type == "down_no_target":
         return ""
     if risk_type == "down_sensor_unavailable":
         return "下视传感器异常，请停下检查。"
-    if risk_type == "down_obstacle":
-        return ""
     if risk_type == "front_obstacle":
         if direction == "turn_left":
             return f"\u524d\u65b9 {frame.front_cm or '-'} \u5398\u7c73\u6709\u969c\u788d\uff0c\u5de6\u4fa7\u76f8\u5bf9\u66f4\u5b89\u5168\u3002"
@@ -3539,7 +3382,7 @@ def ai_enabled() -> bool:
 def fallback_advice(req: AdviceRequest, history: dict[str, Any]) -> str:
     if req.risk_type == "sos":
         return "SOS already sent. Stay where you are if safe."
-    if req.risk_type in {"ground_drop", "ground_step", "down_no_target", "down_sensor_unavailable"} or (req.down_cm is not None and req.down_cm > DOWN_DROP_CM):
+    if req.risk_type in {"ground_drop", "ground_step", "down_no_target", "down_sensor_unavailable"}:
         return "Stop. Check the ground ahead before moving."
     if req.risk_level == "high":
         if req.left_cm is not None and req.right_cm is not None:
@@ -3558,7 +3401,7 @@ def fallback_advice(req: AdviceRequest, history: dict[str, Any]) -> str:
 def deep_advice(req: AdviceRequest, deep: dict[str, Any]) -> str:
     level = deep.get("level", "low")
     if level == "high":
-        if req.risk_type in {"ground_drop", "ground_step", "down_no_target", "down_sensor_unavailable"} or (req.down_cm is not None and req.down_cm > DOWN_DROP_CM):
+        if req.risk_type in {"ground_drop", "ground_step", "down_no_target", "down_sensor_unavailable"}:
             return "\u6df1\u5ea6\u6a21\u578b\u63d0\u793a\u843d\u5dee\u98ce\u9669\uff0c\u8bf7\u505c\u6b62\u63a2\u8def\u3002"
         if req.left_cm is not None and req.right_cm is not None:
             if req.left_cm > req.right_cm and req.left_cm > 90:
@@ -3775,40 +3618,6 @@ def ai_status() -> dict[str, Any]:
     }
 
 
-FALL_EXCLUSIVE_SECONDS = 30
-
-
-def activate_fall_suppression(device_id: str, fall_event_id: Optional[str]) -> None:
-    now = datetime.now(timezone.utc)
-    until_at = (now + timedelta(seconds=FALL_EXCLUSIVE_SECONDS)).isoformat(timespec="seconds")
-    with db() as conn:
-        conn.execute(
-            """
-            INSERT INTO device_alert_suppression(device_id, fall_event_id, until_at, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(device_id) DO UPDATE SET
-                fall_event_id=excluded.fall_event_id,
-                until_at=excluded.until_at,
-                updated_at=excluded.updated_at
-            """,
-            (device_id, fall_event_id, until_at, now.isoformat(timespec="seconds")),
-        )
-
-
-def fall_suppression_active(device_id: str) -> bool:
-    with db() as conn:
-        row = conn.execute(
-            "SELECT until_at FROM device_alert_suppression WHERE device_id = ?",
-            (device_id,),
-        ).fetchone()
-    if not row:
-        return False
-    try:
-        return datetime.fromisoformat(str(row["until_at"]).replace("Z", "+00:00")) > datetime.now(timezone.utc)
-    except ValueError:
-        return False
-
-
 def store_event(event: EventCreate) -> dict[str, Any]:
     timestamp = event.timestamp or now_iso()
     risk_level = (event.risk_level or event.level or "").lower()
@@ -3867,8 +3676,6 @@ def store_event(event: EventCreate) -> dict[str, Any]:
     upsert_device_state_from_event(stored)
     upsert_risk_point_for_event(stored)
     maybe_store_road_observation(stored)
-    if event.risk_type == "fall_detected":
-        activate_fall_suppression(event.device_id, normalized_fall_id or None)
     return stored
 
 
@@ -4004,7 +3811,12 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
 
     history = nearby_summary(lat, lng, DEFAULT_NEARBY_RADIUS_M)
     analysis = analyze_sensor_frame(frame, history)
-    if analysis["risk_type"] not in {"fall_detected", "sos"} and fall_suppression_active(frame.device_id):
+    # `fall_pending` and every active fall-lock stage come from the firmware
+    # state machine; no elapsed-time server cooldown can clear that lock.
+    fall_lock_active = bool(frame.fall_pending) or str(frame.fall_stage or "").lower() in {
+        "fall_lying_wait", "fall_confirmed", "fall_recovery"
+    }
+    if analysis["risk_type"] not in {"fall_detected", "sos"} and fall_lock_active:
         analysis.update(
             {
                 "risk_type": "none",
@@ -4012,10 +3824,10 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
                 "risk_score": 0.0,
                 "map_weight": 0.0,
                 "mapWeight": 0.0,
-                "risk_reason": "suppressed for 30 seconds after fall",
-                "riskReason": "suppressed for 30 seconds after fall",
-                "risk_source_detail": "suppressed for 30 seconds after fall",
-                "riskSourceDetail": "suppressed for 30 seconds after fall",
+                "risk_reason": "suppressed while firmware fall lock is active",
+                "riskReason": "suppressed while firmware fall lock is active",
+                "risk_source_detail": "suppressed while firmware fall lock is active",
+                "riskSourceDetail": "suppressed while firmware fall lock is active",
                 "direction": "none",
                 "sensor": "none",
                 "distance_mm": None,
@@ -4062,6 +3874,19 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
                     "accel_y_g": frame.accel_y_g,
                     "accel_z_g": frame.accel_z_g,
                     "accel_total_g": frame.accel_total_g,
+                    "pitch_deg": frame.pitch_deg,
+                    "roll_deg": frame.roll_deg,
+                    "gyro_x_dps": frame.gyro_x_dps,
+                    "gyro_y_dps": frame.gyro_y_dps,
+                    "gyro_z_dps": frame.gyro_z_dps,
+                    "gyro_dps": frame.gyro_dps,
+                    "down_raw_cm": frame.down_raw_cm,
+                    "down_valid": frame.down_valid,
+                    "compensated_down_cm": frame.compensated_down_cm,
+                    "ground_baseline_cm": frame.ground_baseline_cm,
+                    "height_delta_cm": frame.height_delta_cm,
+                    "ground_state": frame.ground_state,
+                    "cane_motion": frame.cane_motion,
                     "hardware_profile": "esp32c5_tca_ch2_3_4_5_mpr121_ch7_pca9685_ch0_1_2_bmi270",
                     "risk_reason": analysis.get("risk_reason"),
                     "riskReason": analysis.get("riskReason"),
@@ -4411,53 +4236,6 @@ def update_navigation_session(session_id: str, update: NavigationSessionUpdate) 
         "off_route": should_replan, "off_route_count": off_route_count,
         "arrived": arrived, "arrival_count": arrival_count,
         "current_step": step, "should_replan": should_replan,
-    }
-
-
-@app.post("/api/device-commands")
-def create_device_command(request: DeviceCommandCreate) -> dict[str, Any]:
-    now = now_iso()
-    with db() as conn:
-        if request.command == "cancel_fall":
-            # Keep only one pending cancellation per device.
-            existing = conn.execute(
-                "SELECT id FROM device_commands WHERE device_id = ? AND command = ? AND status = 'pending' LIMIT 1",
-                (request.device_id, request.command),
-            ).fetchone()
-            if existing:
-                command_id = int(existing["id"])
-            else:
-                cur = conn.execute(
-                    "INSERT INTO device_commands (device_id, command, source, created_at, status) VALUES (?, ?, ?, ?, 'pending')",
-                    (request.device_id, request.command, request.source, now),
-                )
-                command_id = int(cur.lastrowid)
-        else:
-            raise HTTPException(status_code=400, detail="unsupported command")
-    return {"success": True, "command_id": command_id, "status": "pending"}
-
-
-@app.get("/api/device-commands/next")
-def next_device_command(device_id: str = Query(..., min_length=1)) -> dict[str, Any]:
-    with db() as conn:
-        row = conn.execute(
-            "SELECT * FROM device_commands WHERE device_id = ? AND status = 'pending' ORDER BY id LIMIT 1",
-            (device_id,),
-        ).fetchone()
-        if not row:
-            return {"success": True, "command": None}
-        delivered_at = now_iso()
-        conn.execute(
-            "UPDATE device_commands SET status = 'delivered', delivered_at = ? WHERE id = ?",
-            (delivered_at, row["id"]),
-        )
-    return {
-        "success": True,
-        "command": {
-            "id": int(row["id"]), "device_id": row["device_id"],
-            "command": row["command"], "source": row["source"],
-            "created_at": row["created_at"], "delivered_at": delivered_at,
-        },
     }
 
 

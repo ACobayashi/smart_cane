@@ -49,6 +49,7 @@ data class DeviceStateDto(
     val leftCm: Int?,
     val rightCm: Int?,
     val downCm: Int?,
+    val direction: String = "none",
     val riskType: String,
     val riskLevel: String,
     val riskScore: Double,
@@ -210,6 +211,16 @@ data class SensorFrameRequestDto(
     val leftCm: Int?,
     val rightCm: Int?,
     val downCm: Int?,
+    val downRawCm: Int? = null,
+    val downValid: Boolean? = null,
+    val compensatedDownCm: Double? = null,
+    val groundBaselineCm: Double? = null,
+    val heightDeltaCm: Double? = null,
+    val groundState: String? = null,
+    val direction: String? = null,
+    val pitchDeg: Double? = null,
+    val rollDeg: Double? = null,
+    val gyroDps: Double? = null,
     val battery: Int? = null,
     val accelTotalG: Double? = null,
     val fallDetected: Boolean? = null,
@@ -650,18 +661,6 @@ object SmartCaneApiClient {
         false
     }
 
-    suspend fun cancelPendingFall(deviceId: String): ApiResult<Boolean> = withContext(Dispatchers.IO) {
-        try {
-            val response = postJson(
-                "/api/device-commands",
-                JSONObject().put("device_id", deviceId).put("command", "cancel_fall").put("source", "android")
-            )
-            ApiResult.Success(response.optBoolean("success"))
-        } catch (exception: Exception) {
-            ApiResult.Failure(exception.toUserMessage())
-        }
-    }
-
     suspend fun postVoiceCommand(
         deviceId: String,
         audioFile: File,
@@ -845,6 +844,16 @@ object SmartCaneApiClient {
         put("left_cm", leftCm ?: JSONObject.NULL)
         put("right_cm", rightCm ?: JSONObject.NULL)
         put("down_cm", downCm ?: JSONObject.NULL)
+        put("down_raw_cm", downRawCm ?: JSONObject.NULL)
+        put("down_valid", downValid ?: JSONObject.NULL)
+        put("compensated_down_cm", compensatedDownCm ?: JSONObject.NULL)
+        put("ground_baseline_cm", groundBaselineCm ?: JSONObject.NULL)
+        put("height_delta_cm", heightDeltaCm ?: JSONObject.NULL)
+        put("ground_state", groundState ?: JSONObject.NULL)
+        put("direction", direction ?: JSONObject.NULL)
+        put("pitch_deg", pitchDeg ?: JSONObject.NULL)
+        put("roll_deg", rollDeg ?: JSONObject.NULL)
+        put("gyro_dps", gyroDps ?: JSONObject.NULL)
         put("battery", battery ?: JSONObject.NULL)
         put("accel_total_g", accelTotalG ?: JSONObject.NULL)
         put("fall_detected", fallDetected ?: JSONObject.NULL)
@@ -891,6 +900,7 @@ object SmartCaneApiClient {
         leftCm = nullableInt("leftCm") ?: nullableInt("left_cm"),
         rightCm = nullableInt("rightCm") ?: nullableInt("right_cm"),
         downCm = nullableInt("downCm") ?: nullableInt("down_cm"),
+        direction = optString("direction", "none"),
         riskType = optString("riskType", optString("risk_type", "none")),
         riskLevel = optString("riskLevel", optString("risk_level", "low")),
         riskScore = optDouble("riskScore", optDouble("risk_score", 0.0)),

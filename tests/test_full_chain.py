@@ -45,7 +45,7 @@ def test_down_boundaries_main_analysis():
     assert main.analyze_sensor_frame(frame(19), history)["risk_level"] == "low"
 
 
-def test_down_step_acceptance_20cm_150cm_and_400_sentinel():
+def test_down_distance_never_creates_step_without_firmware_ground_state():
     history = {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": "low"}
 
     def run(values):
@@ -59,8 +59,8 @@ def test_down_step_acceptance_20cm_150cm_and_400_sentinel():
         ]
 
     assert run([55] * 5 + [74, 74])[-1] == "none"
-    assert run([55] * 5 + [75, 75])[-1] == "ground_step_down"
-    assert run([55] * 5 + [151, 151])[-1] == "ground_step_down"
+    assert run([55] * 5 + [75, 75])[-1] == "none"
+    assert run([55] * 5 + [151, 151])[-1] == "none"
     assert run([55] * 5 + [400, 400])[-1] == "none"
     assert run([55] * 5 + [35, 35])[-1] == "none"
 
@@ -72,8 +72,57 @@ def test_deep_model_down_boundaries():
         result = score_deep_risk(req, history)
         assert result["level"] == "low", (down, result)
         assert result["score"] < 0.56, (down, result)
-    req = SimpleNamespace(risk_type="ground_step_down", manual_risk_type=None, alert_type=None, fall_detected=False, front_cm=200, left_cm=120, right_cm=120, down_cm=75)
+    req = SimpleNamespace(risk_type="ground_step", manual_risk_type=None, alert_type=None, fall_detected=False, front_cm=200, left_cm=120, right_cm=120, down_cm=75)
     assert score_deep_risk(req, history)["level"] == "medium"
+
+
+def test_side_alert_boundary_is_exactly_35cm():
+    history = {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": "low"}
+    assert main.analyze_sensor_frame(frame(55, left_cm=36), history)["risk_type"] == "none"
+    assert main.analyze_sensor_frame(frame(55, left_cm=35), history)["risk_type"] == "left_obstacle"
+    assert main.analyze_sensor_frame(frame(55, right_cm=36), history)["risk_type"] == "none"
+    assert main.analyze_sensor_frame(frame(55, right_cm=35), history)["risk_type"] == "right_obstacle"
+
+
+def test_front_warns_at_105cm_and_firmware_ground_direction_is_preserved():
+    history = {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": "low"}
+    assert main.analyze_sensor_frame(frame(55, front_cm=106), history)["risk_type"] == "none"
+    assert main.analyze_sensor_frame(frame(55, front_cm=105), history)["risk_type"] == "front_obstacle"
+    up = main.analyze_sensor_frame(frame(
+        42, risk_type="ground_step", direction="up", compensated_down_cm=42,
+        ground_baseline_cm=55, height_delta_cm=-13, ground_state="GROUND_STEP_UP"
+    ), history)
+    assert up["risk_type"] == "ground_step"
+    assert up["direction"] == "up"
+    assert "上台阶" in up["voice_prompt"]
+    down = main.analyze_sensor_frame(frame(
+        68, risk_type="ground_step", direction="down", compensated_down_cm=68,
+        ground_baseline_cm=55, height_delta_cm=13, ground_state="GROUND_STEP_DOWN"
+    ), history)
+    assert down["risk_type"] == "ground_step"
+    assert down["direction"] == "down"
+    assert "下台阶" in down["voice_prompt"]
+    drop = main.analyze_sensor_frame(frame(
+        86, risk_type="ground_drop", direction="down", compensated_down_cm=86,
+        ground_baseline_cm=55, height_delta_cm=31, ground_state="GROUND_DROP"
+    ), history)
+    assert drop["risk_type"] == "ground_drop"
+    assert drop["direction"] == "down"
+
+
+def test_fall_lock_suppresses_distance_feedback_without_time_cooldown(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "fall_lock.db")
+    main.init_db()
+    locked = frame(
+        55, front_cm=20, fall_pending=True, fall_detected=False,
+        fall_stage="fall_lying_wait", fall_event_id="fall-lock-1"
+    )
+    response = main.create_sensor_frame(locked, lite=True)
+    assert response["risk_type"] == "none"
+    assert response["device_state"]["fallPending"] is True
+    recovered = frame(55, front_cm=20, fall_pending=False, fall_detected=False, fall_stage="normal_use_recovered")
+    response = main.create_sensor_frame(recovered, lite=True)
+    assert response["risk_type"] == "front_obstacle"
 
 
 def test_fall_and_sos_not_road_intrinsic(tmp_path, monkeypatch):
@@ -182,18 +231,6 @@ def test_navigation_traversal_lifecycle(tmp_path, monkeypatch):
         stopped = conn.execute("SELECT * FROM road_traversals WHERE id = ?", (active["id"],)).fetchone()
     assert stopped["status"] == "cancelled"
     assert stopped["safe_pass"] == 0
-
-
-def test_cancel_fall_command_is_deduplicated_and_delivered_once(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "DB_PATH", tmp_path / "commands.db")
-    main.init_db()
-    request = main.DeviceCommandCreate(device_id="cane_real", command="cancel_fall", source="android")
-    first = main.create_device_command(request)
-    second = main.create_device_command(request)
-    assert first["command_id"] == second["command_id"]
-    delivered = main.next_device_command("cane_real")
-    assert delivered["command"]["command"] == "cancel_fall"
-    assert main.next_device_command("cane_real")["command"] is None
 
 
 def test_pending_fall_is_visible_without_formal_alert(tmp_path, monkeypatch):
@@ -433,17 +470,13 @@ def test_sos_uses_recent_trusted_mobile_location_behind_newer_mock(tmp_path, mon
     assert device_id in main.parse_devices_json(point["source_devices_json"])
 
 
-def test_fall_suppresses_other_sensor_alerts_for_30_seconds(tmp_path, monkeypatch):
+def test_fall_lock_suppresses_other_sensor_alerts_until_firmware_recovery(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "fall_suppression.db")
     main.init_db()
-    main.store_event(main.EventCreate(
-        device_id="cane_real", lat=31.0, lng=121.0,
-        risk_type="fall_detected", risk_level="high",
-        fall_event_id="fall-exclusive-1",
-    ))
     response = main.create_sensor_frame(frame(
         55, device_id="cane_real", front_cm=10, down_raw_cm=55,
-        down_valid=True, down_status="valid",
+        down_valid=True, down_status="valid", fall_pending=True,
+        fall_stage="fall_lying_wait", fall_event_id="fall-exclusive-1",
     ), lite=False)
     assert response["risk"]["risk_type"] == "none"
     assert response["risk"]["voice_prompt"] == ""
@@ -473,15 +506,19 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     firmware = (ROOT / "firmware" / "smartcane_arduino" / "risk_logic.cpp").read_text(encoding="utf-8")
     config = (ROOT / "firmware" / "smartcane_arduino" / "config.h").read_text(encoding="utf-8")
     sketch = (ROOT / "firmware" / "smartcane_arduino" / "smartcane_arduino.ino").read_text(encoding="utf-8")
-    assert "SMARTCANE_DOWN_DROP_DELTA_CM 20" in config
-    assert "SMARTCANE_DOWN_LONG_DISTANCE_ALARM_CM 150" in config
+    assert "SMARTCANE_STEP_UP_ENTER_CM 9" in config
+    assert "SMARTCANE_STEP_DOWN_ENTER_CM 11" in config
+    assert "SMARTCANE_DEEP_DROP_CM 30" in config
+    assert "SMARTCANE_SIDE_ALERT_CM 35" in config
     assert "SMARTCANE_DOWN_NO_TARGET_CM 400" in config
-    assert "heightDeltaCm >= SMARTCANE_DOWN_DROP_DELTA_CM" in firmware
-    assert "cm >= SMARTCANE_DOWN_NO_TARGET_CM" in firmware
+    assert "lastHeightDeltaCm >= SMARTCANE_STEP_DOWN_ENTER_CM" in firmware
+    assert "lastHeightDeltaCm <= -SMARTCANE_STEP_UP_ENTER_CM" in firmware
+    assert "cm > SMARTCANE_DOWN_LONG_DISTANCE_ALARM_CM" not in firmware
+    assert "rawCm >= SMARTCANE_DOWN_NO_TARGET_CM" in firmware
     assert "FALL_STAGE_CANDIDATE" in (ROOT / "firmware" / "smartcane_arduino" / "imu_fall.cpp").read_text(encoding="utf-8")
-    assert "SMARTCANE_FALL_CONFIRM_MS 2000" in config
-    assert "fall_confirmed_two_of_three" in sketch and "fall_detected" in sketch
-    assert "fallRiskSuppressUntilMs" in sketch
+    assert "SMARTCANE_FALL_CONFIRM_MS 1900" in config
+    assert "fall_confirmed" in sketch and "fall_detected" in sketch
+    assert "fallLockActive" in sketch
 
 
 def test_medium_and_high_obstacles_can_become_shared_risk_points():

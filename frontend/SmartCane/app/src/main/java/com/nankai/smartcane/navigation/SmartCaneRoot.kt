@@ -179,7 +179,6 @@ fun SmartCaneRootApp() {
                 onRepeat = controller::repeatNavigationPrompt,
                 onSos = controller::sendBlindSos,
                 onDismissAlert = controller::dismissUrgentAlert,
-                onCancelFall = controller::cancelPendingFall,
                 onNavigationPreference = controller::setNavigationPreference,
                 onOpenSettings = { route = AppRoute.BlindPairing }
             )

@@ -45,4 +45,3 @@ bool fetchDeepRisk(const RiskState &risk,
 
 void printNearbySummary(const NearbyRiskSummary &summary);
 void printDeepRisk(const DeepRiskResult &result);
-bool fetchDeviceCommand(String &command);
