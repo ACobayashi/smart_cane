@@ -1,24 +1,31 @@
-# ESP32-C5 Collaborative Smart Cane
+# ESP32-C5 多设备协同智能盲杖
 
-This repository now uses the Arduino IDE / Arduino framework as the primary firmware path.
+本仓库现已将 **Arduino IDE / Arduino Framework** 作为主要固件开发路径。
 
-The system implements a practical ESP32-C5 multi-device collaborative smart cane:
+本系统实现了一套可实际运行的 **ESP32-C5 多设备协同智能盲杖**，主要功能包括：
 
-- local obstacle and ground-drop risk detection,
-- vibration and buzzer feedback,
-- touch-handle and SOS interactions,
-- route recording,
-- backend risk-point upload,
-- nearby historical risk lookup for collaborative mapping,
-- backend-side lightweight deep-risk scoring and optional cloud LLM advice.
+* 本地障碍物与地面落差风险检测；
+* 振动与蜂鸣器反馈；
+* 触摸手柄与 SOS 交互；
+* 行进路线记录；
+* 后端风险点上传；
+* 附近历史风险查询，实现多设备协同地图；
+* 后端轻量级深度风险评分；
+* 可选的云端大模型（LLM）建议。
 
-Local safety remains rule-based and offline-capable. Network, deep-risk scoring, and LLM advice only enrich phone/backend feedback and do not replace local obstacle avoidance.
+本地安全功能始终采用**基于规则的判断逻辑**，并支持**离线运行**。网络、深度风险评分和大模型建议仅用于增强手机端和后端的反馈能力，**不会替代本地障碍物检测与避障逻辑**。
 
-For the replacement PCA9685 motor board wiring, see `docs/pca9685_motor_wiring.md`.
+更换后的 PCA9685 电机驱动板接线方式请参见：
 
-Private reference PDFs and API keys must not be committed or uploaded.
+```text
+docs/pca9685_motor_wiring.md
+```
 
-## Repository Structure
+**私人参考 PDF 文件和 API Key 禁止提交或上传至仓库。**
+
+---
+
+## 仓库结构
 
 ```text
 firmware/smartcane_arduino/
@@ -42,95 +49,120 @@ backend/
   README.md
 
 frontend/SmartCane/
-  Android Jetpack Compose frontend
+  Android Jetpack Compose 前端
 
 docs/
   api_contract.md
 ```
 
-## Hardware
+---
 
-| Module | Role |
-| --- | --- |
-| ESP32-C5 SensairShuttle or compatible ESP32-C5 Arduino board | Main controller |
-| TCA9548A | I2C multiplexer for four identical VL53L1X ToF sensors |
-| 4 x VL53L1X | Front, left, right, and down distance sensing |
-| MPR121 / HW-017 | Capacitive touch handle |
-| PCA9685 PWM/Servo Shield | Blue motor PWM board on TCA `CH6`, address `0x40` |
-| 1 x 1027 3V vibration motor for current bench test | Single tactile feedback through PCA9685 `CH0`; firmware can be switched back to three motors later |
-| Active buzzer | High-risk, ground-drop, and SOS alert |
-| Physical button | Short press requests Android voice input; long press triggers SOS |
+## 硬件组成
 
-Recommended current bench wiring from the Arduino screenshots:
+| 模块                                               | 作用                                                 |
+| ------------------------------------------------ | -------------------------------------------------- |
+| ESP32-C5 SensairShuttle 或兼容 ESP32-C5 Arduino 开发板 | 系统主控制器                                             |
+| TCA9548A                                         | I2C 多路复用器，用于连接 4 个地址相同的 VL53L1X ToF 传感器            |
+| 4 × VL53L1X                                      | 分别负责前方、左侧、右侧和下方距离检测                                |
+| MPR121 / HW-017                                  | 电容式触摸手柄                                            |
+| PCA9685 PWM/Servo Shield                         | 蓝色电机 PWM 驱动板，连接至 TCA `CH6`，地址为 `0x40`              |
+| 1 × 1027 3V 振动电机                                 | 当前台架测试使用单振动电机，通过 PCA9685 `CH0` 控制；后续固件可重新切换为三个振动电机 |
+| 有源蜂鸣器                                            | 用于高风险、地面落差和 SOS 报警                                 |
+| 物理按键                                             | 短按请求 Android 端启动语音输入；长按触发 SOS                      |
 
-| Hardware | ESP32-C5 / TCA / PCA9685 connection |
-| --- | --- |
-| I2C SDA | `GPIO2` |
-| I2C SCL | `GPIO3` |
-| TCA9548A address | `0x70` |
-| Front VL53L1X | TCA `CH2` |
-| Left VL53L1X | TCA `CH3` |
-| Right VL53L1X | TCA `CH4` |
-| Down VL53L1X | TCA `CH5` |
-| MPR121 | TCA `CH7`, address `0x5A` |
-| PCA9685 | TCA `CH6`, address `0x40` |
-| Current vibration motor | PCA9685 `CH0` PWM/SIG, red to `V+`, black/brown to `GND` |
-| Buzzer | `GPIO4` |
-| Physical button | `GPIO5`, active low; short press `voice_request`, long press `sos` |
+根据当前 Arduino 测试截图，推荐使用以下接线方式：
 
-If you rewire ToF sensors back to `CH0/CH1/CH2/CH3`, edit only `firmware/smartcane_arduino/config.h`.
+| 硬件          | ESP32-C5 / TCA / PCA9685 接线                   |
+| ----------- | --------------------------------------------- |
+| I2C SDA     | `GPIO2`                                       |
+| I2C SCL     | `GPIO3`                                       |
+| TCA9548A 地址 | `0x70`                                        |
+| 前方 VL53L1X  | TCA `CH2`                                     |
+| 左侧 VL53L1X  | TCA `CH3`                                     |
+| 右侧 VL53L1X  | TCA `CH4`                                     |
+| 下方 VL53L1X  | TCA `CH5`                                     |
+| MPR121      | TCA `CH7`，地址 `0x5A`                           |
+| PCA9685     | TCA `CH6`，地址 `0x40`                           |
+| 当前振动电机      | PCA9685 `CH0` PWM/SIG；红线接 `V+`，黑色/棕色线接 `GND`  |
+| 蜂鸣器         | `GPIO4`                                       |
+| 物理按键        | `GPIO5`，低电平有效；短按触发 `voice_request`，长按触发 `sos` |
 
-Power note for the standalone cane:
-
-- ESP32-C5/SensairShuttle: power by USB-C 5V during development, or by the board-supported 3.7V Li-ion battery connector if available.
-- PCA9685 blue motor board: motor `V+` can use the separate 3.7V battery already wired for the vibration motors.
-- The ESP32 GND, PCA9685 logic GND, and motor battery GND must be common ground.
-- PCA9685 logic `VCC` should be tied to ESP32 3.3V logic power; do not power ESP32 logic from the motor `V+` rail.
-- The current bench motor plug is on blue PCA9685 position `0` / `CH0`; the firmware encodes all cues as pulse patterns on that one motor.
-
-## Arduino Libraries
-
-Install these in Arduino IDE Library Manager:
-
-- `Adafruit MPR121`
-- `Adafruit PWM Servo Driver Library`
-- `VL53L1X` by Pololu
-- `ArduinoJson`
-
-`WiFi` and `HTTPClient` come with the ESP32 Arduino board package.
-
-## Firmware Setup
-
-Open:
-
-```text
-D:\smartcane\firmware\smartcane_arduino\smartcane_arduino.ino
-```
-
-In Arduino IDE:
-
-1. Select board `ESP32C5 Dev Module`.
-2. Select the serial port, for example `COM3`.
-3. Set Serial Monitor to `115200 baud`.
-4. Upload.
-
-Configure device, Wi-Fi, backend URL, thresholds, GPIO, I2C channels, and mock route values in:
+如果之后重新将 ToF 传感器接回 `CH0/CH1/CH2/CH3`，只需要修改：
 
 ```text
 firmware/smartcane_arduino/config.h
 ```
 
-Use your PC LAN IP for local testing. If the cane connects to a phone hotspot,
-connect the PC, ESP32-C5, and Android test phone to the same hotspot and use
-the PC hotspot/LAN IPv4:
+### 独立盲杖供电说明
+
+* **ESP32-C5 / SensairShuttle**：开发阶段可使用 USB-C 5V 供电；如果开发板支持，也可以使用板载 3.7V 锂电池接口供电。
+* **PCA9685 蓝色电机驱动板**：电机 `V+` 可以直接使用目前已经为振动电机连接的独立 3.7V 电池。
+* ESP32 的 `GND`、PCA9685 逻辑 `GND` 以及电机电池 `GND` 必须**共地**。
+* PCA9685 的逻辑电源 `VCC` 应连接至 ESP32 的 **3.3V 逻辑电源**。
+* **禁止使用电机 `V+` 电源轨给 ESP32 逻辑电路供电。**
+* 当前台架测试中的振动电机连接在蓝色 PCA9685 的 `0` 号位置，即 `CH0`。当前固件通过该单个电机的不同脉冲模式表示不同提示信息。
+
+---
+
+## Arduino 依赖库
+
+在 Arduino IDE 的 **Library Manager（库管理器）** 中安装：
+
+* `Adafruit MPR121`
+* `Adafruit PWM Servo Driver Library`
+* `VL53L1X` by Pololu
+* `ArduinoJson`
+
+以下库由 ESP32 Arduino 开发板包自带，无需单独安装：
+
+* `WiFi`
+* `HTTPClient`
+
+---
+
+## 固件配置与运行
+
+使用 Arduino IDE 打开：
+
+```text
+D:\smartcane\firmware\smartcane_arduino\smartcane_arduino.ino
+```
+
+在 Arduino IDE 中：
+
+1. 开发板选择 `ESP32C5 Dev Module`。
+2. 选择对应的串口，例如 `COM3`。
+3. 串口监视器波特率设置为 `115200 baud`。
+4. 编译并上传程序。
+
+设备 ID、Wi-Fi、后端 URL、风险阈值、GPIO、I2C 通道以及模拟路线数据均在以下文件中配置：
+
+```text
+firmware/smartcane_arduino/config.h
+```
+
+本地测试时，应填写电脑在局域网中的 IP 地址。
+
+如果智能盲杖连接手机热点，则需要确保：
+
+* PC 连接同一个手机热点；
+* ESP32-C5 连接同一个手机热点；
+* Android 测试手机处于同一网络；
+* 后端地址填写运行后端电脑的热点/局域网 IPv4 地址。
+
+例如：
 
 ```cpp
 #define SMARTCANE_SERVER_BASE_URL "http://118.31.221.165:8016"
 ```
 
-Do not use `127.0.0.1` on the ESP32.
+**ESP32 端不要使用 `127.0.0.1`。**
 
-## Backend Setup
+---
+
+## 后端配置
+
+在 PowerShell 中执行：
 
 ```powershell
 cd D:\smartcane\backend
@@ -141,71 +173,222 @@ copy .env.example .env
 uvicorn main:app --host 0.0.0.0 --port 8016
 ```
 
-Health check:
+### 健康检查
 
 ```text
 http://118.31.221.165:8016/api/health
 ```
 
-Useful operation endpoints:
+### 主要业务接口
 
-- `POST /api/locations`: route point upload
-- `GET /api/locations/history?device_id=cane_001`
-- `POST /api/risk-events`: risk-point upload
-- `GET /api/risk-events`
-- `GET /api/risks/nearby?lat=31.2304&lng=121.4737&radius=80`
-- `POST /api/ai/deep-risk`
-- `POST /api/ai/advice`
+* `POST /api/locations`：上传路线位置点
+* `GET /api/locations/history?device_id=cane_001`：查询指定设备历史路线
+* `POST /api/risk-events`：上传风险点
+* `GET /api/risk-events`：查询风险事件
+* `GET /api/risks/nearby?lat=31.2304&lng=121.4737&radius=80`：查询附近历史风险
+* `POST /api/ai/deep-risk`：进行深度风险评分
+* `POST /api/ai/advice`：获取 AI 风险处理建议
 
-Android frontend compatibility endpoints:
+### Android 前端兼容接口
 
-- `GET /status`
-- `GET /devices`
-- `GET /events/latest`
-- `POST /sos`
-- `POST /telemetry`
+* `GET /status`
+* `GET /devices`
+* `GET /events/latest`
+* `POST /sos`
+* `POST /telemetry`
 
-Cloud LLM and speech services are optional. Put keys only in `backend/.env`; never commit real secrets.
+云端大模型和语音服务均为**可选功能**。
 
-## Closed-Loop Run
+相关 API Key 只能存放在：
 
-1. Start the backend.
-2. Flash the Arduino firmware with `SMARTCANE_DEVICE_ID="cane_001"`.
-3. Run `status` or `read` in Serial Monitor to print one ToF/risk snapshot.
-4. Put an obstacle in front. The firmware samples every `500 ms`, prints one changed risk event, and uses vibration to suggest slow/left/right handling. One-shot distance obstacles are low-risk map points.
-5. Keep the cane still with the same obstacle. The same place/same risk is not printed, vibrated, or uploaded repeatedly.
-6. Leave more space on the left or right, clear the risk and trigger it again, or move into another location grid. The matching motor suggests the safer bypass direction and a new event can be recorded.
-7. Lower the down-facing distance below `20 cm` to simulate a close curb/protrusion; the firmware uploads `down_obstacle` as low risk. Keep the down-facing distance from `20-90 cm` for normal ground/no step alert. Raise the valid down-facing distance strictly above `90 cm` for two confirmed frames to simulate a pit/drop; the firmware uploads `ground_drop`. No-target readings are reported separately as `down_no_target`.
-8. Long-press touch electrode E1 or run `mark`. The backend records `user_mark` at the current route point.
-9. Run `path` to print the local route/risk ring buffer.
-10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`. The second cane receives historical risk statistics and fuses them into local risk.
-11. Short-press the physical button or run `btn`: the cane uploads `voice_request`; the blind Android app enters voice interaction mode. The companion app does not receive this ordinary voice request.
-12. Hold the physical button for 2 seconds or run `sos`: the cane vibrates, beeps, prints SOS, uploads `sos`, and the backend distinguishes it from `fall_detected`.
-13. For fall detection, drop/tilt the BMI270 board onto a soft cushion and keep it sideways briefly. The cane uses buzzer only, uploads `fall_detected`, and the backend exposes it to both blind and companion app roles.
+```text
+backend/.env
+```
 
-Serial commands are listed in `firmware/smartcane_arduino/README.md`.
+**禁止将真实密钥提交至 Git 仓库。**
 
-## Android Frontend
+---
 
-Open this folder in Android Studio:
+## 系统闭环测试流程
+
+1. 启动后端服务。
+
+2. 将 Arduino 固件中的设备 ID 设置为：
+
+```text
+SMARTCANE_DEVICE_ID="cane_001"
+```
+
+然后烧录 ESP32-C5。
+
+3. 在串口监视器中执行：
+
+```text
+status
+```
+
+或：
+
+```text
+read
+```
+
+打印一次当前 ToF 距离和风险状态快照。
+
+4. 在盲杖前方放置障碍物。
+
+固件每隔 `500 ms` 进行一次采样。
+
+检测到新的风险状态后：
+
+* 串口输出一次发生变化的风险事件；
+* 通过振动提示用户减速；
+* 根据左右两侧空间情况提示向左或向右绕行。
+
+单次距离障碍会作为**低风险地图点**记录。
+
+5. 保持盲杖位置不变，并维持相同障碍状态。
+
+对于**同一地点、同一类型的风险**，系统不会持续重复：
+
+* 串口输出；
+* 振动提醒；
+* 上传后端。
+
+6. 增大左侧或右侧可通行空间，然后：
+
+* 清除当前风险后再次触发；
+* 或移动到另一个位置网格。
+
+系统会根据左右两侧空间选择较安全的绕行方向，并通过对应振动提示用户，同时生成新的风险记录。
+
+7. 测试下方 ToF 地面检测：
+
+* 将下方距离降低到 **20 cm 以下**，模拟较近的路沿、凸起等障碍。固件会将其作为低风险 `down_obstacle` 上传。
+* 下方距离保持在 **20–90 cm** 时，认为地面正常，不产生台阶/落差报警。
+* 将有效的下方距离连续两帧保持为**严格大于 90 cm**，模拟坑洞或明显地面落差。固件会上传 `ground_drop`。
+* 当传感器没有检测到有效目标时，单独记录为 `down_no_target`。
+
+8. 长按触摸电极 `E1`，或者在串口中执行：
+
+```text
+mark
+```
+
+后端会在当前路线位置记录一个：
+
+```text
+user_mark
+```
+
+风险点。
+
+9. 在串口中执行：
+
+```text
+path
+```
+
+输出本地路线 / 风险点环形缓冲区数据。
+
+10. 将设备 ID 修改为：
+
+```text
+SMARTCANE_DEVICE_ID="cane_002"
+```
+
+重新烧录第二台设备，然后执行：
+
+```text
+nearby
+```
+
+第二台盲杖会获取附近的历史风险统计数据，并将历史风险信息与本地检测结果进行融合，实现**多设备协同风险地图**。
+
+11. 短按物理按键，或者在串口中执行：
+
+```text
+btn
+```
+
+盲杖会上传：
+
+```text
+voice_request
+```
+
+盲人用户 Android App 随后进入语音交互模式。
+
+**陪护端 App 不接收普通的 `voice_request` 请求。**
+
+12. 长按物理按键 **2 秒**，或者执行：
+
+```text
+sos
+```
+
+盲杖将执行：
+
+* 振动；
+* 蜂鸣报警；
+* 串口输出 SOS 信息；
+* 上传 `sos` 事件。
+
+后端会区分：
+
+```text
+sos
+```
+
+与：
+
+```text
+fall_detected
+```
+
+两种事件。
+
+13. 测试跌倒检测时，将搭载 BMI270 的开发板轻轻放倒或倾斜到软垫上，并保持侧倾状态一段时间。
+
+检测到跌倒后：
+
+* 盲杖仅使用蜂鸣器报警；
+* 上传 `fall_detected`；
+* 后端同时向**盲人用户端**和**陪护端**提供该事件。
+
+完整串口命令列表参见：
+
+```text
+firmware/smartcane_arduino/README.md
+```
+
+---
+
+## Android 前端
+
+使用 Android Studio 打开：
 
 ```text
 D:\smartcane\frontend\SmartCane
 ```
 
-The app backend address is configured in:
+App 的后端地址配置文件为：
 
 ```text
 frontend\SmartCane\local.properties
 ```
 
-For a real phone on the same Wi-Fi, use the computer IPv4, for example:
+### 真机测试
+
+如果 Android 手机与电脑处于同一 Wi-Fi / 热点网络，应填写电脑的 IPv4 地址，例如：
 
 ```properties
 BACKEND_BASE_URL=http://118.31.221.165:8016
 ```
 
-For the Android Emulator, use:
+### Android Emulator 模拟器测试
+
+例如：
 
 ```kotlin
 const val BASE_URL = "http://118.31.221.165:8016"
