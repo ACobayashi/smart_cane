@@ -792,34 +792,6 @@ def init_db() -> None:
              WHERE fall_event_id IS NOT NULL AND TRIM(fall_event_id) <> ''
             """
         )
-        # Canonicalize old emergency records so migrated databases cannot
-        # replay legacy or unconfirmed wording through current clients.
-        conn.execute(
-            "UPDATE risk_events SET voice_prompt = '检测到跌倒' WHERE risk_type = 'fall_detected'"
-        )
-        conn.execute(
-            "UPDATE risk_events SET voice_prompt = '用户发起紧急求助' WHERE risk_type = 'sos'"
-        )
-        conn.execute(
-            """
-            UPDATE risk_points
-               SET voice_prompt = '检测到跌倒', message = '检测到跌倒'
-             WHERE risk_type = 'fall_detected'
-            """
-        )
-        conn.execute(
-            """
-            UPDATE risk_points
-               SET voice_prompt = '用户发起紧急求助', message = '用户发起紧急求助'
-             WHERE risk_type = 'sos'
-            """
-        )
-        conn.execute(
-            "UPDATE device_state SET voice_prompt = '检测到跌倒' WHERE risk_type = 'fall_detected'"
-        )
-        conn.execute(
-            "UPDATE device_state SET voice_prompt = '用户发起紧急求助' WHERE risk_type = 'sos'"
-        )
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_account ON users(account)")
 
 
@@ -897,7 +869,10 @@ def device_state_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "voicePrompt": voice_prompt,
         "source": item.get("source") or "unknown",
         "fallEventId": item.get("fall_event_id"),
+        "fallPending": bool(item.get("fall_pending")),
         "fallDetected": bool(item.get("fall_detected")),
+        "fallStage": item.get("fall_stage"),
+        "fallConfidence": item.get("fall_confidence"),
     }
 
 
@@ -1180,18 +1155,17 @@ def extra_message(item: dict[str, Any]) -> Optional[str]:
 
 
 def legacy_event_message(item: dict[str, Any]) -> str:
-    risk_type = str(item.get("risk_type") or "none")
-    if risk_type == "sos":
-        return "用户发起紧急求助"
-    if risk_type == "fall_detected":
-        return "检测到跌倒"
-
     custom_message = extra_message(item)
     if custom_message:
         return custom_message.removeprefix("message=")
 
+    risk_type = str(item.get("risk_type") or "none")
     distance = event_distance_mm(item)
     cm_text = f"{int(round(distance / 10))} \u5398\u7c73" if distance is not None else "\u672a\u77e5\u8ddd\u79bb"
+    if risk_type == "sos":
+        return "用户发起紧急求助"
+    if risk_type == "fall_detected":
+        return "检测到跌倒"
     if risk_type == "voice_request":
         return "请说目的地或指令"
     if risk_type == "prolonged_obstacle":
@@ -1266,11 +1240,7 @@ def mobile_event_dict(row: sqlite3.Row) -> dict[str, Any]:
     risk_type = str(item.get("risk_type") or "none")
     risk_level = str(item.get("risk_level") or item.get("level") or "low")
     distance_mm = event_distance_mm(item)
-    voice_prompt = (
-        legacy_event_message(item)
-        if risk_type in {"sos", "fall_detected"}
-        else item.get("voice_prompt") or legacy_event_message(item)
-    )
+    voice_prompt = item.get("voice_prompt") or legacy_event_message(item)
     feedback_vibration = feedback.get("vibration") if isinstance(feedback.get("vibration"), dict) else {}
     feedback_buzzer = feedback.get("buzzer") if isinstance(feedback.get("buzzer"), dict) else {}
     sensor_line = (
@@ -2077,6 +2047,16 @@ def choose_direction(frame: SensorFrameCreate, risk_type: str, level: str) -> st
 def imu_fall_score(frame: SensorFrameCreate) -> float:
     if frame.fall_detected is True or frame.manual_risk_type == "fall_detected":
         return 100.0
+    if frame.fall_confidence is not None and frame.fall_confidence >= 0.80:
+        return 92.0
+    if frame.fall_stage in {"confirmed", "mock_confirmed"}:
+        return 92.0
+    if frame.accel_total_g is None:
+        return 0.0
+    if frame.accel_total_g >= 2.6:
+        return 72.0
+    if frame.accel_total_g <= 0.30:
+        return 58.0
     return 0.0
 
 
@@ -2166,7 +2146,7 @@ def risk_reason_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, s
     if risk_type == "sos":
         return "盲杖 SOS 长按触发"
     if risk_type == "fall_detected":
-        return "BMI270 已确认跌倒"
+        return f"BMI270 检测到疑似跌倒，阶段={frame.fall_stage or '-'}，置信度={frame.fall_confidence if frame.fall_confidence is not None else '-'}"
     if risk_type == "prolonged_obstacle":
         return "同一方向障碍持续存在，超过陪护端通知阈值"
     if risk_type == "approaching_obstacle":
@@ -2265,9 +2245,9 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
         elif frame.button_event in {"long_press", "sos"} or explicit_risk == "sos":
             risk_type = "sos"
             score = 100.0
-        elif frame.fall_detected is True or explicit_risk == "fall_detected":
+        elif frame.fall_detected is True or explicit_risk == "fall_detected" or imu_fall_score(frame) >= 90:
             risk_type = "fall_detected"
-            score = 100.0
+            score = 100.0 if frame.fall_detected is True else imu_fall_score(frame)
         elif explicit_risk in {"prolonged_obstacle", "approaching_obstacle"}:
             risk_type = str(explicit_risk)
             score = 34.0 if risk_type == "prolonged_obstacle" else 30.0
@@ -2302,7 +2282,7 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
     feedback = feedback_for_risk(public_risk_type, level, direction)
     reason = frame.reason or risk_reason_for_risk(frame, public_risk_type, level, score)
     if fall_pending_suppressed:
-        reason = "no formal risk event"
+        reason = "firmware is in lying confirmation; ordinary risks suppressed until recovery or formal fall"
     map_weight = round(map_weight_for_risk(public_risk_type, level, score), 1)
     confidence = frame.confidence
     if confidence is None:
@@ -2340,7 +2320,11 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
         "distance_mm": primary_distance_mm(public_risk_type, frame),
         "voice_prompt": voice_prompt_for_risk(frame, public_risk_type, level, direction),
         "feedback": feedback,
+        "fall_event_id": frame.fall_event_id,
+        "fall_pending": bool(frame.fall_pending),
         "fall_detected": bool(frame.fall_detected),
+        "fall_stage": frame.fall_stage,
+        "fall_confidence": frame.fall_confidence,
         "nearby_history": {
             "risk_count": history.get("risk_count", 0),
             "high_count": history.get("high_count", 0),
@@ -3156,8 +3140,6 @@ def alert_title(risk_type: str) -> str:
 
 
 def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, direction: str) -> str:
-    if risk_type == "none":
-        return ""
     if risk_type == "voice_request":
         return "请说目的地或指令"
     if risk_type == "sos":

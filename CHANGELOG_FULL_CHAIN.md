@@ -24,7 +24,7 @@
 - 新增真正运行的 Android `NavigationLocationService`：导航会话创建后启动，2 秒上传真实非 mock 位置，持久化 session，支持 `START_STICKY` 重建并避免重复监听器。
 - Manifest 补齐通知权限及 location 类型前台服务；导航 API 移除默认 `cane_001` 参数，调用方必须传当前绑定设备。
 - BMI270 快速跌倒保留运动事件+姿态+静止确认；慢速跌倒增加使用姿态预稳定、倾斜过程、横躺静止、取消窗口。
-- 跌倒由固件状态机完成姿态学习、动态证据和静止确认；候选阶段保持静默，只有正式事件才对外提醒。
+- 跌倒改为正常握杖姿态预置、快速倾斜加动态证据、横躺静止确认；锁定期间静默普通距离提示，只有稳定恢复正常握杖姿态才解除锁定。
 - 后端普通分析、`/api/ai/deep-risk`、`/api/ai/advice` 的下视阈值统一为 20/90。
 - 新增 `navigation_sessions`，语音路线规划会创建真实会话并保存 polyline/steps/current_step。
 - 新增道路级表：`road_segments`、`road_risk_observations`、`road_traversals`、`road_risk_scores`。

@@ -1104,7 +1104,7 @@ fun SosPage() {
         AlertDialog(
             onDismissRequest = { showConfirmDialog = false },
             title = { Text("确认发送 SOS？") },
-            text = { Text("确认后将向陪护人发送紧急求助。") },
+            text = { Text("确认后将向后端发送紧急求助演示信息。") },
             confirmButton = { TextButton(onClick = { showConfirmDialog = false; sendSos() }) { Text("确认发送") } },
             dismissButton = { TextButton(onClick = { showConfirmDialog = false }) { Text("取消") } }
         )
