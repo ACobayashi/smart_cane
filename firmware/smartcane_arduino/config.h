@@ -7,7 +7,7 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-fall-lock-lie-confirm-20260812"
+#define SMARTCANE_BUILD_TAG "arduino-ground-sweep-filter-20260812"
 #define SMARTCANE_DEVICE_ID "cane_001"
 #ifndef SMARTCANE_DEVICE_NAME
 #define SMARTCANE_DEVICE_NAME "智能盲杖01"
@@ -155,7 +155,7 @@
 // The cane is normally held at an angle, so front/down warnings need a little
 // more reach, while side warnings are moderate to stay responsive without
 // marking every sweep as a map risk.
-#define SMARTCANE_FRONT_WARN_CM 105
+#define SMARTCANE_FRONT_WARN_CM 120
 #define SMARTCANE_FRONT_DANGER_CM 40
 #define SMARTCANE_SIDE_SAFE_CM 80
 #define SMARTCANE_SIDE_ALERT_CM 35
@@ -180,6 +180,10 @@
 #define SMARTCANE_STEP_HISTORY_SAMPLES 3
 #define SMARTCANE_STEP_REBASE_STABLE_FRAMES 4
 #define SMARTCANE_STEP_REBASE_MIN_HOLD_MS 700
+// A hand sweep must settle in normal use before its down-facing samples may
+// contribute to a step candidate. This removes the stale-candidate path where
+// a brief upward sweep was reported as a drop after the hand stopped.
+#define SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS 250
 #define SMARTCANE_DOWN_NORMAL_POSE_DELTA_DEG 18.0f
 #define SMARTCANE_DOWN_MOTION_POSE_DELTA_DEG 10.0f
 #define SMARTCANE_DOWN_MOTION_GYRO_DPS 35.0f

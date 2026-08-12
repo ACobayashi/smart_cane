@@ -88,8 +88,8 @@ Local safety does not depend on Wi-Fi:
 
 - Samples four ToF distances every `100 ms`; VL53L1X uses a 20 ms timing budget.
 - Detects front warning/danger by distance thresholds.
-- Front warning/danger is `<=105/<=40 cm`; side obstacle entry is exactly `<=35 cm`.
-- Detects up/down steps from BMI270-compensated down distance relative to a stable normal-use ground baseline: up step at `-9 cm`, down step at `+11 cm`, deep drop at `+30 cm`, two of the latest three samples. Absolute down distance is never a step rule.
+- Front warning/danger is `<=120/<=40 cm`; side obstacle entry is exactly `<=35 cm`.
+- Detects up/down steps from BMI270-compensated down distance relative to a stable normal-use ground baseline: up step at `-9 cm`, down step at `+11 cm`, deep drop at `+30 cm`, two of the latest three samples. A brief cane lift/sweep clears its candidate and must settle for `250 ms` before it can form another; absolute down distance is never a step rule. Confirmed stairs always publish `ground_step` with `direction=up` or `direction=down`, rather than a generic front obstacle.
 - Fuses nearby history when available.
 - Drives obstacle vibration through PCA9685 `CH0` on TCA `CH6` in current single-motor bench mode.
 - Uses the buzzer only for high-risk cases, ground drops, and SOS.

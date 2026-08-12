@@ -84,10 +84,10 @@ def test_side_alert_boundary_is_exactly_35cm():
     assert main.analyze_sensor_frame(frame(55, right_cm=35), history)["risk_type"] == "right_obstacle"
 
 
-def test_front_warns_at_105cm_and_firmware_ground_direction_is_preserved():
+def test_front_warns_at_120cm_and_firmware_ground_direction_is_preserved():
     history = {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": "low"}
-    assert main.analyze_sensor_frame(frame(55, front_cm=106), history)["risk_type"] == "none"
-    assert main.analyze_sensor_frame(frame(55, front_cm=105), history)["risk_type"] == "front_obstacle"
+    assert main.analyze_sensor_frame(frame(55, front_cm=121), history)["risk_type"] == "none"
+    assert main.analyze_sensor_frame(frame(55, front_cm=120), history)["risk_type"] == "front_obstacle"
     up = main.analyze_sensor_frame(frame(
         42, risk_type="ground_step", direction="up", compensated_down_cm=42,
         ground_baseline_cm=55, height_delta_cm=-13, ground_state="GROUND_STEP_UP"
@@ -108,6 +108,18 @@ def test_front_warns_at_105cm_and_firmware_ground_direction_is_preserved():
     ), history)
     assert drop["risk_type"] == "ground_drop"
     assert drop["direction"] == "down"
+
+
+def test_firmware_sweep_filter_keeps_stairs_distinct_from_front_risers():
+    config = (ROOT / "firmware" / "smartcane_arduino" / "config.h").read_text(encoding="utf-8")
+    ground = (ROOT / "firmware" / "smartcane_arduino" / "risk_logic.cpp").read_text(encoding="utf-8")
+    assert "SMARTCANE_FRONT_WARN_CM 120" in config
+    assert "SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS 250" in config
+    assert "if (!poseNearNormal || caneMotion)" in ground
+    assert "cane_motion_candidate_cancelled" in ground
+    assert "step_candidate_waiting_stable_normal_use" in ground
+    assert "if (!groundCandidateActive && d.frontValid" in ground
+    assert "if (!isGroundRisk(candidate.riskType) && isGroundRisk(best.riskType))" in ground
 
 
 def test_fall_lock_suppresses_distance_feedback_without_time_cooldown(tmp_path, monkeypatch):

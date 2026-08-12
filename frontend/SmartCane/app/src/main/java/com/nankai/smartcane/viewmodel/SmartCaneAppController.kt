@@ -801,7 +801,7 @@ class SmartCaneAppController private constructor(
             val limit = when (level) {
                 "high" -> Int.MAX_VALUE
                 "medium" -> 40
-                else -> 105
+                else -> 120
             }
             if (state.frontCm == null) {
                 hardwareRiskEpisode.observeUnknown()
