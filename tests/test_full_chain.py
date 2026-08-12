@@ -771,6 +771,28 @@ def test_front_and_up_step_share_prompt_while_down_step_and_drop_share_prompt():
     assert historical_down == drop
 
 
+def test_obstacle_advice_never_suggests_lateral_avoidance():
+    request = main.AdviceRequest(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="front_obstacle",
+        risk_level="high",
+        left_cm=120,
+        right_cm=30,
+    )
+    history = {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": "low"}
+
+    assert main.fallback_advice(request, history) == "前方高风险，请停下"
+    assert main.deep_advice(request, {"level": "high"}) == "前方高风险，请停下"
+    assert "向左" not in main.fallback_advice(request, history)
+    assert "向右" not in main.deep_advice(request, {"level": "high"})
+
+
+def test_navigation_advice_timeout_is_shorter_than_amap_timeout():
+    assert 0 < main.NAVIGATION_ADVICE_TIMEOUT_SECONDS < 12
+
+
 def test_recent_self_obstacle_is_not_rebroadcast_as_history(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "self_suppress.db")
     main.init_db()

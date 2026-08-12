@@ -55,6 +55,7 @@ DEFAULT_NEARBY_RADIUS_M = 80.0
 REALTIME_NEARBY_WARNING_RADIUS_M = 10.0
 ROUTE_RISK_BUFFER_M = 8.0
 WALKING_NAVIGATION_MAX_DISTANCE_M = 3000.0
+NAVIGATION_ADVICE_TIMEOUT_SECONDS = 2.0
 RISK_POINT_CLUSTER_RADIUS_M = 12.0
 LEGACY_SIM_POINT_LAT = 31.2304
 LEGACY_SIM_POINT_LNG = 121.4737
@@ -3446,11 +3447,6 @@ def fallback_advice(req: AdviceRequest, history: dict[str, Any]) -> str:
     if req.risk_type in {"ground_drop", "ground_step", "down_no_target", "down_sensor_unavailable"}:
         return "前方有落差，请停下"
     if req.risk_level == "high":
-        if req.left_cm is not None and req.right_cm is not None:
-            if req.left_cm > req.right_cm and req.left_cm > 90:
-                return "前方高风险，请向左"
-            if req.right_cm > req.left_cm and req.right_cm > 90:
-                return "前方高风险，请向右"
         return "前方高风险，请停下"
     if req.risk_level == "medium":
         return "前方中风险，请减速"
@@ -3464,11 +3460,6 @@ def deep_advice(req: AdviceRequest, deep: dict[str, Any]) -> str:
     if level == "high":
         if req.risk_type in {"ground_drop", "ground_step", "down_no_target", "down_sensor_unavailable"}:
             return "前方有落差，请停下"
-        if req.left_cm is not None and req.right_cm is not None:
-            if req.left_cm > req.right_cm and req.left_cm > 90:
-                return "前方高风险，请向左"
-            if req.right_cm > req.left_cm and req.right_cm > 90:
-                return "前方高风险，请向右"
         return "前方高风险，请停下"
     if level == "medium":
         return "前方中风险，请减速"
@@ -4463,7 +4454,19 @@ async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
     if request.sensor_frame:
         history = nearby_summary(origin_lat, origin_lng, request.risk_radius_m)
         sensor_analysis = analyze_sensor_frame(request.sensor_frame, history)
-    llm_advice = await generate_route_advice(enriched.get("best_route"), sensor_analysis)
+    try:
+        llm_advice = await asyncio.wait_for(
+            generate_route_advice(enriched.get("best_route"), sensor_analysis),
+            timeout=NAVIGATION_ADVICE_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        llm_advice = {
+            "advice": route_voice_prompt(enriched.get("best_route")),
+            "fallback": True,
+            "error": "navigation advice timed out",
+            "provider": chat_config()["provider"],
+            "model": chat_config()["model"],
+        }
     response = {
         **enriched,
         "provider": "amap_web_service",
