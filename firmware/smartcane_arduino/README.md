@@ -63,12 +63,12 @@ Edit `config.h`:
 #define SMARTCANE_DEVICE_ID "cane_001"
 #define SMARTCANE_WIFI_SSID "xin"
 #define SMARTCANE_WIFI_PASSWORD "your_wifi_password"
-#define SMARTCANE_SERVER_BASE_URL "http://118.31.221.165:8016"
+#define SMARTCANE_SERVER_BASE_URL "http://59.110.21.95:8016"
 #define SMARTCANE_MOCK_LAT 31.230400
 #define SMARTCANE_MOCK_LNG 121.473700
 ```
 
-For the current group deployment, keep `SMARTCANE_SERVER_BASE_URL` pointed at `http://118.31.221.165:8016`. For temporary local testing, use your PC LAN IP, not `127.0.0.1`, because `127.0.0.1` from the ESP32 means the ESP32 itself.
+For the current group deployment, keep `SMARTCANE_SERVER_BASE_URL` pointed at `http://59.110.21.95:8016`. For temporary local testing, use your PC LAN IP, not `127.0.0.1`, because `127.0.0.1` from the ESP32 means the ESP32 itself.
 
 For an independent product build, keep the ESP32-C5 on a reachable Wi-Fi/hotspot and point `SMARTCANE_SERVER_BASE_URL` at a cloud or LAN backend. The Android phone supplies the real Amap/GPS location to the backend; the cane-side coordinates are only a fallback until a GNSS module or phone-to-cane location bridge is added.
 

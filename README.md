@@ -125,7 +125,7 @@ connect the PC, ESP32-C5, and Android test phone to the same hotspot and use
 the PC hotspot/LAN IPv4:
 
 ```cpp
-#define SMARTCANE_SERVER_BASE_URL "http://118.31.221.165:8016"
+#define SMARTCANE_SERVER_BASE_URL "http://59.110.21.95:8016"
 ```
 
 Do not use `127.0.0.1` on the ESP32.
@@ -144,7 +144,7 @@ uvicorn main:app --host 0.0.0.0 --port 8016
 Health check:
 
 ```text
-http://118.31.221.165:8016/api/health
+http://59.110.21.95:8016/api/health
 ```
 
 Useful operation endpoints:
@@ -202,11 +202,11 @@ frontend\SmartCane\local.properties
 For a real phone on the same Wi-Fi, use the computer IPv4, for example:
 
 ```properties
-BACKEND_BASE_URL=http://118.31.221.165:8016
+BACKEND_BASE_URL=http://59.110.21.95:8016
 ```
 
 For the Android Emulator, use:
 
 ```kotlin
-const val BASE_URL = "http://118.31.221.165:8016"
+const val BASE_URL = "http://59.110.21.95:8016"
 ```

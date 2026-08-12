@@ -32,7 +32,7 @@ The app polls `/api/alerts/latest` every few seconds on the blind and companion 
 The committed default backend is the shared cloud FastAPI service:
 
 ```properties
-BACKEND_BASE_URL=http://118.31.221.165:8016
+BACKEND_BASE_URL=http://59.110.21.95:8016
 ```
 
 You only need to edit local Android properties when overriding the backend for a local test:
@@ -71,7 +71,7 @@ Android platform key:
 ```text
 D:\smartcane\frontend\SmartCane\local.properties
 AMAP_ANDROID_KEY=...
-BACKEND_BASE_URL=http://118.31.221.165:8016
+BACKEND_BASE_URL=http://59.110.21.95:8016
 ```
 
 The Android key is injected into `AndroidManifest.xml` through a manifest placeholder. The app still calls the FastAPI backend for geocoding, route risk scoring, and LLM navigation advice, so the Web service key stays server-side.

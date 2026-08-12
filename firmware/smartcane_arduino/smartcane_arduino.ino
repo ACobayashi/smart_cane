@@ -53,6 +53,10 @@ static uint8_t pendingRiskFrames = 0;
 static uint8_t clearRiskFrames = 0;
 static RiskState lastEventRisk;
 static bool haveLastEventRisk = false;
+static RiskState activeFeedbackRisk;
+static bool feedbackArmed = true;
+static bool haveActiveFeedbackRisk = false;
+static unsigned long riskClearStartedMs = 0;
 static long lastEventLatCell = 0;
 static long lastEventLngCell = 0;
 static bool haveLastPathCell = false;
@@ -105,6 +109,7 @@ static void checkPendingSlowFallUpload();
 static bool cancelPendingSlowFall(const char *source);
 static void monitorCompanionAlerts(const RiskState &risk);
 static void uploadCompanionAlert(const char *riskType, RiskLevel level, const char *reason);
+static bool shouldTriggerRiskFeedback(const RiskState &risk);
 static void handleButtonEvent(ButtonEventType type);
 static void handleTouchEvent(uint8_t electrode, TouchEventType type);
 static void processCommand(String command);
@@ -273,6 +278,33 @@ static bool distanceCueNeedsRefresh(const RiskState &risk, const RiskState &prev
 static bool hasConcreteRisk(const RiskState &risk) {
   return strcmp(risk.riskType, "none") != 0 &&
          strcmp(risk.riskType, "sensor_unreliable") != 0;
+}
+
+static bool shouldTriggerRiskFeedback(const RiskState &risk) {
+  unsigned long now = millis();
+  if (!hasConcreteRisk(risk)) {
+    if (haveActiveFeedbackRisk) {
+      if (riskClearStartedMs == 0) {
+        riskClearStartedMs = now;
+      }
+      if (now - riskClearStartedMs >= SMARTCANE_RISK_FEEDBACK_REARM_CLEAR_MS) {
+        feedbackArmed = true;
+        haveActiveFeedbackRisk = false;
+        riskClearStartedMs = 0;
+      }
+    }
+    return false;
+  }
+
+  riskClearStartedMs = 0;
+  if (!feedbackArmed && haveActiveFeedbackRisk) {
+    return false;
+  }
+
+  activeFeedbackRisk = risk;
+  haveActiveFeedbackRisk = true;
+  feedbackArmed = false;
+  return true;
 }
 
 static bool isDistanceRiskType(const char *riskType) {
@@ -779,7 +811,8 @@ static void monitorCompanionAlerts(const RiskState &risk) {
       Serial.print(F("->"));
       Serial.print(distances.frontCm);
       Serial.println(F("cm"));
-      if (now - lastApproachFeedbackMs >= SMARTCANE_COMPANION_APPROACH_WINDOW_MS) {
+      if (now - lastApproachFeedbackMs >= SMARTCANE_COMPANION_APPROACH_WINDOW_MS &&
+          shouldTriggerRiskFeedback(risk)) {
         FeedbackCue approachCue = strcmp(risk.riskType, "front_obstacle") == 0 ? cueForRisk(risk) : CUE_FRONT_DANGER;
         if (approachCue == CUE_OBSTACLE) {
           approachCue = CUE_FRONT_DANGER;
@@ -935,7 +968,7 @@ static void publishRiskEventIfNeeded(const RiskState &risk) {
   }
   printSensorRiskSnapshot();
 
-  if (hasConcreteRisk(risk)) {
+  if (hasConcreteRisk(risk) && shouldTriggerRiskFeedback(risk)) {
     applyFeedbackForRisk(risk, true);
   }
 
@@ -1409,7 +1442,9 @@ void loop() {
       currentRisk = stabilizeRisk(calculateRisk(distances, nearby, imuFallCurrent()));
       publishRiskEventIfNeeded(currentRisk);
       monitorCompanionAlerts(currentRisk);
-      applyFeedbackForRisk(currentRisk, false, false);
+      if (!hasConcreteRisk(currentRisk)) {
+        shouldTriggerRiskFeedback(currentRisk);
+      }
     }
   }
 

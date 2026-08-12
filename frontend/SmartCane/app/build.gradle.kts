@@ -31,7 +31,7 @@ android {
         buildConfigField(
             "String",
             "BACKEND_BASE_URL",
-            "\"${localProperties.getProperty("BACKEND_BASE_URL", "http://118.31.221.165:8016")}\""
+            "\"${localProperties.getProperty("BACKEND_BASE_URL", "http://59.110.21.95:8016")}\""
         )
     }
 
