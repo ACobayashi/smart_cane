@@ -115,8 +115,11 @@ def test_firmware_sweep_filter_keeps_stairs_distinct_from_front_risers():
     ground = (ROOT / "firmware" / "smartcane_arduino" / "risk_logic.cpp").read_text(encoding="utf-8")
     assert "SMARTCANE_FRONT_WARN_CM 120" in config
     assert "SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS 250" in config
+    assert "SMARTCANE_DOWN_STARTUP_RELEARN_MS 1500" in config
     assert "if (!poseNearNormal || caneMotion)" in ground
     assert "cane_motion_candidate_cancelled" in ground
+    assert "startup_normal_use_settling" in ground
+    assert "down_transient_read_ignored" in ground
     assert "step_candidate_waiting_stable_normal_use" in ground
     assert "if (!groundCandidateActive && d.frontValid" in ground
     assert "if (!isGroundRisk(candidate.riskType) && isGroundRisk(best.riskType))" in ground

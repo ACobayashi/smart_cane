@@ -93,6 +93,7 @@ static const char *confirmedGroundRiskType = "none";
 static unsigned long candidateStartedMs = 0;
 static unsigned long confirmedAtMs = 0;
 static unsigned long normalUseStableSinceMs = 0;
+static unsigned long startupRelearnUntilMs = 0;
 static float rebaseLastCm = 0.0f;
 static uint8_t rebaseFrames = 0;
 static float lastCompensatedDownCm = -1.0f;
@@ -130,6 +131,7 @@ void resetGroundStepDetector() {
   candidateStartedMs = 0;
   confirmedAtMs = 0;
   normalUseStableSinceMs = 0;
+  startupRelearnUntilMs = 0;
   rebaseLastCm = 0.0f;
   rebaseFrames = 0;
   lastCompensatedDownCm = -1.0f;
@@ -225,6 +227,14 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
   }
   if (!d.downValid) {
     clearCandidate();
+    // The ToF reader intentionally tolerates a few missed samples.  Do not
+    // turn one bus timeout while the cane is moving into a medium, audible
+    // hazard; only report a genuinely unavailable down sensor after the same
+    // configured failure count used by the reader itself.
+    if (d.downFailCount < SMARTCANE_TOF_FAILS_BEFORE_INVALID) {
+      downRiskReason = "down_transient_read_ignored";
+      return "none";
+    }
     downRiskReason = "down_sensor_unavailable";
     return "down_sensor_unavailable";
   }
@@ -252,7 +262,11 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
     if (baselineFrames >= SMARTCANE_DOWN_BASELINE_STABLE_FRAMES) {
       baselineReady = true;
       groundState = GROUND_NORMAL;
-      downRiskReason = "normal_use_baseline_ready";
+      // The initial seven readings can finish before the user has fully
+      // positioned a freshly powered cane.  Treat the next short still
+      // interval as baseline settling instead of a real curb/stair event.
+      startupRelearnUntilMs = now + SMARTCANE_DOWN_STARTUP_RELEARN_MS;
+      downRiskReason = "normal_use_baseline_settling";
     } else {
       downRiskReason = "learning_normal_use_baseline";
     }
@@ -263,6 +277,25 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
   const bool poseNearNormal = imuAtNormalUsePose(imu);
   const bool caneMotion = caneInMotion(imu);
   lastCaneMotion = caneMotion;
+
+  if ((long)(now - startupRelearnUntilMs) < 0) {
+    clearCandidate();
+    groundState = GROUND_NORMAL;
+    normalUseStableSinceMs = 0;
+    // This window only runs immediately after boot.  Replacing the baseline
+    // with each still sample lets the real held angle/range win over the
+    // first value observed while the device was being picked up.
+    if (poseNearNormal && !caneMotion) {
+      baselineDownCm = compensatedCm;
+      normalUsePitchDeg = imu.pitchDeg;
+      normalUseRollDeg = imu.rollDeg;
+      lastHeightDeltaCm = 0.0f;
+      downRiskReason = "startup_normal_use_settling";
+    } else {
+      downRiskReason = "startup_waiting_for_still_normal_use";
+    }
+    return "none";
+  }
   const int8_t direction = lastHeightDeltaCm >= SMARTCANE_STEP_DOWN_ENTER_CM ? 1 :
                            (lastHeightDeltaCm <= -SMARTCANE_STEP_UP_ENTER_CM ? -1 : 0);
 

@@ -7,7 +7,7 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-fall-tilt-lock-20260812"
+#define SMARTCANE_BUILD_TAG "arduino-ground-startup-safe-20260812"
 #define SMARTCANE_DEVICE_ID "cane_001"
 #ifndef SMARTCANE_DEVICE_NAME
 #define SMARTCANE_DEVICE_NAME "智能盲杖01"
@@ -176,6 +176,10 @@
 #define SMARTCANE_STEP_CLEAR_CM 5
 #define SMARTCANE_DOWN_BASELINE_TOLERANCE_CM 3
 #define SMARTCANE_DOWN_BASELINE_STABLE_FRAMES 7
+// Power-on is a setup period, not a walking edge.  After the first stable
+// baseline we keep learning the held cane position briefly, so putting the
+// cane/box into its use angle cannot be announced as a down stair.
+#define SMARTCANE_DOWN_STARTUP_RELEARN_MS 1500
 #define SMARTCANE_STEP_CONFIRM_SAMPLES 2
 #define SMARTCANE_STEP_HISTORY_SAMPLES 3
 #define SMARTCANE_STEP_REBASE_STABLE_FRAMES 4

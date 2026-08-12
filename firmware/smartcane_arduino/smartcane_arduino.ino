@@ -274,6 +274,13 @@ static bool hasConcreteRisk(const RiskState &risk) {
          strcmp(risk.riskType, "sensor_unreliable") != 0;
 }
 
+static bool isGroundFeedbackRisk(const RiskState &risk) {
+  return strcmp(risk.riskType, "ground_step") == 0 ||
+         strcmp(risk.riskType, "ground_drop") == 0 ||
+         strcmp(risk.riskType, "down_no_target") == 0 ||
+         strcmp(risk.riskType, "down_sensor_unavailable") == 0;
+}
+
 static bool fallLockActive() {
   return imuFallCurrent().fallLock;
 }
@@ -308,6 +315,13 @@ static bool updateRiskFeedbackGate(const RiskState &risk, bool &persistent) {
     riskFeedbackStartedMs = now;
     lastPersistentFeedbackMs = now;
     return true;
+  }
+
+  // A confirmed stair/drop stays active while the cane adopts its new ground
+  // baseline.  It has already produced its one physical cue; repeating that
+  // cue every second makes a stationary demo sound like a fault.
+  if (isGroundFeedbackRisk(risk)) {
+    return false;
   }
 
   if (now - riskFeedbackStartedMs >= SMARTCANE_RISK_PERSISTENT_FEEDBACK_MS &&
