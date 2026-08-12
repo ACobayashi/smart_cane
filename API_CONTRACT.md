@@ -30,7 +30,7 @@
 ### POST `/api/sensor-frames?lite=1`
 请求关键字段：`device_id,lat,lng,front_cm,left_cm,right_cm,down_cm,down_raw_cm,down_valid,pitch_deg,roll_deg,gyro_dps,ground_state,compensated_down_cm,ground_baseline_cm,height_delta_cm,risk_type,direction,source,manual_risk_type,manual_risk_level,manual_risk_reason,fall_pending,fall_detected,fall_stage,fall_event_id,fall_confidence`。
 
-`fall_pending=true` 仅代表本地横躺确认期：后端必须静默，不得将其升级成 `fall_detected`。只有 `fall_detected=true` 才是正式跌倒事件；跌倒锁定仅在稳定恢复正常握杖姿态后解除。
+`fall_pending=true` 是固件内部候选状态：后端必须静默，不得将其升级成 `fall_detected`。只有 `fall_detected=true` 才是正式跌倒事件。
 
 ## 后端导航
 ### POST `/api/navigation/voice-route`

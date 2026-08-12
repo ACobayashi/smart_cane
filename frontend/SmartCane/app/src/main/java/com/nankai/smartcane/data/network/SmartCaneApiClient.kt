@@ -56,11 +56,7 @@ data class DeviceStateDto(
     val voicePrompt: String,
     val source: String,
     val deviceName: String = "",
-    val fallEventId: String? = null,
-    val fallPending: Boolean = false,
-    val fallDetected: Boolean = false,
-    val fallStage: String? = null,
-    val fallConfidence: Double? = null
+    val fallDetected: Boolean = false
 )
 
 data class DeviceStateResponseDto(val success: Boolean, val found: Boolean, val state: DeviceStateDto?)
@@ -958,11 +954,7 @@ object SmartCaneApiClient {
         voicePrompt = optString("voicePrompt", optString("voice_prompt", "")),
         source = optString("source", "unknown"),
         deviceName = optString("deviceName", optString("device_name", optString("name", ""))),
-        fallEventId = optString("fallEventId", optString("fall_event_id", "")).ifBlank { null },
-        fallPending = optBoolean("fallPending", optBoolean("fall_pending")),
-        fallDetected = optBoolean("fallDetected", optBoolean("fall_detected")),
-        fallStage = optString("fallStage", optString("fall_stage", "")).ifBlank { null },
-        fallConfidence = nullableDouble("fallConfidence") ?: nullableDouble("fall_confidence")
+        fallDetected = optBoolean("fallDetected", optBoolean("fall_detected"))
     )
 
     private fun JSONObject.toDeviceStateResponseDto(): DeviceStateResponseDto = DeviceStateResponseDto(
