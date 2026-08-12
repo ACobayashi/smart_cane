@@ -56,6 +56,7 @@ REALTIME_NEARBY_WARNING_RADIUS_M = 10.0
 ROUTE_RISK_BUFFER_M = 8.0
 WALKING_NAVIGATION_MAX_DISTANCE_M = 3000.0
 NAVIGATION_ADVICE_TIMEOUT_SECONDS = 2.0
+NAVIGATION_COMMAND_TIMEOUT_SECONDS = 2.0
 RISK_POINT_CLUSTER_RADIUS_M = 12.0
 LEGACY_SIM_POINT_LAT = 31.2304
 LEGACY_SIM_POINT_LNG = 121.4737
@@ -2963,9 +2964,15 @@ async def plan_walking_route(
     destination_lng: float,
     origin_coordsys: str,
     destination_coordsys: str,
+    origin_amap: Optional[tuple[float, float]] = None,
+    destination_amap: Optional[tuple[float, float]] = None,
 ) -> dict[str, Any]:
-    origin_amap_lat, origin_amap_lng = await convert_to_amap_coord(origin_lat, origin_lng, origin_coordsys)
-    dest_amap_lat, dest_amap_lng = await convert_to_amap_coord(destination_lat, destination_lng, destination_coordsys)
+    origin_amap_lat, origin_amap_lng = origin_amap or await convert_to_amap_coord(
+        origin_lat, origin_lng, origin_coordsys
+    )
+    dest_amap_lat, dest_amap_lng = destination_amap or await convert_to_amap_coord(
+        destination_lat, destination_lng, destination_coordsys
+    )
     data = await amap_get(
         "/direction/walking",
         {
@@ -3290,6 +3297,17 @@ async def parse_route_text_with_llm(text: str) -> dict[str, Any]:
             "reply": "你好，我在。请按住说出要导航去的地方。",
             "fallback": True,
         }
+    if fallback_destination:
+        return {
+            "origin_text": fallback_origin,
+            "destination_text": fallback_destination,
+            "intent": "route",
+            "confidence": 0.9,
+            "reply": None,
+            "fallback": True,
+            "provider": "rule",
+            "model": None,
+        }
     fallback = {
         "origin_text": fallback_origin,
         "destination_text": fallback_destination,
@@ -3313,7 +3331,10 @@ async def parse_route_text_with_llm(text: str) -> dict[str, Any]:
         {"role": "user", "content": json.dumps({"text": text}, ensure_ascii=False)},
     ]
     try:
-        content, meta = await call_chat_completion(messages, temperature=0.0)
+        content, meta = await asyncio.wait_for(
+            call_chat_completion(messages, temperature=0.0),
+            timeout=NAVIGATION_COMMAND_TIMEOUT_SECONDS,
+        )
         if not content:
             return {**fallback, "provider": meta["provider"], "model": meta["model"]}
         parsed = parse_json_object(content)
@@ -4445,7 +4466,16 @@ async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
             "amap_destination": {"lat": dest_amap_lat, "lng": dest_amap_lng},
             "voice_prompt": voice_prompt,
         }
-    route = await plan_walking_route(origin_lat, origin_lng, dest_lat, dest_lng, origin_coordsys, dest_coordsys)
+    route = await plan_walking_route(
+        origin_lat,
+        origin_lng,
+        dest_lat,
+        dest_lng,
+        origin_coordsys,
+        dest_coordsys,
+        origin_amap=(origin_amap_lat, origin_amap_lng),
+        destination_amap=(dest_amap_lat, dest_amap_lng),
+    )
     enriched = await enrich_walking_route(route, request.route_buffer_m)
     if request.route_preference == "distance" and enriched.get("shortest_route"):
         enriched["best_route"] = enriched["shortest_route"]
@@ -4454,19 +4484,18 @@ async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
     if request.sensor_frame:
         history = nearby_summary(origin_lat, origin_lng, request.risk_radius_m)
         sensor_analysis = analyze_sensor_frame(request.sensor_frame, history)
-    try:
-        llm_advice = await asyncio.wait_for(
-            generate_route_advice(enriched.get("best_route"), sensor_analysis),
-            timeout=NAVIGATION_ADVICE_TIMEOUT_SECONDS,
-        )
-    except TimeoutError:
-        llm_advice = {
-            "advice": route_voice_prompt(enriched.get("best_route")),
-            "fallback": True,
-            "error": "navigation advice timed out",
-            "provider": chat_config()["provider"],
-            "model": chat_config()["model"],
-        }
+    route_advice = (
+        str(sensor_analysis.get("voice_prompt") or "")
+        if sensor_analysis and sensor_analysis.get("risk_level") == "high"
+        else route_voice_prompt(enriched.get("best_route"))
+    )
+    llm_advice = {
+        "advice": route_advice,
+        "fallback": True,
+        "provider": "rule",
+        "model": None,
+        "skipped": "speed_first",
+    }
     response = {
         **enriched,
         "provider": "amap_web_service",

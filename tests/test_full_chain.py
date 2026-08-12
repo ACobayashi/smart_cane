@@ -791,6 +791,87 @@ def test_obstacle_advice_never_suggests_lateral_avoidance():
 
 def test_navigation_advice_timeout_is_shorter_than_amap_timeout():
     assert 0 < main.NAVIGATION_ADVICE_TIMEOUT_SECONDS < 12
+    assert 0 < main.NAVIGATION_COMMAND_TIMEOUT_SECONDS < 12
+
+
+def test_explicit_navigation_command_skips_llm(monkeypatch):
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("explicit navigation commands must not call the LLM")
+
+    monkeypatch.setattr(main, "call_chat_completion", fail_if_called)
+    parsed = main.asyncio.run(main.parse_route_text_with_llm("带我去南开大学图书馆"))
+
+    assert parsed["intent"] == "route"
+    assert parsed["destination_text"] == "南开大学图书馆"
+    assert parsed["provider"] == "rule"
+
+
+def test_risk_aware_route_does_not_wait_for_llm(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "fast_route.db")
+    main.init_db()
+
+    async def fake_resolve(_request):
+        return 39.9, 116.4, 39.901, 116.401, {
+            "origin": {"source": "request_coordinate", "coordsys": "amap"},
+            "destination": {"source": "request_coordinate", "coordsys": "amap"},
+        }
+
+    async def fake_convert(lat, lng, _coordsys):
+        return lat, lng
+
+    route = {
+        "input": {
+            "origin": {"lat": 39.9, "lng": 116.4, "coordsys": "amap"},
+            "destination": {"lat": 39.901, "lng": 116.401, "coordsys": "amap"},
+        },
+        "amap_origin": {"lat": 39.9, "lng": 116.4},
+        "amap_destination": {"lat": 39.901, "lng": 116.401},
+    }
+    best = {
+        "index": 0,
+        "distance_m": 150,
+        "duration_s": 120,
+        "risk_score": 0.0,
+        "risk": {},
+        "steps": [],
+        "polyline": [],
+    }
+
+    async def fake_plan(*args, **kwargs):
+        assert kwargs["origin_amap"] == (39.9, 116.4)
+        assert kwargs["destination_amap"] == (39.901, 116.401)
+        return route
+
+    async def fake_enrich(*args, **kwargs):
+        return {
+            "routes": [best],
+            "best_route": best,
+            "shortest_route": best,
+            "selected_route_index": 0,
+            "voice_prompt": "导航开始，请按提示前进",
+        }
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("route response must not call the LLM")
+
+    monkeypatch.setattr(main, "resolve_route_endpoint", fake_resolve)
+    monkeypatch.setattr(main, "convert_to_amap_coord", fake_convert)
+    monkeypatch.setattr(main, "plan_walking_route", fake_plan)
+    monkeypatch.setattr(main, "enrich_walking_route", fake_enrich)
+    monkeypatch.setattr(main, "generate_route_advice", fail_if_called)
+
+    result = main.asyncio.run(main.risk_aware_route(main.MapRouteRequest(
+        device_id="cane_real",
+        origin_lat=39.9,
+        origin_lng=116.4,
+        destination_lat=39.901,
+        destination_lng=116.401,
+        coordsys="amap",
+    )))
+
+    assert result["navigation_status"] == "ready"
+    assert result["llm_advice"]["provider"] == "rule"
+    assert result["llm_advice"]["skipped"] == "speed_first"
 
 
 def test_recent_self_obstacle_is_not_rebroadcast_as_history(tmp_path, monkeypatch):
