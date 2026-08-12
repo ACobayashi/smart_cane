@@ -1142,22 +1142,22 @@ static void processCommand(String command) {
     vibrationPcaIicMotor(0, SMARTCANE_VIB_SINGLE_PULSE_MS);
   } else if (command == "vib right" || command == "motor 2" || command == "m2" || command == "2") {
 #if SMARTCANE_VIB_MOTOR_COUNT <= 1
-    Serial.println(F("[CMD] PCA9685 IIC single motor CH0 / test pulses 2"));
+    Serial.println(F("[CMD] PCA9685 IIC single motor CH0 / short pulse"));
 #else
     Serial.println(F("[CMD] PCA9685 IIC motor 2 / right"));
 #endif
-    vibrationPcaIicMotor(1, 700);
+    vibrationPcaIicMotor(1, SMARTCANE_VIB_SINGLE_PULSE_MS);
   } else if (command == "vib center" || command == "vib centre" || command == "motor 3" || command == "m3" || command == "3") {
 #if SMARTCANE_VIB_MOTOR_COUNT <= 1
-    Serial.println(F("[CMD] PCA9685 IIC single motor CH0 / test pulses 3"));
+    Serial.println(F("[CMD] PCA9685 IIC single motor CH0 / short pulse"));
 #else
     Serial.println(F("[CMD] PCA9685 IIC motor 3 / center"));
 #endif
-    vibrationPcaIicMotor(2, 700);
+    vibrationPcaIicMotor(2, SMARTCANE_VIB_SINGLE_PULSE_MS);
   } else if (command == "vib all" || command == "motor all" || command == "mall" || command == "a") {
 #if SMARTCANE_VIB_MOTOR_COUNT <= 1
-    Serial.println(F("[CMD] PCA9685 IIC single motor CH0 / all-cue test"));
-    vibrationPcaIicMotor(2, 700);
+    Serial.println(F("[CMD] PCA9685 IIC single motor CH0 / short pulse"));
+    vibrationPcaIicMotor(0, SMARTCANE_VIB_SINGLE_PULSE_MS);
 #else
     Serial.println(F("[CMD] PCA9685 IIC motor all"));
     vibrationPcaIicMotor(0, 700);
@@ -1293,8 +1293,8 @@ static void printHelp() {
   Serial.println(F("  imustream on/off print brief BMI270 fall state"));
 #if SMARTCANE_VIB_MOTOR_COUNT <= 1
   Serial.println(F("  vib status    show single physical motor on PCA9685 CH0"));
-  Serial.println(F("  m1/m2/m3      CH0 short one/two/three pulse tests"));
-  Serial.println(F("  mall|a        CH0 all-cue test; mstop stops immediately"));
+  Serial.println(F("  m1/m2/m3      CH0 short one-pulse tests"));
+  Serial.println(F("  mall|a        CH0 short one-pulse test; mstop stops immediately"));
 #else
   Serial.println(F("  vib left|right|center|all|stop|status"));
   Serial.println(F("  m1/m2/m3/mall or 1/2/3/a drive motors; works even without New Line"));

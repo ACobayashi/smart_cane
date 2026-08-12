@@ -7,7 +7,7 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-fullchain-delta22-fall2of3-single-motor-20260812"
+#define SMARTCANE_BUILD_TAG "arduino-fullchain-delta23-single-short-vib-20260812"
 #define SMARTCANE_DEVICE_ID "cane_001"
 #ifndef SMARTCANE_DEVICE_NAME
 #define SMARTCANE_DEVICE_NAME "智能盲杖01"

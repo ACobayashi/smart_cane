@@ -462,12 +462,16 @@ void vibrateCenter(uint8_t level, uint16_t durationMs) {
 
 void vibrateAll(uint8_t level, uint16_t durationMs) {
 #if SMARTCANE_VIB_MOTOR_COUNT <= 1
-  vibrateIndex(0, level, durationMs);
+  vibrateNoticeOnce();
 #else
   vibrateLeft(level, durationMs);
   vibrateRight(level, durationMs);
   vibrateCenter(level, durationMs);
 #endif
+}
+
+void vibrateNoticeOnce() {
+  vibrateIndex(0, SMARTCANE_VIB_LEVEL_MEDIUM, SMARTCANE_VIB_SINGLE_PULSE_MS);
 }
 
 void vibrationStopAll() {
@@ -505,10 +509,10 @@ bool vibrationPcaIicMotor(uint8_t motorIndex, uint16_t durationMs) {
   if (initOk && err == 0) {
     pcaReady = true;
 #if SMARTCANE_VIB_MOTOR_COUNT <= 1
-    uint16_t onMs = motorIndex == 0 ? durationMs : SMARTCANE_VIB_SINGLE_PULSE_MS;
-    startSinglePulsePattern(motorIndex + 1,
-                            SMARTCANE_VIB_LEVEL_HIGH,
-                            onMs,
+    (void)motorIndex;
+    startSinglePulsePattern(1,
+                            SMARTCANE_VIB_LEVEL_MEDIUM,
+                            SMARTCANE_VIB_SINGLE_PULSE_MS,
                             SMARTCANE_VIB_SINGLE_PULSE_GAP_MS);
 #else
     stopAtMs[stopIndexForMotorIndex(motorIndex)] = millis() + durationMs;
@@ -548,7 +552,7 @@ bool vibrationPcaIicStop() {
 
 void patternObstacle() {
 #if SMARTCANE_VIB_MOTOR_COUNT <= 1
-  startSinglePulsePattern(1, SMARTCANE_VIB_LEVEL_MEDIUM, 180, SMARTCANE_VIB_SINGLE_PULSE_GAP_MS);
+  vibrateNoticeOnce();
 #else
   vibrateCenter(SMARTCANE_VIB_LEVEL_MEDIUM, 180);
 #endif
@@ -556,7 +560,7 @@ void patternObstacle() {
 
 void patternGroundDrop() {
 #if SMARTCANE_VIB_MOTOR_COUNT <= 1
-  startSinglePulsePattern(4, SMARTCANE_VIB_LEVEL_HIGH, 130, 80);
+  vibrateNoticeOnce();
 #else
   vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, 300);
 #endif
@@ -564,7 +568,7 @@ void patternGroundDrop() {
 
 void patternTurnLeft() {
 #if SMARTCANE_VIB_MOTOR_COUNT <= 1
-  startSinglePulsePattern(2, SMARTCANE_VIB_LEVEL_MEDIUM, SMARTCANE_VIB_SINGLE_PULSE_MS, SMARTCANE_VIB_SINGLE_PULSE_GAP_MS);
+  vibrateNoticeOnce();
 #else
   vibrateLeft(SMARTCANE_VIB_LEVEL_MEDIUM, 220);
 #endif
@@ -572,7 +576,7 @@ void patternTurnLeft() {
 
 void patternTurnRight() {
 #if SMARTCANE_VIB_MOTOR_COUNT <= 1
-  startSinglePulsePattern(3, SMARTCANE_VIB_LEVEL_MEDIUM, SMARTCANE_VIB_SINGLE_PULSE_MS, SMARTCANE_VIB_SINGLE_PULSE_GAP_MS);
+  vibrateNoticeOnce();
 #else
   vibrateRight(SMARTCANE_VIB_LEVEL_MEDIUM, 220);
 #endif
@@ -580,7 +584,7 @@ void patternTurnRight() {
 
 void patternStop() {
 #if SMARTCANE_VIB_MOTOR_COUNT <= 1
-  startSinglePulsePattern(1, SMARTCANE_VIB_LEVEL_HIGH, 650, SMARTCANE_VIB_SINGLE_PULSE_GAP_MS);
+  vibrateNoticeOnce();
 #else
   vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, 260);
 #endif
@@ -588,7 +592,7 @@ void patternStop() {
 
 void patternSos() {
 #if SMARTCANE_VIB_MOTOR_COUNT <= 1
-  startSinglePulsePattern(5, SMARTCANE_VIB_LEVEL_HIGH, 120, 70);
+  vibrateNoticeOnce();
 #else
   vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, 350);
 #endif
