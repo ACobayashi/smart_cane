@@ -779,7 +779,7 @@ static void handleFallEvent(const ImuFallState &fall) {
 
   String extra = String("{\"source\":\"bmi270_imu\",\"notify\":\"blind_and_companion\",\"schema\":\"smartcane.local_cue.v1\",\"cue_source\":\"formal_fall\",\"is_local_cue\":true,\"cue_id\":\"") +
                  activeFallEventId + "\",\"cue_at_ms\":" + String(fallRisk.detectedAtMs) +
-                 ",\"cue_repeat\":false,\"buzzer_requested\":true,\"vibration_requested\":true,\"fall_stage\":\"fall_confirmed\",\"imu_stage\":\"") +
+                 ",\"cue_repeat\":false,\"buzzer_requested\":true,\"vibration_requested\":true,\"fall_stage\":\"fall_confirmed\",\"imu_stage\":\"" +
                  fall.stage + "\",\"total_g\":" + String(fall.totalG, 2) +
                  ",\"gyro_dps\":" + String(fall.gyroDps, 1) +
                  ",\"angle_delta_deg\":" + String(fall.angleChangeDeg, 1) +
