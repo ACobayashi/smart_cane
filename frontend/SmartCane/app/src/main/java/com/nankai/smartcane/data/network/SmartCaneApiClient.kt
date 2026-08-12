@@ -117,6 +117,7 @@ data class EmergencyAlertDto(
     val latitude: Double?,
     val longitude: Double?,
     val timestamp: String,
+    val freshForSpeech: Boolean = false,
     val relativeDirection: String = "front",
     val relativeDirectionText: String = "前方",
     val confidence: Double? = null,
@@ -1021,7 +1022,8 @@ object SmartCaneApiClient {
         voicePrompt = optString("voicePrompt", optString("voice_prompt", optString("message"))),
         latitude = nullableDouble("latitude") ?: nullableDouble("lat"),
         longitude = nullableDouble("longitude") ?: nullableDouble("lng"),
-        timestamp = optString("timestamp")
+        timestamp = optString("timestamp"),
+        freshForSpeech = optBoolean("freshForSpeech", false)
     )
 
     private fun JSONObject.toNearbyRiskWarningDtoOrNull(): NearbyRiskWarningDto? {

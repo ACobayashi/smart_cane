@@ -585,6 +585,19 @@ def test_device_event_cursor_returns_only_new_events_in_order(tmp_path, monkeypa
     assert response["lastId"] == second["id"]
 
 
+def test_alert_payload_marks_old_events_as_not_fresh_for_speech(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "alert_freshness.db")
+    main.init_db()
+    old = main.store_event(main.EventCreate(
+        device_id="cane_real", lat=31.0, lng=121.0,
+        risk_type="sos", risk_level="high", sensor="sos_button",
+        timestamp="2026-01-01T00:00:00+00:00",
+    ))
+    with main.db() as conn:
+        row = conn.execute("SELECT * FROM risk_events WHERE id = ?", (old["id"],)).fetchone()
+    assert main.alert_event_payload(row, "blind")["freshForSpeech"] is False
+
+
 def test_sos_becomes_historical_risk_point(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "sos_history.db")
     main.init_db()

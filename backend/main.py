@@ -1379,6 +1379,12 @@ def alert_event_payload(row: sqlite3.Row, role: str) -> dict[str, Any]:
     event = mobile_event_dict(row)
     risk_type = event["riskType"]
     level = event["riskLevel"]
+    event_time = parse_time(event.get("timestamp"))
+    speech_age_seconds = (
+        (datetime.now(timezone.utc) - event_time).total_seconds()
+        if event_time is not None
+        else float("inf")
+    )
     return {
         "id": event["id"],
         "deviceId": event["deviceId"],
@@ -1394,6 +1400,7 @@ def alert_event_payload(row: sqlite3.Row, role: str) -> dict[str, Any]:
         "targetRoles": alert_target_roles(risk_type),
         "forRole": role,
         "requiresAttention": True,
+        "freshForSpeech": 0 <= speech_age_seconds <= 10,
         "feedback": event.get("feedback"),
         "riskScore": event.get("riskScore"),
         "distance": event.get("distance"),

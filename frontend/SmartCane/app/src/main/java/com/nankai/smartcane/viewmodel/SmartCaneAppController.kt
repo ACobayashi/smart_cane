@@ -647,6 +647,7 @@ class SmartCaneAppController private constructor(
                         newAlerts.forEach { alert ->
                             lastAlertId = maxOf(lastAlertId, alert.id)
                             if (alert.riskType == "voice_request" && role == "blind") {
+                                if (!alert.freshForSpeech) return@forEach
                                 if (!spokenEventIds.tryAcquire(alert.id)) return@forEach
                                 _uiState.update {
                                     it.copy(
@@ -665,6 +666,7 @@ class SmartCaneAppController private constructor(
                                     message = alert.message,
                                     sosAlarmActive = sosAlarmJob?.isActive == true
                                 )?.let { alertText ->
+                                    if (!alert.freshForSpeech) return@let
                                     if (!spokenEventIds.tryAcquire(alert.id)) return@let
                                     if (alert.riskType == "sos" || alert.riskType == "fall_detected") {
                                         speakText(alertText, TtsPriority.EMERGENCY, bypassTextCooldown = true)
