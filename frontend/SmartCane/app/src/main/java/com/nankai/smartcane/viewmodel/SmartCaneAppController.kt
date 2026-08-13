@@ -177,7 +177,18 @@ class SmartCaneAppController private constructor(
     private fun currentCaneDeviceId(): String =
         _uiState.value.currentRelation?.caneDevice?.deviceId
             ?: DemoData.defaultCane.deviceId.takeIf { _uiState.value.currentUser?.isDemo == true }
+            ?: mobileObserverId()
             ?: ""
+
+    private fun mobileObserverId(): String? =
+        _uiState.value.currentUser
+            ?.takeIf { it.account.equals("AC", ignoreCase = true) }
+            ?.userId
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { "mobile_$it" }
+
+    private fun nearbyRiskObserverId(): String? = mobileObserverId() ?: speechCaneDeviceId()
 
     private fun boundCaneDeviceId(): String =
         _uiState.value.currentRelation
@@ -545,7 +556,7 @@ class SmartCaneAppController private constructor(
                     continue
                 }
 
-                val deviceId = speechCaneDeviceId()
+                val deviceId = nearbyRiskObserverId()
                 if (deviceId == null) {
                     delay(6_000L)
                     continue
@@ -602,7 +613,7 @@ class SmartCaneAppController private constructor(
     private fun maybeSpeakNearbyRiskWarning(warning: NearbyRiskWarningDto) {
         if (isNavigationInProgress(_uiState.value.navigationStatus)) return
         if (activeTtsPriority?.rank?.let { it > TtsPriority.ROAD_RISK.rank } == true) return
-        val currentDeviceId = speechCaneDeviceId() ?: return
+        val currentDeviceId = nearbyRiskObserverId() ?: return
         val isOwnFallRisk = currentDeviceId.isNotEmpty() &&
             warning.riskType == "fall_detected" &&
             warning.sourceDevices.any { sourceDevice -> sourceDevice.trim() == currentDeviceId }
@@ -665,7 +676,11 @@ class SmartCaneAppController private constructor(
             serverText = warning.voicePrompt.ifBlank { fallback }
         ) ?: return
         _uiState.update { it.copy(message = "附近风险点：${directionText}${distanceM}米", lastSpokenText = text) }
-        speakText(text, priority = TtsPriority.ROAD_RISK, requiresOnlineCane = true)
+        speakText(
+            text,
+            priority = TtsPriority.ROAD_RISK,
+            requiresOnlineCane = mobileObserverId() == null
+        )
     }
 
     @Suppress("MissingPermission")

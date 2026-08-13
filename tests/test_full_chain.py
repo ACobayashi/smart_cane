@@ -146,6 +146,23 @@ def test_fall_and_sos_not_road_intrinsic(tmp_path, monkeypatch):
         assert conn.execute("SELECT COUNT(*) AS c FROM road_risk_observations").fetchone()["c"] == 0
 
 
+def test_mobile_observer_location_counts_as_recent_heartbeat(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "mobile_observer.db")
+    main.init_db()
+    observer_id = "mobile_ac_user"
+    main.create_location(
+        main.LocationCreate(
+            device_id=observer_id,
+            lat=31.0,
+            lng=121.0,
+            provider="gps",
+            quality="usable",
+            accuracy_m=5.0,
+        )
+    )
+    assert main.device_has_recent_heartbeat(observer_id) is True
+
+
 def test_road_risk_multi_device_aggregation(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "test.db")
     main.init_db()
