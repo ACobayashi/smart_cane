@@ -821,7 +821,7 @@ def test_low_obstacle_second_report_promotes_to_history_warning(tmp_path, monkey
     warning = main.nearby_risk_warning(lat=31.0, lng=121.00002, radius=50, min_level="medium", exclude_device_id=None, bearing_deg=None)
     assert warning["found"] is True
     assert warning["warning"]["riskLevel"] == "medium"
-    assert warning["warning"]["voicePrompt"] == "前方障碍，请减速"
+    assert warning["warning"]["voicePrompt"] == "前方2米有中风险点"
     assert len(warning["warning"]["voicePrompt"]) <= 15
 
 
@@ -857,8 +857,17 @@ def test_realtime_obstacles_steps_and_drop_only_describe_the_condition():
     historical_down = main.nearby_warning_text(
         8.0, "high", "front", {"riskType": "ground_step", "voicePrompt": down_step}
     )
-    assert historical_up == "前方障碍，请减速"
+    assert historical_up == "前方8米有高风险点"
     assert historical_down == ""
+
+
+def test_nearby_risk_point_speech_uses_direction_distance_and_existing_level():
+    event = {"riskType": "front_obstacle", "reportCount": 2}
+
+    assert main.nearby_warning_text(2.4, "high", "front", event) == "前方2米有高风险点"
+    assert main.nearby_warning_text(3.6, "medium", "left", event) == "左侧4米有中风险点"
+    assert main.nearby_warning_text(5.2, "low", "right", event) == "右侧5米有低风险点"
+    assert "障碍" not in main.nearby_warning_text(2.4, "high", "front", event)
 
 
 def test_obstacle_advice_never_suggests_lateral_avoidance():

@@ -104,6 +104,20 @@ class AlertSpeechRoleTest {
     }
 
     @Test
+    fun nearbyRiskPointSpeechKeepsServerLevelTextAndNeverRestoresObstacleWording() {
+        assertEquals(
+            "前方3米有高风险点",
+            nearbyRiskPointSpeechText("front_obstacle", "前方3米有高风险点")
+        )
+        assertEquals(
+            "左侧6米有中风险点",
+            nearbyRiskPointSpeechText("left_obstacle", "左侧6米有中风险点")
+        )
+        assertNull(nearbyRiskPointSpeechText("ground_step_down", "前方2米有高风险点"))
+        assertNull(nearbyRiskPointSpeechText("ground_step", "前方下台阶或坑洼，请停下"))
+    }
+
+    @Test
     fun ordinaryAlertsCannotBypassTheLocalCueStream() {
         assertNull(alertSpeechForRole("blind", "prolonged_obstacle", "旧提示", "旧状态", false))
         assertNull(alertSpeechForRole("blind", "front_obstacle", "旧提示", "旧状态", false, 320))

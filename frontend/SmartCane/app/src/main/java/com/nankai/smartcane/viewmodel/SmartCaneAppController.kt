@@ -69,6 +69,7 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 class SmartCaneAppController private constructor(
     private val authRepository: AuthRepository,
@@ -656,15 +657,14 @@ class SmartCaneAppController private constructor(
         if (_uiState.value.voiceState == VoiceState.Listening) return
         if (!nearbyRiskSpeechCooldown.tryAcquire(warning.eventId, now)) return
 
-        val distanceCm = (warning.distanceM * 100).toInt().coerceAtLeast(1)
+        val distanceM = warning.distanceM.roundToInt().coerceAtLeast(1)
         val directionText = warning.relativeDirectionText.ifBlank { "前方" }
-        val fallback = "${directionText}${distanceCm}厘米${riskLevelLabel(warning.riskLevel)}风险"
-        val text = hazardSpeechText(
+        val fallback = "${directionText}${distanceM}米有${riskLevelLabel(warning.riskLevel)}风险点"
+        val text = nearbyRiskPointSpeechText(
             riskType = warning.riskType,
-            direction = "",
             serverText = warning.voicePrompt.ifBlank { fallback }
         ) ?: return
-        _uiState.update { it.copy(message = "附近风险点：${directionText}${distanceCm}厘米", lastSpokenText = text) }
+        _uiState.update { it.copy(message = "附近风险点：${directionText}${distanceM}米", lastSpokenText = text) }
         speakText(text, priority = TtsPriority.ROAD_RISK, requiresOnlineCane = true)
     }
 
@@ -1684,6 +1684,19 @@ internal fun hazardSpeechText(riskType: String, direction: String, serverText: S
         normalizedType in setOf("ground_drop", "ground_step_down", "down_no_target") -> null
         normalizedType == "left_obstacle" -> "左侧有障碍"
         normalizedType == "right_obstacle" -> "右侧有障碍"
+        text.isBlank() -> null
+        else -> text
+    }
+}
+
+internal fun nearbyRiskPointSpeechText(riskType: String, serverText: String): String? {
+    val normalizedType = riskType.trim().lowercase(Locale.US)
+    val text = serverText.trim()
+    return when {
+        normalizedType in setOf("ground_drop", "ground_step_down", "down_no_target") -> null
+        normalizedType == "ground_step" && (
+            text.contains("下台阶") || text.contains("落差") || text.contains("坑洼")
+        ) -> null
         text.isBlank() -> null
         else -> text
     }

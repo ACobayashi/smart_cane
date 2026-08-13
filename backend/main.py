@@ -5509,7 +5509,6 @@ def nearby_warning_text(distance_m: float, risk_level: str, direction: str, even
     direction_text = relative_direction_label(direction)
     distance_text = max(1, int(round(distance_m)))
     risk_type = str(event.get("riskType") or event.get("risk_type") or "history_risk")
-    report_count = int(event.get("reportCount") or event.get("report_count") or 1)
     saved_prompt = str(event.get("voicePrompt") or event.get("voice_prompt") or event.get("message") or "")
     if risk_type == "sos":
         return f"{direction_text}{distance_text}米有求助风险"
@@ -5517,15 +5516,10 @@ def nearby_warning_text(distance_m: float, risk_level: str, direction: str, even
         risk_type == "ground_step"
         and ("上台阶" in saved_prompt or saved_prompt == FRONT_OBSTACLE_SPEECH)
     ):
-        return FRONT_OBSTACLE_SPEECH
+        return f"{direction_text}{distance_text}米有{level_text}风险点"
     if risk_type in {"ground_drop", "ground_step", "ground_step_down", "down_no_target", "down_sensor_unavailable"}:
         return ""
-    if risk_type == "front_obstacle":
-        return FRONT_OBSTACLE_SPEECH
-    if risk_type in {"left_obstacle", "right_obstacle", "prolonged_obstacle", "approaching_obstacle"}:
-        if report_count >= LOW_OBSTACLE_PROMOTION_COUNT or risk_level in {"medium", "high"}:
-            return f"{direction_text}{distance_text}米有障碍"
-    return f"{direction_text}{distance_text}米有{level_text}风险"
+    return f"{direction_text}{distance_text}米有{level_text}风险点"
 
 @app.get("/api/risks/nearby-warning")
 def nearby_risk_warning(
