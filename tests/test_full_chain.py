@@ -531,10 +531,11 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "fallLockActive" in sketch
     assert "beep(SMARTCANE_FALL_ALERT_BUZZ_MS);" in sketch
     assert "vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, SMARTCANE_FALL_ALERT_VIB_MS);" in sketch
-    assert "applyFeedbackForRisk(risk, true, true);" in sketch
-    assert sketch.index("applyFeedbackForRisk(risk, true, true);") > sketch.index("static void publishRiskEventIfNeeded")
+    assert "applyFeedbackForRisk(currentRisk, true, true);" in sketch
+    assert "publishLocalCueEvent(currentRisk, persistent, shouldBuzzForRisk(currentRisk));" in sketch
     loop = sketch[sketch.index("void loop()") :]
-    assert "if (updateRiskFeedbackGate(currentRisk, persistent))" not in loop
+    assert "if (updateRiskFeedbackGate(currentRisk, persistent))" in loop
+    assert loop.index("applyFeedbackForRisk(currentRisk, true, true);") < loop.index("publishLocalCueEvent(currentRisk")
     assert "buzzerStop();" in sketch
     vibration = (ROOT / "firmware" / "smartcane_arduino" / "vibration.cpp").read_text(encoding="utf-8")
     assert "vibrateIndex(0, level, durationMs);" in vibration
@@ -809,6 +810,108 @@ def test_realtime_ai_advice_uses_condition_template_without_llm(monkeypatch):
     assert result["advice"] == "左侧32厘米有障碍"
     assert result["provider"] == "rule"
     assert result["skipped"] == "realtime_condition_only"
+
+
+def test_local_cue_string_metadata_is_parsed_and_deduplicated(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "local_cue.db")
+    main.init_db()
+    extra = main.json.dumps({
+        "source": "esp32c5_local_cue",
+        "schema": "smartcane.local_cue.v1",
+        "cue_source": "risk_feedback",
+        "is_local_cue": True,
+        "cue_id": "cue-device-1",
+        "cue_at_ms": 123456,
+        "cue_repeat": False,
+        "buzzer_requested": True,
+        "vibration_requested": True,
+    })
+    event = main.EventCreate(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="ground_step",
+        risk_level="medium",
+        direction="down",
+        sensor="tof_down",
+        distance_mm=680,
+        extra_json=extra,
+    )
+
+    first = main.store_event(event)
+    second = main.store_event(event)
+    cues = main.local_cues_since(deviceId="cane_real", sinceId=0, limit=50)
+
+    assert first["id"] == second["id"]
+    assert len(cues["cues"]) == 1
+    assert cues["cues"][0]["eventKind"] == "local_cue"
+    assert cues["cues"][0]["cue"]["id"] == "cue-device-1"
+    assert cues["cues"][0]["speech"]["text"] == "前方下台阶，请减速"
+
+
+def test_local_cue_repeat_and_non_cue_events_never_speak(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "local_cue_repeat.db")
+    main.init_db()
+    repeat = main.store_event(main.EventCreate(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="left_obstacle",
+        risk_level="low",
+        direction="keep_right",
+        extra_json={
+            "is_local_cue": True,
+            "cue_id": "cue-repeat",
+            "cue_source": "risk_feedback",
+            "cue_repeat": True,
+        },
+    ))
+    main.store_event(main.EventCreate(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="right_obstacle",
+        risk_level="low",
+        direction="keep_left",
+        extra_json={"source": "esp32c5_periodic_frame"},
+    ))
+
+    with main.db() as conn:
+        row = conn.execute("SELECT * FROM risk_events WHERE id = ?", (repeat["id"],)).fetchone()
+    payload = main.local_cue_payload(row)
+    cues = main.local_cues_since(deviceId="cane_real", sinceId=0, limit=50)
+
+    assert payload["speech"]["shouldSpeak"] is False
+    assert [cue["cue"]["id"] for cue in cues["cues"]] == ["cue-repeat"]
+
+
+def test_only_formal_fall_local_cue_can_speak(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "formal_fall_cue.db")
+    main.init_db()
+    stored = main.store_event(main.EventCreate(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="fall_detected",
+        risk_level="high",
+        direction="stop",
+        sensor="bmi270_imu",
+        fall_event_id="fall-001",
+        extra_json={
+            "is_local_cue": True,
+            "cue_id": "fall-001",
+            "cue_source": "formal_fall",
+            "cue_repeat": False,
+            "fall_stage": "fall_confirmed",
+        },
+    ))
+    with main.db() as conn:
+        row = conn.execute("SELECT * FROM risk_events WHERE id = ?", (stored["id"],)).fetchone()
+
+    payload = main.local_cue_payload(row)
+
+    assert payload["fall"] == {"detected": True, "eventId": "fall-001"}
+    assert payload["speech"] == {"shouldSpeak": True, "text": "检测到跌倒"}
 
 
 def test_navigation_advice_timeout_is_shorter_than_amap_timeout():

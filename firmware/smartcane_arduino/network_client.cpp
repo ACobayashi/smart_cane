@@ -425,7 +425,9 @@ bool uploadRiskEvent(const char* riskType,
     const char* fallEventId,
     bool fallDetected,
     const char* fallStage) {
-    DynamicJsonDocument doc(768);
+    // Formal-fall diagnostics plus local-cue metadata are intentionally kept
+    // together in extra_json; reserve enough space for the complete string.
+    DynamicJsonDocument doc(1536);
     doc["device_id"] = SMARTCANE_DEVICE_ID;
     doc["lat"] = location.lat;
     doc["lng"] = location.lng;
@@ -470,6 +472,34 @@ bool uploadEvent(const RiskState& risk,
         nullptr,
         false,
         nullptr);
+}
+
+bool uploadLocalCueEvent(const RiskState& risk,
+    const DistanceReadings& distances,
+    const LocationData& location,
+    const char* cueId,
+    unsigned long cueAtMs,
+    bool cueRepeat,
+    bool buzzerRequested,
+    bool vibrationRequested) {
+    // Keep this as JSON inside extra_json: deployed servers already persist
+    // that field, so no server schema change is required for the firmware
+    // rollout.  The app/backend can use cue_id as the sole speech dedupe key.
+    DynamicJsonDocument cue(512);
+    cue["source"] = "esp32c5_local_cue";
+    cue["schema"] = "smartcane.local_cue.v1";
+    cue["cue_source"] = "risk_feedback";
+    cue["is_local_cue"] = true;
+    cue["cue_id"] = cueId;
+    cue["cue_at_ms"] = cueAtMs;
+    cue["cue_repeat"] = cueRepeat;
+    cue["buzzer_requested"] = buzzerRequested;
+    cue["vibration_requested"] = vibrationRequested;
+    cue["firmware_build"] = SMARTCANE_BUILD_TAG;
+
+    String extra;
+    serializeJson(cue, extra);
+    return uploadEvent(risk, distances, location, extra.c_str());
 }
 
 bool uploadSensorFrame(const RiskState& risk,

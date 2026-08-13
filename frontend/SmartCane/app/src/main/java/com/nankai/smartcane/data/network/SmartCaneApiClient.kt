@@ -125,6 +125,38 @@ data class EmergencyAlertDto(
     val reportCount: Int? = null
 )
 
+data class LocalCueRiskDto(
+    val type: String,
+    val level: String,
+    val direction: String,
+    val sensor: String,
+    val distanceMm: Int?
+)
+
+data class LocalCueMetadataDto(
+    val id: String,
+    val source: String,
+    val repeat: Boolean,
+    val buzzerRequested: Boolean,
+    val vibrationRequested: Boolean
+)
+
+data class LocalCueFallDto(val detected: Boolean, val eventId: String)
+
+data class LocalCueSpeechDto(val shouldSpeak: Boolean, val text: String)
+
+data class LocalCueDto(
+    val id: Int,
+    val deviceId: String,
+    val timestamp: String,
+    val serverTime: String,
+    val eventKind: String,
+    val risk: LocalCueRiskDto,
+    val cue: LocalCueMetadataDto,
+    val fall: LocalCueFallDto?,
+    val speech: LocalCueSpeechDto
+)
+
 data class ServerStatusDto(val online: Boolean, val message: String, val deviceCount: Int)
 
 data class DeviceDto(
@@ -435,6 +467,58 @@ object SmartCaneApiClient {
             )
         } catch (exception: Exception) {
             ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
+    suspend fun getLatestLocalCueId(deviceId: String): ApiResult<Int> = withContext(Dispatchers.IO) {
+        try {
+            val response = getJson("/api/cues/latest?deviceId=${deviceId.urlEncode()}")
+            ApiResult.Success(response.optInt("lastId", 0))
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
+    suspend fun streamLocalCues(
+        deviceId: String,
+        sinceId: Int,
+        role: String,
+        shouldContinue: () -> Boolean,
+        onCue: (LocalCueDto) -> Unit
+    ): ApiResult<Int> = withContext(Dispatchers.IO) {
+        var lastId = sinceId
+        val path = "/api/cues/stream?deviceId=${deviceId.urlEncode()}&sinceId=$sinceId&role=${role.urlEncode()}"
+        val connection = (URL(ApiConfig.BASE_URL + path).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = 15_000
+            setRequestProperty("Accept", "text/event-stream")
+            setRequestProperty("Cache-Control", "no-cache")
+        }
+        try {
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                val body = connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                throw IllegalStateException(extractError(body, code))
+            }
+            connection.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+                while (shouldContinue()) {
+                    val line = reader.readLine() ?: break
+                    if (line.startsWith("data:")) {
+                        val payload = JSONObject(line.removePrefix("data:").trim())
+                        if (payload.optString("eventKind") == "local_cue") {
+                            val cue = payload.toLocalCueDto()
+                            lastId = maxOf(lastId, cue.id)
+                            onCue(cue)
+                        }
+                    }
+                }
+            }
+            ApiResult.Success(lastId)
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        } finally {
+            connection.disconnect()
         }
     }
 
@@ -1032,6 +1116,44 @@ object SmartCaneApiClient {
         },
         freshForSpeech = optBoolean("freshForSpeech", false)
     )
+
+    private fun JSONObject.toLocalCueDto(): LocalCueDto {
+        val risk = optJSONObject("risk") ?: JSONObject()
+        val cue = optJSONObject("cue") ?: JSONObject()
+        val fall = optJSONObject("fall")
+        val speech = optJSONObject("speech") ?: JSONObject()
+        return LocalCueDto(
+            id = optInt("id"),
+            deviceId = optString("deviceId"),
+            timestamp = optString("timestamp"),
+            serverTime = optString("serverTime"),
+            eventKind = optString("eventKind"),
+            risk = LocalCueRiskDto(
+                type = risk.optString("type"),
+                level = risk.optString("level"),
+                direction = risk.optString("direction"),
+                sensor = risk.optString("sensor"),
+                distanceMm = risk.nullableInt("distanceMm")
+            ),
+            cue = LocalCueMetadataDto(
+                id = cue.optString("id"),
+                source = cue.optString("source"),
+                repeat = cue.optBoolean("repeat", false),
+                buzzerRequested = cue.optBoolean("buzzerRequested", false),
+                vibrationRequested = cue.optBoolean("vibrationRequested", false)
+            ),
+            fall = fall?.let {
+                LocalCueFallDto(
+                    detected = it.optBoolean("detected", false),
+                    eventId = it.optString("eventId")
+                )
+            },
+            speech = LocalCueSpeechDto(
+                shouldSpeak = speech.optBoolean("shouldSpeak", false),
+                text = speech.optString("text")
+            )
+        )
+    }
 
     private fun JSONObject.toNearbyRiskWarningDtoOrNull(): NearbyRiskWarningDto? {
         if (!optBoolean("found", false)) return null

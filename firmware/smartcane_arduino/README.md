@@ -89,7 +89,7 @@ Local safety does not depend on Wi-Fi:
 - Samples four ToF distances every `100 ms`; VL53L1X uses a 20 ms timing budget.
 - Detects front warning/danger by distance thresholds.
 - Front warning/danger is `<=120/<=40 cm`; side obstacle entry is exactly `<=35 cm`.
-- Detects up/down steps from BMI270-compensated down distance relative to a stable normal-use ground baseline: up step at `-9 cm`, down step at `+50 cm`, deep drop at `+70 cm`, two of the latest three samples. A brief cane lift/sweep clears its candidate and must settle for `250 ms` before it can form another; absolute down distance is never a step rule. Confirmed stairs always publish `ground_step` with `direction=up` or `direction=down`, rather than a generic front obstacle.
+- Detects up/down steps from BMI270-compensated down distance relative to a stable normal-use ground baseline: up step at `-9 cm`, down step at `+11 cm`, deep drop at `+30 cm`, two of the latest three samples. A brief cane lift/sweep clears its candidate and must settle for `250 ms` before it can form another; absolute down distance is never a step rule. Confirmed stairs always publish `ground_step` with `direction=up` or `direction=down`, rather than a generic front obstacle.
 - Fuses nearby history when available.
 - Drives obstacle vibration through PCA9685 `CH0` on TCA `CH6` in current single-motor bench mode.
 - Uses the buzzer only for high-risk cases, ground drops, and SOS.
@@ -106,7 +106,7 @@ When the location moves into a new small grid cell, the firmware:
 - stores it in a local ring buffer,
 - uploads it to `POST /api/locations` when network mode is enabled.
 
-Local risk events are event-driven: the same risk type/level/direction in the same location grid is logged and uploaded once. A new obstacle event starts its matching vibration/buzzer cue once, then the phone speaks that same event once. A persistent unchanged risk does not replay old physical feedback or speech. A changed risk type, direction, level, location grid, or meaningful distance change creates the next event. User marks are uploaded to `POST /api/risk-events`. Another device ID can then call `GET /api/risks/nearby` and use the historical risk count in local risk fusion.
+Local risk events are event-driven: the same risk type/level/direction in the same location grid is logged and uploaded once, while feedback is demo-friendly. A new obstacle cue vibrates once and beeps once; a changed risk type, direction, or level cues again; if the same obstacle stays for 3 seconds, it repeats short vibration/beep reminders. User marks are uploaded to `POST /api/risk-events`. Another device ID can then call `GET /api/risks/nearby` and use the historical risk count in local risk fusion.
 
 `SMARTCANE_MOCK_ROUTE_ENABLED` is `0` by default for bench testing. Keep it off for product tests.
 
@@ -172,7 +172,7 @@ Use `scan`, `pca`, `imu`, `read`, `vib all`, and `beep` for real hardware checks
 4. Put an obstacle in front: Serial prints one risk event, the CH0 motor vibrates, and high danger also beeps.
 5. Keep the obstacle still: the same place/same risk is not printed repeatedly.
 6. Open left/right side space or move to another grid cell: the CH0 motor uses different pulse counts to indicate the cue and a new event can be recorded.
-7. Hold the normal-use posture through the startup settling window to learn the ground baseline. A compensated `-9 cm` ground change triggers `ground_step direction=up`; `+50 cm` triggers `ground_step direction=down`; `+70 cm` triggers `ground_drop`. A normal cane lift/sweep that returns to baseline is cancelled without an alert.
+7. Hold normal use posture for about 0.7 s to learn ground baseline. A compensated `-9 cm` ground change triggers `ground_step direction=up`; `+11 cm` triggers `ground_step direction=down`; `+30 cm` triggers `ground_drop`. A normal cane lift/sweep that returns to baseline is cancelled without an alert.
 8. Run `mark` or long-press touch E1: backend records a user risk point.
 9. Run `path`: local walked route/risk ring buffer is printed.
 10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`: the second cane sees the historical risk area.

@@ -468,7 +468,14 @@ def init_db() -> None:
                 fall_event_id TEXT,
                 voice_prompt TEXT,
                 feedback_json TEXT,
-                extra_json TEXT
+                extra_json TEXT,
+                is_local_cue INTEGER NOT NULL DEFAULT 0,
+                cue_id TEXT,
+                cue_source TEXT,
+                cue_at_ms INTEGER,
+                cue_repeat INTEGER NOT NULL DEFAULT 0,
+                buzzer_requested INTEGER NOT NULL DEFAULT 0,
+                vibration_requested INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -773,6 +780,13 @@ def init_db() -> None:
         ensure_column(conn, "device_state", "fall_confidence", "REAL")
         ensure_column(conn, "risk_events", "fall_event_id", "TEXT")
         ensure_column(conn, "risk_events", "confidence", "REAL")
+        ensure_column(conn, "risk_events", "is_local_cue", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "risk_events", "cue_id", "TEXT")
+        ensure_column(conn, "risk_events", "cue_source", "TEXT")
+        ensure_column(conn, "risk_events", "cue_at_ms", "INTEGER")
+        ensure_column(conn, "risk_events", "cue_repeat", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "risk_events", "buzzer_requested", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "risk_events", "vibration_requested", "INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_road_segments_key ON road_segments(road_segment_key)")
         # Keep the first copy left by older builds, then make fall de-duplication
         # durable across API processes and restarts.
@@ -793,6 +807,11 @@ def init_db() -> None:
                 ON risk_events(fall_event_id)
              WHERE fall_event_id IS NOT NULL AND TRIM(fall_event_id) <> ''
             """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_risk_events_device_cue "
+            "ON risk_events(device_id, cue_id) "
+            "WHERE is_local_cue = 1 AND cue_id IS NOT NULL AND TRIM(cue_id) <> ''"
         )
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_account ON users(account)")
 
@@ -819,6 +838,24 @@ def normalize_extra(value: Any) -> Optional[str]:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False)
+
+
+def local_cue_metadata(value: Any) -> dict[str, Any]:
+    parsed = parse_json_field(value)
+    if not isinstance(parsed, dict) or parsed.get("is_local_cue") is not True:
+        return {}
+    cue_id = str(parsed.get("cue_id") or "").strip()
+    if not cue_id:
+        return {}
+    return {
+        "is_local_cue": True,
+        "cue_id": cue_id,
+        "cue_source": str(parsed.get("cue_source") or "risk_feedback"),
+        "cue_at_ms": int(parsed["cue_at_ms"]) if parsed.get("cue_at_ms") is not None else None,
+        "cue_repeat": bool(parsed.get("cue_repeat", False)),
+        "buzzer_requested": bool(parsed.get("buzzer_requested", False)),
+        "vibration_requested": bool(parsed.get("vibration_requested", False)),
+    }
 
 
 def normalize_account(account: str) -> str:
@@ -1342,6 +1379,94 @@ def mobile_event_dict(row: sqlite3.Row) -> dict[str, Any]:
         },
         "nearby_history": extra.get("nearby_history"),
         "nearbyHistory": extra.get("nearby_history"),
+    }
+
+
+LOCAL_CUE_FRESHNESS_SECONDS = 3
+
+
+def local_cue_speech(item: dict[str, Any]) -> str:
+    risk_type = str(item.get("risk_type") or "")
+    direction = str(item.get("direction") or "")
+    if risk_type == "front_obstacle":
+        return {
+            "stop": "前方障碍，请停下",
+            "turn_left": "前方障碍，请向左避让",
+            "turn_right": "前方障碍，请向右避让",
+        }.get(direction, "前方有障碍，请减速")
+    if risk_type == "left_obstacle":
+        return "左侧有障碍，请向右避让"
+    if risk_type == "right_obstacle":
+        return "右侧有障碍，请向左避让"
+    if risk_type in {"ground_step", "ground_step_up"} and direction == "up":
+        return "前方上台阶，注意抬脚"
+    if risk_type in {"ground_step", "ground_step_down"} and direction == "down":
+        return "前方下台阶，请减速"
+    if risk_type == "ground_drop":
+        return "前方落差，请停下"
+    if risk_type == "down_no_target":
+        return "前方落差，请停下确认"
+    if risk_type == "down_sensor_unavailable":
+        return "下视传感器异常，请停下检查"
+    if risk_type == "fall_detected":
+        return "检测到跌倒"
+    return ""
+
+
+def local_cue_payload(row: sqlite3.Row, server_time: Optional[datetime] = None) -> dict[str, Any]:
+    item = event_to_dict(row)
+    event_time = parse_time(item.get("timestamp"))
+    current = server_time or datetime.now(timezone.utc)
+    age_seconds = (current - event_time).total_seconds() if event_time else float("inf")
+    risk_type = str(item.get("risk_type") or "")
+    cue_source = str(item.get("cue_source") or "")
+    cue_id = str(item.get("cue_id") or "")
+    fall_event_id = str(item.get("fall_event_id") or "")
+    is_formal_fall = (
+        risk_type == "fall_detected"
+        and cue_source == "formal_fall"
+        and bool(fall_event_id)
+        and cue_id == fall_event_id
+    )
+    is_repeat = bool(item.get("cue_repeat"))
+    speech_text = local_cue_speech(item)
+    should_speak = (
+        bool(item.get("is_local_cue"))
+        and bool(cue_id)
+        and not is_repeat
+        and 0 <= age_seconds <= LOCAL_CUE_FRESHNESS_SECONDS
+        and bool(speech_text)
+        and (risk_type != "fall_detected" or is_formal_fall)
+    )
+    return {
+        "id": int(item["id"]),
+        "deviceId": item.get("device_id"),
+        "timestamp": item.get("timestamp"),
+        "serverTime": current.isoformat(timespec="seconds"),
+        "eventKind": "local_cue",
+        "risk": {
+            "type": risk_type,
+            "level": item.get("risk_level"),
+            "direction": item.get("direction") or "none",
+            "sensor": item.get("sensor") or "unknown",
+            "distanceMm": event_distance_mm(item),
+        },
+        "cue": {
+            "id": cue_id,
+            "source": cue_source,
+            "repeat": is_repeat,
+            "buzzerRequested": bool(item.get("buzzer_requested")),
+            "vibrationRequested": bool(item.get("vibration_requested")),
+            "atMs": item.get("cue_at_ms"),
+        },
+        "fall": {
+            "detected": True,
+            "eventId": fall_event_id,
+        } if is_formal_fall else None,
+        "speech": {
+            "shouldSpeak": should_speak,
+            "text": speech_text,
+        },
     }
 
 
@@ -3666,9 +3791,17 @@ def store_event(event: EventCreate) -> dict[str, Any]:
     if risk_level not in LEVEL_RANK:
         raise HTTPException(status_code=400, detail="risk_level or level must be low, medium, or high")
     battery = event.battery if event.battery is not None else event.battery_percent
+    cue = local_cue_metadata(event.extra_json)
 
     normalized_fall_id = (event.fall_event_id or "").strip()
     with db() as conn:
+        if cue:
+            existing = conn.execute(
+                "SELECT * FROM risk_events WHERE device_id = ? AND cue_id = ? LIMIT 1",
+                (event.device_id, cue["cue_id"]),
+            ).fetchone()
+            if existing:
+                return event_to_dict(existing)
         if normalized_fall_id:
             existing = conn.execute(
                 "SELECT * FROM risk_events WHERE fall_event_id = ? LIMIT 1",
@@ -3678,13 +3811,15 @@ def store_event(event: EventCreate) -> dict[str, Any]:
                 return event_to_dict(existing)
         cur = conn.execute(
             """
-            INSERT INTO risk_events (
+            INSERT OR IGNORE INTO risk_events (
                 device_id, timestamp, lat, lng, risk_type, risk_level,
                 direction, sensor, distance_mm, battery,
                 front_cm, left_cm, right_cm, down_cm,
-                risk_score, confidence, fall_event_id, voice_prompt, feedback_json, extra_json
+                risk_score, confidence, fall_event_id, voice_prompt, feedback_json, extra_json,
+                is_local_cue, cue_id, cue_source, cue_at_ms, cue_repeat,
+                buzzer_requested, vibration_requested
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.device_id,
@@ -3707,9 +3842,30 @@ def store_event(event: EventCreate) -> dict[str, Any]:
                 event.voice_prompt,
                 normalize_extra(event.feedback_json),
                 normalize_extra(event.extra_json),
+                1 if cue else 0,
+                cue.get("cue_id") if cue else None,
+                cue.get("cue_source") if cue else None,
+                cue.get("cue_at_ms") if cue else None,
+                1 if cue.get("cue_repeat") else 0,
+                1 if cue.get("buzzer_requested") else 0,
+                1 if cue.get("vibration_requested") else 0,
             ),
         )
-        row = conn.execute("SELECT * FROM risk_events WHERE id = ?", (cur.lastrowid,)).fetchone()
+        if cur.rowcount == 0:
+            if cue:
+                row = conn.execute(
+                    "SELECT * FROM risk_events WHERE device_id = ? AND cue_id = ? LIMIT 1",
+                    (event.device_id, cue["cue_id"]),
+                ).fetchone()
+            elif normalized_fall_id:
+                row = conn.execute(
+                    "SELECT * FROM risk_events WHERE fall_event_id = ? LIMIT 1",
+                    (normalized_fall_id,),
+                ).fetchone()
+            else:
+                raise HTTPException(status_code=409, detail="事件重复")
+        else:
+            row = conn.execute("SELECT * FROM risk_events WHERE id = ?", (cur.lastrowid,)).fetchone()
 
     stored = event_to_dict(row)
     if event.device_name:
@@ -3787,6 +3943,83 @@ def events_since(
         "lastId": int(events[-1]["id"]) if events else sinceId,
         "serverTime": now_iso(),
     }
+
+
+def cue_rows_since(device_id: str, since_id: int, limit: int = 50) -> list[sqlite3.Row]:
+    with db() as conn:
+        return conn.execute(
+            """
+            SELECT * FROM risk_events
+             WHERE device_id = ? AND is_local_cue = 1 AND id > ?
+             ORDER BY id ASC
+             LIMIT ?
+            """,
+            (device_id, since_id, limit),
+        ).fetchall()
+
+
+@app.get("/api/cues/latest")
+def latest_local_cue(deviceId: str = Query(..., min_length=1)) -> dict[str, Any]:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM risk_events WHERE device_id = ? AND is_local_cue = 1 ORDER BY id DESC LIMIT 1",
+            (deviceId,),
+        ).fetchone()
+    return {
+        "found": row is not None,
+        "lastId": int(row["id"]) if row else 0,
+        "cue": local_cue_payload(row) if row else None,
+        "serverTime": now_iso(),
+    }
+
+
+@app.get("/api/cues/since")
+def local_cues_since(
+    deviceId: str = Query(..., min_length=1),
+    sinceId: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    rows = cue_rows_since(deviceId, sinceId, limit)
+    cues = [local_cue_payload(row) for row in rows]
+    return {
+        "success": True,
+        "deviceId": deviceId,
+        "sinceId": sinceId,
+        "lastId": int(rows[-1]["id"]) if rows else sinceId,
+        "serverTime": now_iso(),
+        "cues": cues,
+    }
+
+
+@app.get("/api/cues/stream")
+async def stream_local_cues(
+    request: Request,
+    deviceId: str = Query(..., min_length=1),
+    sinceId: int = Query(0, ge=0),
+    role: str = Query("blind", pattern="^(blind|companion)$"),
+) -> StreamingResponse:
+    async def event_generator():
+        last_id = sinceId
+        last_ping_at = 0.0
+        while not await request.is_disconnected():
+            rows = cue_rows_since(deviceId, last_id)
+            if rows:
+                for row in rows:
+                    last_id = max(last_id, int(row["id"]))
+                    if role == "companion" and str(row["risk_type"]) != "fall_detected":
+                        continue
+                    payload = local_cue_payload(row)
+                    yield f"event: local_cue\nid: {last_id}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            elif asyncio.get_running_loop().time() - last_ping_at >= 1.0:
+                last_ping_at = asyncio.get_running_loop().time()
+                yield f"event: ping\ndata: {json.dumps({'time': now_iso()}, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0.15)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/risk-events")

@@ -1,6 +1,10 @@
 package com.nankai.smartcane.viewmodel
 
-import com.nankai.smartcane.data.network.LatestRiskEventDto
+import com.nankai.smartcane.data.network.LocalCueDto
+import com.nankai.smartcane.data.network.LocalCueFallDto
+import com.nankai.smartcane.data.network.LocalCueMetadataDto
+import com.nankai.smartcane.data.network.LocalCueRiskDto
+import com.nankai.smartcane.data.network.LocalCueSpeechDto
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -17,6 +21,41 @@ class AlertSpeechRoleTest {
         assertFalse(gate.tryAcquire(41))
         assertTrue(gate.tryAcquire(42))
         assertFalse(gate.tryAcquire(0))
+    }
+
+    @Test
+    fun cueSpeechGateUsesTheFirmwareCueId() {
+        val gate = CueIdSpeechGate()
+
+        assertTrue(gate.tryAcquire("cue-001"))
+        assertFalse(gate.tryAcquire("cue-001"))
+        assertFalse(gate.tryAcquire(" "))
+        assertTrue(gate.tryAcquire("cue-002"))
+    }
+
+    @Test
+    fun localCueSpeechRequiresCurrentFreshNonRepeatCue() {
+        val cue = localCueForTest()
+
+        assertTrue(shouldSpeakLocalCue(cue, "cane_001"))
+        assertFalse(shouldSpeakLocalCue(cue.copy(deviceId = "cane_002"), "cane_001"))
+        assertFalse(shouldSpeakLocalCue(cue.copy(cue = cue.cue.copy(repeat = true)), "cane_001"))
+        assertFalse(shouldSpeakLocalCue(cue.copy(timestamp = "2026-08-12T08:00:05Z"), "cane_001"))
+    }
+
+    @Test
+    fun fallCueMustBeFormalAndMatchItsCueId() {
+        val base = localCueForTest().copy(
+            risk = localCueForTest().risk.copy(type = "fall_detected"),
+            cue = localCueForTest().cue.copy(id = "fall-001", source = "formal_fall"),
+            fall = LocalCueFallDto(detected = true, eventId = "fall-001"),
+            speech = LocalCueSpeechDto(true, "检测到跌倒")
+        )
+
+        assertTrue(shouldSpeakLocalCue(base, "cane_001"))
+        assertFalse(shouldSpeakLocalCue(base.copy(fall = null), "cane_001"))
+        assertFalse(shouldSpeakLocalCue(base.copy(cue = base.cue.copy(source = "risk_feedback")), "cane_001"))
+        assertFalse(shouldSpeakLocalCue(base.copy(fall = LocalCueFallDto(true, "fall-other")), "cane_001"))
     }
 
     @Test
@@ -51,28 +90,10 @@ class AlertSpeechRoleTest {
     }
 
     @Test
-    fun realtimeSensorSpeechOnlyDescribesTheSituation() {
-        val front = LatestRiskEventDto(1, "cane", "front_obstacle", "high", 320, "", null, null, "", "")
-        val left = LatestRiskEventDto(2, "cane", "left_obstacle", "medium", 450, "", null, null, "", "")
-        val up = LatestRiskEventDto(3, "cane", "ground_step_up", "medium", null, "", null, null, "", "")
-        val drop = LatestRiskEventDto(4, "cane", "ground_drop", "high", null, "", null, null, "", "")
-        val sensor = LatestRiskEventDto(5, "cane", "down_sensor_unavailable", "high", null, "", null, null, "", "")
-
-        assertEquals("前方32厘米有障碍", realtimeHardwareEventPrompt(front))
-        assertEquals("左侧45厘米有障碍", realtimeHardwareEventPrompt(left))
-        assertEquals("前方上台阶", realtimeHardwareEventPrompt(up))
-        assertEquals("前方有落差", realtimeHardwareEventPrompt(drop))
-        assertEquals("下视传感器异常", realtimeHardwareEventPrompt(sensor))
-        assertEquals(
-            "前方障碍持续",
-            alertSpeechForRole(
-                role = "blind",
-                riskType = "prolonged_obstacle",
-                voicePrompt = "同一障碍持续出现，已通知陪护端，请停止并重新探测",
-                message = "持续障碍",
-                sosAlarmActive = false
-            )
-        )
+    fun ordinaryAlertsCannotBypassTheLocalCueStream() {
+        assertNull(alertSpeechForRole("blind", "prolonged_obstacle", "旧提示", "旧状态", false))
+        assertNull(alertSpeechForRole("blind", "front_obstacle", "旧提示", "旧状态", false, 320))
+        assertNull(alertSpeechForRole("blind", "fall_detected", "旧提示", "旧状态", false))
     }
 
     @Test
@@ -111,16 +132,9 @@ class AlertSpeechRoleTest {
     }
 
     @Test
-    fun fallDetectedKeepsExistingBlindSpeech() {
-        assertEquals(
-            "检测到跌倒",
-            alertSpeechForRole(
-                role = "blind",
-                riskType = "fall_detected",
-                voicePrompt = "原始跌倒提示",
-                message = "原始跌倒消息",
-                sosAlarmActive = false
-            )
+    fun fallDetectedIsOnlySpokenByTheLocalCueStream() {
+        assertNull(
+            alertSpeechForRole("blind", "fall_detected", "原始跌倒提示", "原始跌倒消息", false)
         )
         assertNull(
             alertSpeechForRole(
@@ -145,4 +159,17 @@ class AlertSpeechRoleTest {
             )
         )
     }
+
+
+    private fun localCueForTest() = LocalCueDto(
+        id = 301,
+        deviceId = "cane_001",
+        timestamp = "2026-08-12T08:00:08Z",
+        serverTime = "2026-08-12T08:00:10Z",
+        eventKind = "local_cue",
+        risk = LocalCueRiskDto("ground_step", "medium", "down", "tof_down", 680),
+        cue = LocalCueMetadataDto("cue-001", "risk_feedback", false, true, true),
+        fall = null,
+        speech = LocalCueSpeechDto(true, "前方下台阶，请减速")
+    )
 }
