@@ -177,6 +177,7 @@ class LocationCreate(BaseModel):
     hdop: Optional[float] = None
     fix_quality: Optional[int] = None
     satellite_count: Optional[int] = None
+    bearing_deg: Optional[float] = Field(None, ge=0, lt=360)
     timestamp: Optional[str] = None
 
 
@@ -503,7 +504,9 @@ def init_db() -> None:
                 accuracy_m REAL,
                 hdop REAL,
                 fix_quality INTEGER,
-                satellite_count INTEGER
+                satellite_count INTEGER,
+                bearing_deg REAL,
+                source_timestamp TEXT
             )
             """
         )
@@ -756,6 +759,8 @@ def init_db() -> None:
         ensure_column(conn, "device_locations", "quality", "TEXT")
         ensure_column(conn, "device_locations", "hdop", "REAL")
         ensure_column(conn, "device_locations", "fix_quality", "INTEGER")
+        ensure_column(conn, "device_locations", "bearing_deg", "REAL")
+        ensure_column(conn, "device_locations", "source_timestamp", "TEXT")
         ensure_column(conn, "risk_points", "confidence", "REAL")
         ensure_column(conn, "risk_points", "report_count", "INTEGER")
         ensure_column(conn, "risk_points", "source_devices_json", "TEXT")
@@ -933,7 +938,9 @@ def device_state_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def upsert_device_state(frame: SensorFrameCreate, lat: float, lng: float, analysis: dict[str, Any]) -> dict[str, Any]:
-    timestamp = frame.timestamp or now_iso()
+    # Device state freshness is based on server receipt time. A client clock
+    # must not make an offline cane appear current or shift the UI by hours.
+    timestamp = now_iso()
     with db() as conn:
         conn.execute(
             """
@@ -4287,15 +4294,15 @@ async def stream_events(
 
 @app.post("/api/locations", status_code=201)
 def create_location(location: LocationCreate) -> dict[str, Any]:
-    timestamp = location.timestamp or now_iso()
+    timestamp = now_iso()
     with db() as conn:
         cur = conn.execute(
             """
             INSERT INTO device_locations (
                 device_id, timestamp, lat, lng, source, provider, quality,
-                accuracy_m, hdop, fix_quality, satellite_count
+                accuracy_m, hdop, fix_quality, satellite_count, bearing_deg, source_timestamp
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 location.device_id,
@@ -4309,6 +4316,8 @@ def create_location(location: LocationCreate) -> dict[str, Any]:
                 location.hdop,
                 location.fix_quality,
                 location.satellite_count,
+                location.bearing_deg,
+                location.timestamp,
             ),
         )
         row = conn.execute("SELECT * FROM device_locations WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -5171,7 +5180,10 @@ def legacy_devices() -> dict[str, Any]:
 @app.get("/events/latest")
 def legacy_latest_events(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
     with db() as conn:
-        rows = conn.execute("SELECT * FROM risk_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        rows = conn.execute(
+            "SELECT * FROM risk_events WHERE risk_type <> 'voice_request' ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
     return {"events": [mobile_event_dict(row) for row in rows]}
 
 

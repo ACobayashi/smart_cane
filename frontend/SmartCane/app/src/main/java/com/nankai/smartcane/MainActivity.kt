@@ -94,15 +94,20 @@ import com.nankai.smartcane.data.network.ServerStatusDto
 import com.nankai.smartcane.data.network.SmartCaneApiClient
 import com.nankai.smartcane.data.network.SosRequestDto
 import com.nankai.smartcane.navigation.SmartCaneRootApp
+import com.nankai.smartcane.location.PhoneHeadingProvider
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
+import java.time.OffsetDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Date
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        PhoneHeadingProvider.start(applicationContext)
         enableEdgeToEdge()
         setContent { SmartCaneRootApp() }
     }
@@ -199,9 +204,13 @@ private fun directionFromRiskType(riskType: String): String = when {
     else -> "front"
 }
 
-private fun displayTimestamp(timestamp: String): String = runCatching {
-    timestamp.takeIf { it.length >= 16 }?.substring(11, 16) ?: timestamp
-}.getOrDefault(timestamp.ifBlank { currentTimeText() })
+internal fun displayTimestamp(timestamp: String): String = runCatching {
+    OffsetDateTime.parse(timestamp)
+        .atZoneSameInstant(ZoneId.of("Asia/Shanghai"))
+        .format(DateTimeFormatter.ofPattern("HH:mm", Locale.CHINA))
+}.getOrElse {
+    timestamp.takeIf { it.length >= 16 }?.substring(11, 16) ?: timestamp.ifBlank { currentTimeText() }
+}
 
 private fun currentTimeText(): String = SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(Date())
 
@@ -683,7 +692,7 @@ fun MapPage(deviceId: String? = null) {
         Box(Modifier.fillMaxSize()) {
             RiskMapViewport(
                 points = points,
-                showMyLocation = false,
+                showMyLocation = hasLocationPermission(LocalContext.current),
                 navigation = activeNavigation,
                 modifier = Modifier.fillMaxSize()
             )
@@ -996,7 +1005,8 @@ private fun AmapRiskMap(
             amap.uiSettings.isCompassEnabled = true
             amap.uiSettings.isScaleControlsEnabled = true
             amap.myLocationStyle = MyLocationStyle()
-                .myLocationType(MyLocationStyle.LOCATION_TYPE_LOCATE)
+                .myLocationType(MyLocationStyle.LOCATION_TYPE_LOCATION_ROTATE_NO_CENTER)
+                .interval(1_000L)
                 .strokeColor(android.graphics.Color.argb(80, 37, 99, 235))
                 .radiusFillColor(android.graphics.Color.argb(35, 37, 99, 235))
                 .strokeWidth(2f)

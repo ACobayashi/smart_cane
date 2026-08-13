@@ -570,7 +570,10 @@ object SmartCaneApiClient {
         try {
             val response = getJson("/events/latest")
             val events = response.optJSONArray("events") ?: JSONArray()
-            ApiResult.Success(List(events.length()) { index -> events.getJSONObject(index).toLatestRiskEventDto() })
+            ApiResult.Success(
+                List(events.length()) { index -> events.getJSONObject(index).toLatestRiskEventDto() }
+                    .filterNot { it.riskType == "voice_request" }
+            )
         } catch (exception: Exception) {
             ApiResult.Failure(exception.toUserMessage())
         }

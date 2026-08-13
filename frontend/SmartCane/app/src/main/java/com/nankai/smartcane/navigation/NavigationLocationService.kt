@@ -17,6 +17,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.nankai.smartcane.MainActivity
+import com.nankai.smartcane.location.PhoneHeadingProvider
 import com.nankai.smartcane.data.network.LocationUploadDto
 import com.nankai.smartcane.data.network.SmartCaneApiClient
 import java.util.concurrent.Executors
@@ -32,6 +33,7 @@ class NavigationLocationService : Service(), LocationListener {
 
     override fun onCreate() {
         super.onCreate()
+        PhoneHeadingProvider.start(applicationContext)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getSystemService(NotificationManager::class.java).createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "实时导航", NotificationManager.IMPORTANCE_LOW)
@@ -87,7 +89,8 @@ class NavigationLocationService : Service(), LocationListener {
                     provider = location.provider ?: "fused",
                     quality = "navigation",
                     accuracyM = location.accuracy,
-                    bearingDeg = location.bearing.takeIf { location.hasBearing() }
+                    bearingDeg = PhoneHeadingProvider.latestHeadingDeg()
+                        ?: location.bearing.takeIf { location.hasBearing() }
                 )
             )
             val update = SmartCaneApiClient.updateNavigationSession(

@@ -53,6 +53,7 @@ import com.nankai.smartcane.data.repository.PairingRepository
 import com.nankai.smartcane.data.repository.RemoteAuthRepository
 import com.nankai.smartcane.data.repository.RemotePairingRepository
 import com.nankai.smartcane.navigation.NavigationLocationService
+import com.nankai.smartcane.location.PhoneHeadingProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -230,6 +231,7 @@ class SmartCaneAppController private constructor(
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
 
     init {
+        PhoneHeadingProvider.start(appContext)
         val filter = IntentFilter().apply {
             addAction(NavigationLocationService.ACTION_STATE_CHANGED)
             addAction(NavigationLocationService.ACTION_REPLANNING)
@@ -573,6 +575,7 @@ class SmartCaneAppController private constructor(
                         quality = if (location.isFromMockProvider) "mock" else "usable",
                         accuracyM = location.accuracy.takeIf { it > 0f },
                         bearingDeg = location.bearing.takeIf { location.hasBearing() }
+                            ?: PhoneHeadingProvider.latestHeadingDeg()
                     )
                 )
 
@@ -580,7 +583,8 @@ class SmartCaneAppController private constructor(
                     location.latitude,
                     location.longitude,
                     radiusM = NON_NAVIGATION_RISK_WARNING_RADIUS_M,
-                    bearingDeg = location.bearing.takeIf { location.hasBearing() },
+                    bearingDeg = PhoneHeadingProvider.latestHeadingDeg()
+                        ?: location.bearing.takeIf { location.hasBearing() },
                     observerId = deviceId,
                     excludeSourceDeviceIds = listOfNotNull(boundCaneDeviceId().takeIf(String::isNotBlank))
                 )) {
@@ -1557,6 +1561,7 @@ class SmartCaneAppController private constructor(
                         quality = if (location.isFromMockProvider) "mock" else "usable",
                         accuracyM = location.accuracy.takeIf { it > 0f },
                         bearingDeg = location.bearing.takeIf { location.hasBearing() }
+                            ?: PhoneHeadingProvider.latestHeadingDeg()
                     )
                 )
             }

@@ -93,7 +93,7 @@ fun SmartCaneRootApp() {
     }
 
     LaunchedEffect(route) {
-        if (route is AppRoute.BlindHome && !hasSmartCaneLocationPermission(context)) {
+        if ((route is AppRoute.BlindHome || route is AppRoute.CompanionMap) && !hasSmartCaneLocationPermission(context)) {
             locationPermissionLauncher.launch(
                 arrayOf(
                     Manifest.permission.ACCESS_FINE_LOCATION,

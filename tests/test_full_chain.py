@@ -450,7 +450,7 @@ def test_latest_mobile_location_rejects_stale_trusted_location_and_preserves_fal
     main.init_db()
     now = main.datetime.now(main.timezone.utc)
     device_id = "cane_location_b"
-    main.create_location(main.LocationCreate(
+    trusted = main.create_location(main.LocationCreate(
         device_id=device_id,
         lat=31.2,
         lng=121.2,
@@ -459,6 +459,11 @@ def test_latest_mobile_location_rejects_stale_trusted_location_and_preserves_fal
         quality="usable",
         timestamp=(now - main.timedelta(seconds=301)).isoformat(timespec="seconds"),
     ))
+    with main.db() as conn:
+        conn.execute(
+            "UPDATE device_locations SET timestamp = ? WHERE id = ?",
+            ((now - main.timedelta(seconds=301)).isoformat(timespec="seconds"), trusted["id"]),
+        )
     mock = main.create_location(main.LocationCreate(
         device_id=device_id,
         lat=main.LEGACY_SIM_POINT_LAT,
@@ -886,6 +891,42 @@ def test_registered_account_exposes_both_app_roles(tmp_path, monkeypatch):
     assert response["user"]["displayName"] == "AC"
     assert response["user"]["role"] == "companion"
     assert response["user"]["roles"] == ["blind", "companion"]
+
+
+def test_voice_request_triggers_interaction_but_is_not_a_risk_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "voice_request_filter.db")
+    main.init_db()
+    stored = main.store_event(main.EventCreate(
+        device_id="cane_voice",
+        lat=31.0,
+        lng=121.0,
+        risk_type="voice_request",
+        risk_level="low",
+        voice_prompt="请说目的地或指令",
+    ))
+
+    assert stored["risk_type"] == "voice_request"
+    assert main.legacy_latest_events(limit=20)["events"] == []
+    alerts = main.latest_alerts(role="blind", userId=None, deviceId="cane_voice", sinceId=0, limit=20)
+    assert alerts["alerts"][0]["riskType"] == "voice_request"
+
+
+def test_location_uses_server_time_and_preserves_phone_heading(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "location_heading.db")
+    main.init_db()
+    client_time = "2001-01-01T00:00:00+00:00"
+
+    stored = main.create_location(main.LocationCreate(
+        device_id="mobile_user_a",
+        lat=31.0,
+        lng=121.0,
+        bearing_deg=123.0,
+        timestamp=client_time,
+    ))
+
+    assert stored["timestamp"] != client_time
+    assert stored["source_timestamp"] == client_time
+    assert stored["bearing_deg"] == 123.0
 
 
 def test_recent_sos_is_still_delivered_as_a_current_alert(tmp_path, monkeypatch):
