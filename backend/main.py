@@ -1089,6 +1089,22 @@ def parse_time(value: str | None) -> Optional[datetime]:
     return parsed
 
 
+def device_has_recent_heartbeat(device_id: str, now: Optional[datetime] = None) -> bool:
+    normalized = device_id.strip()
+    if not normalized:
+        return False
+    with db() as conn:
+        row = conn.execute(
+            "SELECT updated_at FROM device_state WHERE device_id = ? ORDER BY updated_at DESC LIMIT 1",
+            (normalized,),
+        ).fetchone()
+    last_seen = parse_time(row["updated_at"]) if row else None
+    if last_seen is None:
+        return False
+    age_seconds = ((now or datetime.now(timezone.utc)) - last_seen).total_seconds()
+    return 0 <= age_seconds <= DEVICE_OFFLINE_SECONDS
+
+
 VOLATILE_DEVICE_STATE_RISK_TYPES = {"sos", "fall_detected", "voice_request"}
 ALERT_ACTIVE_TTL_SECONDS = {
     "sos": 5 * 60,
@@ -5437,6 +5453,19 @@ def nearby_risk_warning(
     effective_radius = min(radius, REALTIME_NEARBY_WARNING_RADIUS_M)
     min_rank = LEVEL_RANK[min_level]
     excluded_device = (exclude_device_id or "").strip()
+    if excluded_device and not device_has_recent_heartbeat(excluded_device):
+        return {
+            "success": True,
+            "found": False,
+            "radius_m": effective_radius,
+            "requested_radius_m": radius,
+            "min_level": min_level,
+            "exclude_device_id": exclude_device_id,
+            "bearing_deg": bearing_deg,
+            "fov_deg": fov_deg,
+            "suppressed_reason": "device_offline",
+            "warning": None,
+        }
     candidates: list[tuple[int, float, float, int, dict[str, Any], str, Optional[float]]] = []
     for event in active_risk_points(lat, lng, effective_radius, limit=500):
         if should_suppress_self_history_warning(event, excluded_device):

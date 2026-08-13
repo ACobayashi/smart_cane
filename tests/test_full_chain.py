@@ -312,7 +312,7 @@ def test_fall_detected_becomes_high_shared_risk_point_and_warns_other_device(tmp
         lng=121.00002,
         radius=50,
         min_level="medium",
-        exclude_device_id="cane_device_b",
+        exclude_device_id=None,
         bearing_deg=None,
     )
     assert warning["found"] is True
@@ -663,6 +663,31 @@ def test_non_navigation_warning_excludes_risk_points_beyond_ten_meters(tmp_path,
     assert warning["radius_m"] == main.REALTIME_NEARBY_WARNING_RADIUS_M
     assert warning["requested_radius_m"] == 50
     assert main.active_risk_points(31.0, 121.0, radius=50, limit=10)
+
+
+def test_offline_cane_cannot_request_historical_risk_speech(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "offline_nearby_warning.db")
+    main.init_db()
+    main.store_event(main.EventCreate(
+        device_id="cane_other",
+        lat=31.0,
+        lng=121.0,
+        risk_type="ground_drop",
+        risk_level="high",
+        extra_json={"source": "esp32c5"},
+    ))
+
+    warning = main.nearby_risk_warning(
+        lat=31.0,
+        lng=121.0,
+        radius=10,
+        min_level="medium",
+        exclude_device_id="cane_offline",
+        bearing_deg=None,
+    )
+
+    assert warning["found"] is False
+    assert warning["suppressed_reason"] == "device_offline"
 
 
 def test_expired_sos_stays_historical_but_is_not_a_current_alert(tmp_path, monkeypatch):

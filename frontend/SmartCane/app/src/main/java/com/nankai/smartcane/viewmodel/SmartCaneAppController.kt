@@ -632,7 +632,7 @@ class SmartCaneAppController private constructor(
         val fallback = "${directionText}${distanceCm}厘米${riskLevelLabel(warning.riskLevel)}风险"
         val text = warning.voicePrompt.ifBlank { fallback }
         _uiState.update { it.copy(message = "附近风险点：${directionText}${distanceCm}厘米", lastSpokenText = text) }
-        speakText(text, priority = TtsPriority.ROAD_RISK)
+        speakText(text, priority = TtsPriority.ROAD_RISK, requiresOnlineCane = true)
     }
 
     @Suppress("MissingPermission")
@@ -885,14 +885,11 @@ class SmartCaneAppController private constructor(
                 voiceTranscript = cue.speech.text
             )
         }
-        pendingSpeech.clear()
-        tts?.stop()
-        activeTtsUtteranceId = null
-        activeTtsPriority = null
         speakText(
             cue.speech.text,
             priority = if (riskType == "fall_detected") TtsPriority.EMERGENCY else hardwareRiskTtsPriority(riskType),
-            bypassTextCooldown = true
+            bypassTextCooldown = true,
+            requiresOnlineCane = true
         )
     }
 
@@ -1018,8 +1015,19 @@ class SmartCaneAppController private constructor(
         speakText(text, listenAfter = false, priority = inferTtsPriority(text))
     }
 
-    private fun speakText(text: String, priority: TtsPriority, bypassTextCooldown: Boolean = false) {
-        speakText(text, listenAfter = false, priority = priority, bypassTextCooldown = bypassTextCooldown)
+    private fun speakText(
+        text: String,
+        priority: TtsPriority,
+        bypassTextCooldown: Boolean = false,
+        requiresOnlineCane: Boolean = false
+    ) {
+        speakText(
+            text,
+            listenAfter = false,
+            priority = priority,
+            bypassTextCooldown = bypassTextCooldown,
+            requiresOnlineCane = requiresOnlineCane
+        )
     }
 
     private fun inferTtsPriority(text: String): TtsPriority = when {
@@ -1038,18 +1046,20 @@ class SmartCaneAppController private constructor(
         listenAfter: Boolean,
         priority: TtsPriority = inferTtsPriority(text),
         fromQueue: Boolean = false,
-        bypassTextCooldown: Boolean = false
+        bypassTextCooldown: Boolean = false,
+        requiresOnlineCane: Boolean = false
     ) {
         val cleanText = compactSpeechText(text)
         if (cleanText.isBlank()) return
+        if (requiresOnlineCane && speechCaneDeviceId() == null) return
         val now = System.currentTimeMillis()
         val key = speechKey(cleanText)
         if (!fromQueue && !bypassTextCooldown && now - (speechCooldowns[key] ?: 0L) < 12_000L) return
         if (!fromQueue && !bypassTextCooldown && pendingSpeech.any { speechKey(it.text) == key }) return
         val currentPriority = activeTtsPriority
         if (activeTtsUtteranceId != null && currentPriority != null) {
-            if (priority.rank <= currentPriority.rank) {
-                pendingSpeech += QueuedSpeech(cleanText, listenAfter, priority)
+            if (!shouldInterruptCurrentSpeech(currentPriority, priority)) {
+                pendingSpeech += QueuedSpeech(cleanText, listenAfter, priority, requiresOnlineCane)
                 pendingSpeech.sortByDescending { it.priority.rank }
                 return
             }
@@ -1083,9 +1093,18 @@ class SmartCaneAppController private constructor(
                         }
                     }
                 }
-                val next = pendingSpeech.removeFirstOrNull()
-                if (next != null) {
-                    speakText(next.text, next.listenAfter, next.priority, fromQueue = true)
+                while (true) {
+                    val next = pendingSpeech.removeFirstOrNull() ?: break
+                    if (!next.requiresOnlineCane || speechCaneDeviceId() != null) {
+                        speakText(
+                            next.text,
+                            next.listenAfter,
+                            next.priority,
+                            fromQueue = true,
+                            requiresOnlineCane = next.requiresOnlineCane
+                        )
+                        break
+                    }
                 }
             }
         }
@@ -1808,7 +1827,18 @@ internal fun hardwareRiskTtsPriority(riskType: String): TtsPriority {
 enum class TtsPriority(val rank: Int) {
     NORMAL(1), ROAD_RISK(2), NAVIGATION(3), OBSTACLE_STOP(4), STEP(5), EMERGENCY(6)
 }
-data class QueuedSpeech(val text: String, val listenAfter: Boolean, val priority: TtsPriority)
+
+internal fun shouldInterruptCurrentSpeech(current: TtsPriority, incoming: TtsPriority): Boolean {
+    if (current == TtsPriority.NAVIGATION) return false
+    return incoming.rank > current.rank
+}
+
+data class QueuedSpeech(
+    val text: String,
+    val listenAfter: Boolean,
+    val priority: TtsPriority,
+    val requiresOnlineCane: Boolean = false
+)
 
 data class AppUiState(
     val storedState: StoredAppState,

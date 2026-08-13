@@ -146,6 +146,15 @@ class AlertSpeechRoleTest {
     }
 
     @Test
+    fun navigationSpeechCannotBeInterruptedByRiskSpeech() {
+        assertFalse(shouldInterruptCurrentSpeech(TtsPriority.NAVIGATION, TtsPriority.ROAD_RISK))
+        assertFalse(shouldInterruptCurrentSpeech(TtsPriority.NAVIGATION, TtsPriority.OBSTACLE_STOP))
+        assertFalse(shouldInterruptCurrentSpeech(TtsPriority.NAVIGATION, TtsPriority.STEP))
+        assertFalse(shouldInterruptCurrentSpeech(TtsPriority.NAVIGATION, TtsPriority.EMERGENCY))
+        assertTrue(shouldInterruptCurrentSpeech(TtsPriority.NORMAL, TtsPriority.STEP))
+    }
+
+    @Test
     fun blindSosNeverUsesCaregiverPrompt() {
         assertNull(
             alertSpeechForRole(
