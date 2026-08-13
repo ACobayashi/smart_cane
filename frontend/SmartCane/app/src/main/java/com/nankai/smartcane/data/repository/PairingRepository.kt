@@ -31,7 +31,7 @@ interface PairingRepository {
     suspend fun getCompanionRequests(companionUser: UserProfile): Result<List<CareRequest>>
     suspend fun approveRequest(requestId: String): Result<CareRelation>
     suspend fun rejectRequest(requestId: String): Result<Unit>
-    suspend fun getCurrentRelation(user: UserProfile): Result<CareRelation?>
+    suspend fun getCurrentRelation(user: UserProfile, role: UserRole = user.role): Result<CareRelation?>
     suspend fun unlinkRelation(relationId: String?): Result<Unit>
     suspend fun clearPairingCode()
 }
@@ -114,8 +114,8 @@ class RemotePairingRepository(
         }
     }
 
-    override suspend fun getCurrentRelation(user: UserProfile): Result<CareRelation?> {
-        return when (val result = SmartCaneApiClient.getRelations(user.account.ifBlank { user.userId }, user.role.apiValue)) {
+    override suspend fun getCurrentRelation(user: UserProfile, role: UserRole): Result<CareRelation?> {
+        return when (val result = SmartCaneApiClient.getRelations(user.account.ifBlank { user.userId }, role.apiValue)) {
             is ApiResult.Success -> {
                 val relation = result.data.relation?.toCareRelation()
                 if (relation != null) preferences.saveRelation(relation)
@@ -201,7 +201,7 @@ class DemoPairingRepository(
         return Result.success(Unit)
     }
 
-    override suspend fun getCurrentRelation(user: UserProfile): Result<CareRelation?> {
+    override suspend fun getCurrentRelation(user: UserProfile, role: UserRole): Result<CareRelation?> {
         val state = preferences.state.value
         return if (state.relationStatus == RelationStatus.Active) Result.success(CareRelation(state.relationId ?: "relation_demo_001", DemoData.blindUser, state.companionUser ?: DemoData.companionUser, DemoData.defaultCane, RelationStatus.Active, System.currentTimeMillis(), state.relationUpdatedAtMillis ?: System.currentTimeMillis())) else Result.success(null)
     }
@@ -270,4 +270,3 @@ private fun String.toRelationStatus(): RelationStatus = when (lowercase()) {
 private fun String.toEpochMillisOrNowPlusTenMinutes(): Long = runCatching { Instant.parse(this).toEpochMilli() }
     .recoverCatching { OffsetDateTime.parse(this).toInstant().toEpochMilli() }
     .getOrElse { System.currentTimeMillis() + 10 * 60 * 1000L }
-

@@ -26,6 +26,7 @@ data class UserProfile(
     val account: String,
     val displayName: String,
     val role: UserRole,
+    val roles: Set<UserRole> = setOf(UserRole.Blind, UserRole.Companion),
     val isDemo: Boolean = true
 )
 

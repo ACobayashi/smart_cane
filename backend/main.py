@@ -460,6 +460,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 device_id TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
+                source_timestamp TEXT,
                 lat REAL NOT NULL,
                 lng REAL NOT NULL,
                 risk_type TEXT NOT NULL,
@@ -744,6 +745,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_road_segments_name ON road_segments(road_name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_road_observations_segment ON road_risk_observations(road_segment_id, observed_at)")
         ensure_column(conn, "risk_events", "direction", "TEXT")
+        ensure_column(conn, "risk_events", "source_timestamp", "TEXT")
         ensure_column(conn, "risk_events", "sensor", "TEXT")
         ensure_column(conn, "risk_events", "distance_mm", "INTEGER")
         ensure_column(conn, "risk_events", "battery", "REAL")
@@ -839,6 +841,7 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 def event_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     item = row_to_dict(row)
     item["level"] = item.get("risk_level")
+    item["sourceTimestamp"] = item.get("source_timestamp")
     return item
 
 
@@ -883,6 +886,10 @@ def public_user(row: sqlite3.Row) -> dict[str, Any]:
         "account": item["account"],
         "displayName": item["display_name"],
         "role": item["role"],
+        # `role` remains the account's preferred/default mode for backwards
+        # compatibility. Every authenticated account can explicitly enter
+        # either app mode; relation APIs still authorize by the requested mode.
+        "roles": ["blind", "companion"],
     }
 
 
@@ -1660,12 +1667,16 @@ def risk_point_level_after_merge(risk_type: str, existing_level: str, incoming_l
     return merged
 
 
-def should_suppress_self_history_warning(event: dict[str, Any], excluded_device: str) -> bool:
-    if not excluded_device:
+def should_suppress_self_history_warning(event: dict[str, Any], excluded_devices: str | list[str] | set[str]) -> bool:
+    if isinstance(excluded_devices, str):
+        normalized_excluded = {excluded_devices.strip()} if excluded_devices.strip() else set()
+    else:
+        normalized_excluded = {str(item).strip() for item in excluded_devices if str(item).strip()}
+    if not normalized_excluded:
         return False
     event_device = str(event.get("deviceId") or event.get("device_id") or "").strip()
     source_devices = [str(item).strip() for item in (event.get("sourceDevices") or event.get("source_devices") or [])]
-    if event_device != excluded_device and excluded_device not in source_devices:
+    if event_device not in normalized_excluded and normalized_excluded.isdisjoint(source_devices):
         return False
     risk_type = str(event.get("riskType") or event.get("risk_type") or "none")
     if risk_type in {"sos", "fall_detected", "user_mark", "ground_drop", "ground_step", "ground_step_down", "ground_step_up", "history_risk"}:
@@ -4003,7 +4014,10 @@ def ai_status() -> dict[str, Any]:
 
 
 def store_event(event: EventCreate) -> dict[str, Any]:
-    timestamp = event.timestamp or now_iso()
+    # The canonical timestamp is always assigned by the server so two phones
+    # display the same reporting/update time even when device clocks drift.
+    timestamp = now_iso()
+    source_timestamp = event.timestamp
     risk_level = (event.risk_level or event.level or "").lower()
     if risk_level not in LEVEL_RANK:
         raise HTTPException(status_code=400, detail="risk_level or level must be low, medium, or high")
@@ -4029,18 +4043,19 @@ def store_event(event: EventCreate) -> dict[str, Any]:
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO risk_events (
-                device_id, timestamp, lat, lng, risk_type, risk_level,
+                device_id, timestamp, source_timestamp, lat, lng, risk_type, risk_level,
                 direction, sensor, distance_mm, battery,
                 front_cm, left_cm, right_cm, down_cm,
                 risk_score, confidence, fall_event_id, voice_prompt, feedback_json, extra_json,
                 is_local_cue, cue_id, cue_source, cue_at_ms, cue_repeat,
                 buzzer_requested, vibration_requested
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.device_id,
                 timestamp,
+                source_timestamp,
                 event.lat,
                 event.lng,
                 event.risk_type,
@@ -5530,6 +5545,8 @@ def nearby_risk_warning(
     lng: float = Query(..., ge=-180, le=180),
     radius: float = Query(REALTIME_NEARBY_WARNING_RADIUS_M, gt=0, le=5000),
     min_level: str = Query("medium", pattern="^(low|medium|high)$"),
+    observer_id: Optional[str] = Query(None),
+    exclude_source_device_ids: Optional[str] = Query(None),
     exclude_device_id: Optional[str] = Query(None),
     bearing_deg: Optional[float] = Query(None, ge=0, lt=360),
     fov_deg: float = Query(140.0, gt=10, le=360),
@@ -5541,14 +5558,24 @@ def nearby_risk_warning(
     """
     effective_radius = min(radius, REALTIME_NEARBY_WARNING_RADIUS_M)
     min_rank = LEVEL_RANK[min_level]
-    excluded_device = (exclude_device_id or "").strip()
-    if excluded_device and not device_has_recent_heartbeat(excluded_device):
+    observer_value = observer_id if isinstance(observer_id, str) else None
+    legacy_device_value = exclude_device_id if isinstance(exclude_device_id, str) else None
+    excluded_source_value = exclude_source_device_ids if isinstance(exclude_source_device_ids, str) else None
+    observer = (observer_value or legacy_device_value or "").strip()
+    excluded_devices = {
+        item.strip()
+        for item in (excluded_source_value or legacy_device_value or "").split(",")
+        if item.strip()
+    }
+    if observer and not device_has_recent_heartbeat(observer):
         return {
             "success": True,
             "found": False,
             "radius_m": effective_radius,
             "requested_radius_m": radius,
             "min_level": min_level,
+            "observer_id": observer_id,
+            "exclude_source_device_ids": sorted(excluded_devices),
             "exclude_device_id": exclude_device_id,
             "bearing_deg": bearing_deg,
             "fov_deg": fov_deg,
@@ -5557,7 +5584,7 @@ def nearby_risk_warning(
         }
     candidates: list[tuple[int, float, float, int, dict[str, Any], str, Optional[float]]] = []
     for event in active_risk_points(lat, lng, effective_radius, limit=500):
-        if should_suppress_self_history_warning(event, excluded_device):
+        if should_suppress_self_history_warning(event, excluded_devices):
             continue
         level = str(event.get("riskLevel") or "low")
         rank = LEVEL_RANK.get(level, 0)
@@ -5587,6 +5614,8 @@ def nearby_risk_warning(
             "radius_m": effective_radius,
             "requested_radius_m": radius,
             "min_level": min_level,
+            "observer_id": observer_id,
+            "exclude_source_device_ids": sorted(excluded_devices),
             "exclude_device_id": exclude_device_id,
             "bearing_deg": bearing_deg,
             "fov_deg": fov_deg,
@@ -5604,6 +5633,8 @@ def nearby_risk_warning(
         "radius_m": effective_radius,
         "requested_radius_m": radius,
         "min_level": min_level,
+        "observer_id": observer_id,
+        "exclude_source_device_ids": sorted(excluded_devices),
         "exclude_device_id": exclude_device_id,
         "bearing_deg": bearing_deg,
         "fov_deg": fov_deg,

@@ -28,6 +28,7 @@ class LocalAppPreferences(context: Context) {
             putString(KEY_ACCOUNT, user.account)
             putString(KEY_DISPLAY_NAME, user.displayName)
             putString(KEY_ROLE, user.role.name)
+            putString(KEY_ROLES, user.roles.joinToString(",") { it.name })
             putBoolean(KEY_IS_DEMO, user.isDemo)
             remove(KEY_LAST_MODE)
             remove(KEY_FIRST_GUIDE_COMPLETED)
@@ -139,6 +140,7 @@ class LocalAppPreferences(context: Context) {
             .remove(KEY_ACCOUNT)
             .remove(KEY_DISPLAY_NAME)
             .remove(KEY_ROLE)
+            .remove(KEY_ROLES)
             .remove(KEY_IS_DEMO)
             .remove(KEY_LAST_MODE)
             .remove(KEY_FIRST_GUIDE_COMPLETED)
@@ -165,6 +167,7 @@ class LocalAppPreferences(context: Context) {
         val account = prefs.getString(KEY_ACCOUNT, null)
         val displayName = prefs.getString(KEY_DISPLAY_NAME, null)
         val role = prefs.getString(KEY_ROLE, null)
+        val roles = prefs.getString(KEY_ROLES, null)
         val isDemo = prefs.getBoolean(KEY_IS_DEMO, true)
         prefs.edit().clear().apply()
         if (loggedIn && userId != null && account != null && displayName != null && role != null) {
@@ -175,6 +178,7 @@ class LocalAppPreferences(context: Context) {
                 .putString(KEY_ACCOUNT, account)
                 .putString(KEY_DISPLAY_NAME, displayName)
                 .putString(KEY_ROLE, role)
+                .apply { if (roles != null) putString(KEY_ROLES, roles) }
                 .putBoolean(KEY_IS_DEMO, isDemo)
                 .apply()
         }
@@ -187,6 +191,12 @@ class LocalAppPreferences(context: Context) {
 
     private fun readState(): StoredAppState {
         val role = prefs.getString(KEY_ROLE, null)?.let { runCatching { UserRole.valueOf(it) }.getOrNull() }
+        val roles = prefs.getString(KEY_ROLES, null)
+            ?.split(',')
+            ?.mapNotNull { runCatching { UserRole.valueOf(it) }.getOrNull() }
+            ?.toSet()
+            .orEmpty()
+            .ifEmpty { setOf(UserRole.Blind, UserRole.Companion) }
         val loginAvailable = prefs.getBoolean(KEY_IS_LOGGED_IN, false) && (prefs.getBoolean(KEY_REMEMBER_LOGIN, true) || sessionLoginAllowed)
         val user = if (loginAvailable && role != null) {
             UserProfile(
@@ -194,6 +204,7 @@ class LocalAppPreferences(context: Context) {
                 account = prefs.getString(KEY_ACCOUNT, "") ?: "",
                 displayName = prefs.getString(KEY_DISPLAY_NAME, "") ?: "",
                 role = role,
+                roles = roles,
                 isDemo = prefs.getBoolean(KEY_IS_DEMO, true)
             )
         } else null
@@ -235,6 +246,7 @@ class LocalAppPreferences(context: Context) {
         private const val KEY_ACCOUNT = "account"
         private const val KEY_DISPLAY_NAME = "display_name"
         private const val KEY_ROLE = "role"
+        private const val KEY_ROLES = "roles"
         private const val KEY_IS_DEMO = "is_demo"
         private const val KEY_LAST_MODE = "last_mode"
         private const val KEY_CANE_BOUND = "cane_bound"

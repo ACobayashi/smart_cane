@@ -101,5 +101,8 @@ private fun AuthUserDto.toUserProfile(isDemo: Boolean): UserProfile = UserProfil
     account = account,
     displayName = displayName,
     role = if (role == UserRole.Companion.apiValue) UserRole.Companion else UserRole.Blind,
+    roles = roles.mapNotNull { value ->
+        UserRole.entries.firstOrNull { it.apiValue == value }
+    }.toSet().ifEmpty { setOf(UserRole.Blind, UserRole.Companion) },
     isDemo = isDemo
 )

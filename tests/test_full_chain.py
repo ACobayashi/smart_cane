@@ -677,6 +677,7 @@ def test_alert_payload_marks_old_events_as_not_fresh_for_speech(tmp_path, monkey
         timestamp="2026-01-01T00:00:00+00:00",
     ))
     with main.db() as conn:
+        conn.execute("UPDATE risk_events SET timestamp = ? WHERE id = ?", ("2026-01-01T00:00:00+00:00", old["id"]))
         row = conn.execute("SELECT * FROM risk_events WHERE id = ?", (old["id"],)).fetchone()
     assert main.alert_event_payload(row, "blind")["freshForSpeech"] is False
 
@@ -757,7 +758,7 @@ def test_expired_sos_stays_historical_but_is_not_a_current_alert(tmp_path, monke
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "expired_sos.db")
     main.init_db()
     old_timestamp = (main.datetime.now(main.timezone.utc) - main.timedelta(minutes=10)).isoformat(timespec="seconds")
-    main.store_event(main.EventCreate(
+    stored = main.store_event(main.EventCreate(
         device_id="cane_real",
         lat=31.0,
         lng=121.0,
@@ -767,6 +768,9 @@ def test_expired_sos_stays_historical_but_is_not_a_current_alert(tmp_path, monke
         timestamp=old_timestamp,
         extra_json={"source": "esp32c5"},
     ))
+    with main.db() as conn:
+        conn.execute("UPDATE risk_events SET timestamp = ? WHERE id = ?", (old_timestamp, stored["id"]))
+        conn.execute("UPDATE device_state SET updated_at = ? WHERE device_id = ?", (old_timestamp, "cane_real"))
 
     state = main.latest_device_state(device_id="cane_real")["state"]
     alerts = main.latest_alerts(role="blind", userId=None, deviceId="cane_real", sinceId=0, limit=20)
@@ -793,12 +797,95 @@ def test_old_event_fallback_does_not_report_device_online(tmp_path, monkeypatch)
         extra_json={"source": "esp32c5"},
     ))
     with main.db() as conn:
+        conn.execute("UPDATE risk_events SET timestamp = ? WHERE id = ?", (old_timestamp, stored["id"]))
         conn.execute("DELETE FROM device_state WHERE device_id = ?", ("cane_offline",))
 
     state = main.latest_device_state(device_id="cane_offline")["state"]
 
-    assert stored["timestamp"] == old_timestamp
+    assert stored["timestamp"] != old_timestamp
+    assert stored["sourceTimestamp"] == old_timestamp
     assert state["online"] is False
+
+
+def test_server_time_is_canonical_and_client_time_is_audit_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "server_time.db")
+    main.init_db()
+    client_time = "2001-01-01T00:00:00+00:00"
+
+    stored = main.store_event(main.EventCreate(
+        device_id="cane_user_a",
+        lat=31.0,
+        lng=121.0,
+        risk_type="user_mark",
+        risk_level="medium",
+        timestamp=client_time,
+    ))
+    point = main.active_risk_points(31.0, 121.0, radius=20, limit=10)[0]
+
+    assert stored["sourceTimestamp"] == client_time
+    assert stored["timestamp"] != client_time
+    assert point["timestamp"] == stored["timestamp"]
+
+
+def test_other_account_observer_sees_user_mark_and_its_update(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "cross_account_mark.db")
+    main.init_db()
+    main.create_location(main.LocationCreate(
+        device_id="mobile_user_companion_b",
+        lat=31.0,
+        lng=121.00002,
+        source="android_app",
+    ))
+    first = main.store_event(main.EventCreate(
+        device_id="cane_user_a",
+        lat=31.0,
+        lng=121.0,
+        risk_type="user_mark",
+        risk_level="medium",
+    ))
+
+    first_warning = main.nearby_risk_warning(
+        lat=31.0,
+        lng=121.00002,
+        radius=10,
+        min_level="medium",
+        observer_id="mobile_user_companion_b",
+        exclude_source_device_ids="cane_user_b",
+        exclude_device_id=None,
+        bearing_deg=None,
+    )
+    second = main.store_event(main.EventCreate(
+        device_id="cane_user_a",
+        lat=31.000001,
+        lng=121.0,
+        risk_type="user_mark",
+        risk_level="high",
+    ))
+    updated_point = main.active_risk_points(31.0, 121.0, radius=20, limit=10)[0]
+
+    assert first_warning["found"] is True
+    assert first_warning["warning"]["deviceId"] == "cane_user_a"
+    assert second["id"] > first["id"]
+    assert updated_point["reportCount"] == 2
+    assert updated_point["riskLevel"] == "high"
+    assert updated_point["timestamp"] == second["timestamp"]
+
+
+def test_registered_account_exposes_both_app_roles(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "dual_roles.db")
+    main.init_db()
+
+    response = main.register_user(main.AuthRegisterRequest(
+        account="dual_mode_user",
+        password="test-password",
+        displayName="AC",
+        role="companion",
+    ))
+
+    assert response["user"]["account"] == "dual_mode_user"
+    assert response["user"]["displayName"] == "AC"
+    assert response["user"]["role"] == "companion"
+    assert response["user"]["roles"] == ["blind", "companion"]
 
 
 def test_recent_sos_is_still_delivered_as_a_current_alert(tmp_path, monkeypatch):

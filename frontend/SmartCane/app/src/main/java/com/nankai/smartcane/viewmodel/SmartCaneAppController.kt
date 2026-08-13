@@ -182,7 +182,6 @@ class SmartCaneAppController private constructor(
 
     private fun mobileObserverId(): String? =
         _uiState.value.currentUser
-            ?.takeIf { it.account.equals("AC", ignoreCase = true) }
             ?.userId
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
@@ -434,8 +433,12 @@ class SmartCaneAppController private constructor(
 
     fun refreshCurrentRelation() {
         val user = _uiState.value.currentUser ?: return
+        val role = when (_uiState.value.currentMode) {
+            AppMode.Companion -> UserRole.Companion
+            else -> UserRole.Blind
+        }
         scope.launch {
-            val result = pairingRepository.getCurrentRelation(user)
+            val result = pairingRepository.getCurrentRelation(user, role)
             val relation = withLiveCaneState(result.getOrNull())
             _uiState.update {
                 it.copy(
@@ -451,7 +454,7 @@ class SmartCaneAppController private constructor(
         val user = _uiState.value.currentUser ?: return
         blindPollingJob = scope.launch {
             while (true) {
-                val relation = withLiveCaneState(pairingRepository.getCurrentRelation(user).getOrNull())
+                val relation = withLiveCaneState(pairingRepository.getCurrentRelation(user, UserRole.Blind).getOrNull())
                 if (relation != null) {
                     _uiState.update { it.copy(currentRelation = relation, pendingRequest = null, pairingStatus = PairingFlowStatus.Connected) }
                 } else {
@@ -479,7 +482,7 @@ class SmartCaneAppController private constructor(
         val user = _uiState.value.currentUser ?: return
         companionPollingJob = scope.launch {
             while (true) {
-                val relationResult = pairingRepository.getCurrentRelation(user)
+                val relationResult = pairingRepository.getCurrentRelation(user, UserRole.Companion)
                 val relation = withLiveCaneState(relationResult.getOrNull())
                 if (relation != null) {
                     _uiState.update { it.copy(currentRelation = relation, pairingStatus = PairingFlowStatus.Connected, pendingRequest = null, message = "关联成功") }
@@ -578,7 +581,8 @@ class SmartCaneAppController private constructor(
                     location.longitude,
                     radiusM = NON_NAVIGATION_RISK_WARNING_RADIUS_M,
                     bearingDeg = location.bearing.takeIf { location.hasBearing() },
-                    excludeDeviceId = deviceId
+                    observerId = deviceId,
+                    excludeSourceDeviceIds = listOfNotNull(boundCaneDeviceId().takeIf(String::isNotBlank))
                 )) {
                     is ApiResult.Success -> {
                         val warning = result.data
@@ -613,20 +617,20 @@ class SmartCaneAppController private constructor(
     private fun maybeSpeakNearbyRiskWarning(warning: NearbyRiskWarningDto) {
         if (isNavigationInProgress(_uiState.value.navigationStatus)) return
         if (activeTtsPriority?.rank?.let { it > TtsPriority.ROAD_RISK.rank } == true) return
-        val currentDeviceId = nearbyRiskObserverId() ?: return
-        val isOwnFallRisk = currentDeviceId.isNotEmpty() &&
+        val ownCaneDeviceId = boundCaneDeviceId()
+        val isOwnFallRisk = ownCaneDeviceId.isNotEmpty() &&
             warning.riskType == "fall_detected" &&
-            warning.sourceDevices.any { sourceDevice -> sourceDevice.trim() == currentDeviceId }
+            warning.sourceDevices.any { sourceDevice -> sourceDevice.trim() == ownCaneDeviceId }
         if (isOwnFallRisk) return
         val isSelfSosReplay = selfSosReplayDemoEnabled &&
-            currentDeviceId.isNotEmpty() &&
+            ownCaneDeviceId.isNotEmpty() &&
             warning.riskType == "sos" &&
-            warning.sourceDevices.any { sourceDevice -> sourceDevice.trim() == currentDeviceId }
+            warning.sourceDevices.any { sourceDevice -> sourceDevice.trim() == ownCaneDeviceId }
         Log.d(
             SELF_SOS_REPLAY_LOG_TAG,
             "SELF_SOS_REPLAY candidate recognized=$isSelfSosReplay " +
                 "riskPointId=${warning.eventId} riskType=${warning.riskType} riskLevel=${warning.riskLevel} " +
-                "sourceDevices=${warning.sourceDevices} currentDeviceId=$currentDeviceId " +
+                "sourceDevices=${warning.sourceDevices} ownCaneDeviceId=$ownCaneDeviceId " +
                 "distanceM=${warning.distanceM} timestamp=${warning.timestamp} reportCount=${warning.reportCount}"
         )
         if (isSelfSosReplay && _uiState.value.voiceState == VoiceState.Listening) return
@@ -679,7 +683,7 @@ class SmartCaneAppController private constructor(
         speakText(
             text,
             priority = TtsPriority.ROAD_RISK,
-            requiresOnlineCane = mobileObserverId() == null
+            requiresOnlineCane = false
         )
     }
 

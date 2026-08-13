@@ -29,7 +29,8 @@ data class AuthUserDto(
     val userId: String,
     val account: String,
     val displayName: String,
-    val role: String
+    val role: String,
+    val roles: List<String> = listOf("blind", "companion")
 )
 
 data class AuthResponseDto(
@@ -634,13 +635,16 @@ object SmartCaneApiClient {
         radiusM: Int = 10,
         minLevel: String = "medium",
         bearingDeg: Float? = null,
-        excludeDeviceId: String? = null
+        observerId: String? = null,
+        excludeSourceDeviceIds: List<String> = emptyList()
     ): ApiResult<NearbyRiskWarningDto?> = withContext(Dispatchers.IO) {
         try {
             val path = buildString {
                 append("/api/risks/nearby-warning?lat=$latitude&lng=$longitude&radius=$radiusM&min_level=${minLevel.urlEncode()}")
                 if (bearingDeg != null) append("&bearing_deg=$bearingDeg")
-                if (!excludeDeviceId.isNullOrBlank()) append("&exclude_device_id=${excludeDeviceId.urlEncode()}")
+                if (!observerId.isNullOrBlank()) append("&observer_id=${observerId.urlEncode()}")
+                val excluded = excludeSourceDeviceIds.map(String::trim).filter(String::isNotEmpty).distinct()
+                if (excluded.isNotEmpty()) append("&exclude_source_device_ids=${excluded.joinToString(",").urlEncode()}")
             }
             ApiResult.Success(getJson(path).toNearbyRiskWarningDtoOrNull())
         } catch (exception: Exception) {
@@ -1051,7 +1055,10 @@ object SmartCaneApiClient {
         userId = optString("userId", optString("user_id")),
         account = optString("account"),
         displayName = optString("displayName", optString("display_name", optString("account"))),
-        role = optString("role", "blind")
+        role = optString("role", "blind"),
+        roles = optJSONArray("roles")?.let { array ->
+            stringValues(array.length()) { index -> array.optString(index) }
+        }.orEmpty().ifEmpty { listOf("blind", "companion") }
     )
 
     private fun JSONObject.toAuthResponseDto(): AuthResponseDto = AuthResponseDto(
