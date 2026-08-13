@@ -1669,6 +1669,7 @@ internal fun alertSpeechForRole(
 
 internal const val RISK_POINT_SPEECH_COOLDOWN_MS = 5 * 60 * 1000L
 internal const val FRONT_OBSTACLE_SPEECH = "前方障碍，请减速"
+internal const val GROUND_DROP_SPEECH = "前方落差，请减速"
 
 internal fun hazardSpeechText(riskType: String, direction: String, serverText: String): String? {
     val normalizedType = riskType.trim().lowercase(Locale.US)
@@ -1679,9 +1680,9 @@ internal fun hazardSpeechText(riskType: String, direction: String, serverText: S
         normalizedType == "ground_step_up" -> FRONT_OBSTACLE_SPEECH
         normalizedType == "ground_step" && (
             normalizedDirection == "down" || text.contains("下台阶") || text.contains("落差") || text.contains("坑洼")
-        ) -> null
+        ) -> GROUND_DROP_SPEECH
         normalizedType == "ground_step" -> FRONT_OBSTACLE_SPEECH
-        normalizedType in setOf("ground_drop", "ground_step_down", "down_no_target") -> null
+        normalizedType in setOf("ground_drop", "ground_step_down", "down_no_target") -> GROUND_DROP_SPEECH
         normalizedType == "left_obstacle" -> "左侧有障碍"
         normalizedType == "right_obstacle" -> "右侧有障碍"
         text.isBlank() -> null
@@ -1690,16 +1691,8 @@ internal fun hazardSpeechText(riskType: String, direction: String, serverText: S
 }
 
 internal fun nearbyRiskPointSpeechText(riskType: String, serverText: String): String? {
-    val normalizedType = riskType.trim().lowercase(Locale.US)
     val text = serverText.trim()
-    return when {
-        normalizedType in setOf("ground_drop", "ground_step_down", "down_no_target") -> null
-        normalizedType == "ground_step" && (
-            text.contains("下台阶") || text.contains("落差") || text.contains("坑洼")
-        ) -> null
-        text.isBlank() -> null
-        else -> text
-    }
+    return text.ifBlank { null }
 }
 
 internal const val ROUTE_PLANNED_CONFIRMATION = "收到，已规划好最佳路线"

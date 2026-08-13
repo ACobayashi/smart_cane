@@ -97,8 +97,9 @@ class AlertSpeechRoleTest {
         assertEquals(FRONT_OBSTACLE_SPEECH, hazardSpeechText("front_obstacle", "turn_left", "前方障碍，请向左避让"))
         assertEquals(FRONT_OBSTACLE_SPEECH, hazardSpeechText("front_obstacle", "turn_right", "前方障碍，请向右避让"))
         assertEquals(FRONT_OBSTACLE_SPEECH, hazardSpeechText("ground_step", "up", "前方上台阶，注意抬脚"))
-        assertNull(hazardSpeechText("ground_step", "down", "前方下台阶，请减速"))
-        assertNull(hazardSpeechText("ground_drop", "down", "前方有下台阶或落差，请停下"))
+        assertEquals(GROUND_DROP_SPEECH, hazardSpeechText("ground_step", "down", "前方下台阶，请减速"))
+        assertEquals(GROUND_DROP_SPEECH, hazardSpeechText("ground_drop", "down", "前方有下台阶或落差，请停下"))
+        assertEquals(GROUND_DROP_SPEECH, hazardSpeechText("down_no_target", "down", "前方坑洼，请停下"))
         assertEquals("左侧有障碍", hazardSpeechText("left_obstacle", "keep_right", "左侧有障碍，请向右避让"))
         assertEquals("右侧有障碍", hazardSpeechText("right_obstacle", "keep_left", "右侧有障碍，请向左避让"))
     }
@@ -113,8 +114,8 @@ class AlertSpeechRoleTest {
             "左侧6米有中风险点",
             nearbyRiskPointSpeechText("left_obstacle", "左侧6米有中风险点")
         )
-        assertNull(nearbyRiskPointSpeechText("ground_step_down", "前方2米有高风险点"))
-        assertNull(nearbyRiskPointSpeechText("ground_step", "前方下台阶或坑洼，请停下"))
+        assertEquals("前方2米有高风险点", nearbyRiskPointSpeechText("ground_step_down", "前方2米有高风险点"))
+        assertEquals("前方2米有中风险点", nearbyRiskPointSpeechText("ground_step", "前方2米有中风险点"))
     }
 
     @Test

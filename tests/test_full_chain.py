@@ -101,7 +101,7 @@ def test_front_warns_at_120cm_and_firmware_ground_direction_is_preserved():
     ), history)
     assert down["risk_type"] == "ground_step"
     assert down["direction"] == "down"
-    assert down["voice_prompt"] == ""
+    assert down["voice_prompt"] == "前方落差，请减速"
     drop = main.analyze_sensor_frame(frame(
         86, risk_type="ground_drop", direction="down", compensated_down_cm=86,
         ground_baseline_cm=55, height_delta_cm=31, ground_state="GROUND_DROP"
@@ -836,7 +836,7 @@ def test_realtime_voice_templates_only_describe_conditions_and_confirmed_fall():
         main.voice_prompt_for_risk(frame(55, front_cm=35), "front_obstacle", "high", "stop"),
         main.voice_prompt_for_risk(frame(55), "ground_drop", "high", "down"),
     ]
-    assert realtime_prompts == ["用户发起紧急求助", "前方障碍，请减速", ""]
+    assert realtime_prompts == ["用户发起紧急求助", "前方障碍，请减速", "前方落差，请减速"]
     assert main.legacy_event_message({"risk_type": "sos"}) == "用户发起紧急求助"
 
 
@@ -848,8 +848,8 @@ def test_realtime_obstacles_steps_and_drop_only_describe_the_condition():
 
     assert front == "前方障碍，请减速"
     assert up_step == "前方障碍，请减速"
-    assert down_step == ""
-    assert drop == ""
+    assert down_step == "前方落差，请减速"
+    assert drop == "前方落差，请减速"
 
     historical_up = main.nearby_warning_text(
         8.0, "high", "front", {"riskType": "ground_step", "voicePrompt": up_step}
@@ -858,7 +858,7 @@ def test_realtime_obstacles_steps_and_drop_only_describe_the_condition():
         8.0, "high", "front", {"riskType": "ground_step", "voicePrompt": down_step}
     )
     assert historical_up == "前方8米有高风险点"
-    assert historical_down == ""
+    assert historical_down == "前方8米有高风险点"
 
 
 def test_nearby_risk_point_speech_uses_direction_distance_and_existing_level():
@@ -947,8 +947,8 @@ def test_local_cue_string_metadata_is_parsed_and_deduplicated(tmp_path, monkeypa
     assert len(cues["cues"]) == 1
     assert cues["cues"][0]["eventKind"] == "local_cue"
     assert cues["cues"][0]["cue"]["id"] == "cue-device-1"
-    assert cues["cues"][0]["speech"]["shouldSpeak"] is False
-    assert cues["cues"][0]["speech"]["text"] == ""
+    assert cues["cues"][0]["speech"]["shouldSpeak"] is True
+    assert cues["cues"][0]["speech"]["text"] == "前方落差，请减速"
 
 
 def test_local_cue_repeat_and_non_cue_events_never_speak(tmp_path, monkeypatch):

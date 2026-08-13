@@ -1229,7 +1229,7 @@ def legacy_event_message(item: dict[str, Any]) -> str:
     if risk_type in {"ground_drop", "ground_step_down", "down_no_target"} or (
         risk_type == "ground_step" and direction == "down"
     ):
-        return ""
+        return GROUND_DROP_SPEECH
     custom_message = extra_message(item)
     if custom_message:
         return custom_message.removeprefix("message=")
@@ -1411,6 +1411,7 @@ def mobile_event_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 LOCAL_CUE_FRESHNESS_SECONDS = 3
 FRONT_OBSTACLE_SPEECH = "前方障碍，请减速"
+GROUND_DROP_SPEECH = "前方落差，请减速"
 
 
 def local_cue_speech(item: dict[str, Any]) -> str:
@@ -1425,9 +1426,9 @@ def local_cue_speech(item: dict[str, Any]) -> str:
     if risk_type in {"ground_step", "ground_step_up"} and direction == "up":
         return FRONT_OBSTACLE_SPEECH
     if risk_type in {"ground_step", "ground_step_down"} and direction == "down":
-        return ""
+        return GROUND_DROP_SPEECH
     if risk_type in {"ground_drop", "down_no_target"}:
-        return ""
+        return GROUND_DROP_SPEECH
     if risk_type == "down_sensor_unavailable":
         return "下视传感器异常，请停下检查"
     if risk_type == "fall_detected":
@@ -3359,15 +3360,15 @@ def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, 
     if risk_type == "ground_step" and direction == "up":
         return FRONT_OBSTACLE_SPEECH
     if risk_type == "ground_step" and direction == "down":
-        return ""
+        return GROUND_DROP_SPEECH
     if risk_type == "ground_drop":
-        return ""
+        return GROUND_DROP_SPEECH
     if risk_type == "ground_step_down":
-        return ""
+        return GROUND_DROP_SPEECH
     if risk_type in {"ground_step", "ground_step_up"}:
         return FRONT_OBSTACLE_SPEECH
     if risk_type == "down_no_target":
-        return ""
+        return GROUND_DROP_SPEECH
     if risk_type == "down_sensor_unavailable":
         return "下视传感器异常"
     if risk_type == "front_obstacle":
@@ -3813,7 +3814,7 @@ def fallback_advice(req: AdviceRequest, history: dict[str, Any]) -> str:
     if req.risk_type == "sos":
         return "求助已发送，请安全等候"
     if req.risk_type in {"ground_drop", "down_no_target", "ground_step_down"}:
-        return ""
+        return GROUND_DROP_SPEECH
     if req.risk_type == "ground_step_up":
         return FRONT_OBSTACLE_SPEECH
     if req.risk_type == "ground_step":
@@ -5517,7 +5518,7 @@ def nearby_warning_text(distance_m: float, risk_level: str, direction: str, even
         and ("上台阶" in saved_prompt or saved_prompt == FRONT_OBSTACLE_SPEECH)
     ):
         return f"{direction_text}{distance_text}米有{level_text}风险点"
-    if risk_type in {"ground_drop", "ground_step", "ground_step_down", "down_no_target", "down_sensor_unavailable"}:
+    if risk_type == "down_sensor_unavailable":
         return ""
     return f"{direction_text}{distance_text}米有{level_text}风险点"
 
