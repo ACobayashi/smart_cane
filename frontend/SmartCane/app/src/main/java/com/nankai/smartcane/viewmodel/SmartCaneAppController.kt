@@ -224,7 +224,10 @@ class SmartCaneAppController private constructor(
     private fun speakVoiceCommandResult(result: VoiceCommandDto, deviceId: String) {
         val route = result.route
         if (route != null && activateNavigationRoute(route, deviceId)) {
-            speakText(plannedRouteSpeech(route.voicePrompt), priority = TtsPriority.NAVIGATION)
+            speakText(
+                plannedRouteSpeech(route.voicePrompt, PhoneHeadingProvider.latestHeadingDeg()),
+                priority = TtsPriority.NAVIGATION
+            )
         } else {
             speakText(result.voicePrompt.ifBlank { result.reply.ifBlank { "已收到语音指令" } })
         }
@@ -1428,7 +1431,10 @@ class SmartCaneAppController private constructor(
                     is ApiResult.Success -> {
                         if (activateNavigationRoute(result.data, deviceId)) {
                             speakText(
-                                plannedRouteSpeech(result.data.voicePrompt),
+                                plannedRouteSpeech(
+                                    result.data.voicePrompt,
+                                    PhoneHeadingProvider.latestHeadingDeg()
+                                ),
                                 priority = TtsPriority.NAVIGATION
                             )
                         } else {
@@ -1836,9 +1842,19 @@ internal fun nearbyRiskPointSpeechText(riskType: String, serverText: String): St
 
 internal const val ROUTE_PLANNED_CONFIRMATION = "收到，已规划好最佳路线"
 
-internal fun plannedRouteSpeech(routePrompt: String): String {
+internal fun plannedRouteSpeech(routePrompt: String, headingDeg: Float? = null): String {
     val details = routePrompt.trim()
-    return if (details.isBlank()) ROUTE_PLANNED_CONFIRMATION else "$ROUTE_PLANNED_CONFIRMATION。$details"
+    val routeSpeech = if (details.isBlank()) ROUTE_PLANNED_CONFIRMATION else "$ROUTE_PLANNED_CONFIRMATION。$details"
+    val direction = eightPointCompassDirection(headingDeg) ?: return routeSpeech
+    return "$routeSpeech。当前朝向为$direction"
+}
+
+internal fun eightPointCompassDirection(headingDeg: Float?): String? {
+    if (headingDeg == null || !headingDeg.isFinite()) return null
+    val normalized = ((headingDeg % 360f) + 360f) % 360f
+    val directions = arrayOf("北", "东北", "东", "东南", "南", "西南", "西", "西北")
+    val index = (((normalized + 22.5f) / 45f).toInt()) % directions.size
+    return directions[index]
 }
 
 internal fun compactSpeechText(text: String): String {

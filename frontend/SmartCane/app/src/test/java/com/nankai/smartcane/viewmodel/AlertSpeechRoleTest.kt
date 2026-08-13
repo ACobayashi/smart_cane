@@ -222,6 +222,24 @@ class AlertSpeechRoleTest {
     }
 
     @Test
+    fun successfulRouteSpeaksCurrentEightPointHeadingAfterRouteDetails() {
+        assertEquals(
+            "收到，已规划好最佳路线。全程八百米，先向北走三百米。当前朝向为东北",
+            plannedRouteSpeech("全程八百米，先向北走三百米", 45f)
+        )
+        assertEquals("北", eightPointCompassDirection(0f))
+        assertEquals("东北", eightPointCompassDirection(22.5f))
+        assertEquals("东", eightPointCompassDirection(90f))
+        assertEquals("东南", eightPointCompassDirection(135f))
+        assertEquals("南", eightPointCompassDirection(180f))
+        assertEquals("西南", eightPointCompassDirection(225f))
+        assertEquals("西", eightPointCompassDirection(270f))
+        assertEquals("西北", eightPointCompassDirection(315f))
+        assertEquals("北", eightPointCompassDirection(359.9f))
+        assertNull(eightPointCompassDirection(null))
+    }
+
+    @Test
     fun blindSosNeverUsesCaregiverPrompt() {
         assertNull(
             alertSpeechForRole(
