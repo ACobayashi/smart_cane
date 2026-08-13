@@ -907,8 +907,47 @@ def test_voice_request_triggers_interaction_but_is_not_a_risk_record(tmp_path, m
 
     assert stored["risk_type"] == "voice_request"
     assert main.legacy_latest_events(limit=20)["events"] == []
-    alerts = main.latest_alerts(role="blind", userId=None, deviceId="cane_voice", sinceId=0, limit=20)
-    assert alerts["alerts"][0]["riskType"] == "voice_request"
+    blind_alerts = main.latest_alerts(role="blind", userId=None, deviceId="cane_voice", sinceId=0, limit=20)
+    companion_alerts = main.latest_alerts(role="companion", userId=None, deviceId="cane_voice", sinceId=0, limit=20)
+    assert blind_alerts["alerts"][0]["riskType"] == "voice_request"
+    assert companion_alerts["alerts"][0]["riskType"] == "voice_request"
+    assert blind_alerts["alerts"][0]["targetRoles"] == ["blind", "companion"]
+    assert companion_alerts["alerts"][0]["targetRoles"] == ["blind", "companion"]
+
+
+def test_account_receives_bound_cane_voice_request_in_either_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "dual_mode_alert_scope.db")
+    main.init_db()
+    timestamp = main.now_iso()
+    with main.db() as conn:
+        conn.execute(
+            """
+            INSERT INTO care_relations
+                (relation_id, status, blind_user_id, blind_name, companion_user_id,
+                 companion_name, device_id, device_name, created_at, updated_at)
+            VALUES (?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "relation_dual_mode", "account_a", "A", "account_b", "B",
+                "cane_account_a", "Cane A", timestamp, timestamp,
+            ),
+        )
+    main.store_event(main.EventCreate(
+        device_id="cane_account_a",
+        lat=31.0,
+        lng=121.0,
+        risk_type="voice_request",
+        risk_level="low",
+        voice_prompt="请说目的地或指令",
+    ))
+
+    for account in ("account_a", "account_b"):
+        for role in ("blind", "companion"):
+            response = main.latest_alerts(
+                role=role, userId=account, deviceId=None, sinceId=0, limit=20
+            )
+            assert response["devices"] == ["cane_account_a"]
+            assert response["alerts"][0]["riskType"] == "voice_request"
 
 
 def test_location_uses_server_time_and_preserves_phone_heading(tmp_path, monkeypatch):

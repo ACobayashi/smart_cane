@@ -102,6 +102,7 @@ class SmartCaneAppController private constructor(
     private var latestContinuousLocation: Location? = null
     private var activeTtsUtteranceId: String? = null
     private var activeTtsPriority: TtsPriority? = null
+    private var pendingAutoListenUtteranceId: String? = null
     private val pendingSpeech = mutableListOf<QueuedSpeech>()
     private val speechCooldowns = mutableMapOf<String, Long>()
     private var lastAlertId: Int = 0
@@ -749,32 +750,25 @@ class SmartCaneAppController private constructor(
                 }
                 val userId = state.currentUser?.account ?: state.currentUser?.userId
                 val deviceId = boundCaneDeviceId().ifBlank { null }
-                if (deviceId == null) {
+                if (deviceId == null && userId.isNullOrBlank()) {
                     delay(1_000L)
                     continue
                 }
                 when (val result = SmartCaneApiClient.getLatestAlerts(role, userId, deviceId, lastAlertId)) {
                     is ApiResult.Success -> {
                         val newAlerts = result.data.filter { it.id > lastAlertId }.sortedBy { it.id }
+                        val freshVoiceRequest = latestFreshVoiceRequest(newAlerts)
                         if (!alertBaselineReady) {
                             lastAlertId = newAlerts.lastOrNull()?.id ?: lastAlertId
                             alertBaselineReady = true
+                            freshVoiceRequest?.let(::handleVoiceRequestAlert)
                             delay(5_000L)
                             continue
                         }
                         newAlerts.forEach { alert ->
                             lastAlertId = maxOf(lastAlertId, alert.id)
-                            if (alert.riskType == "voice_request" && role == "blind") {
-                                if (!alert.freshForSpeech) return@forEach
-                                if (!spokenEventIds.tryAcquire(alert.id)) return@forEach
-                                _uiState.update {
-                                    it.copy(
-                                        urgentAlert = null,
-                                        voiceState = VoiceState.Speaking,
-                                        message = "盲杖按钮已触发"
-                                    )
-                                }
-                                speakText(alert.voicePrompt.ifBlank { alert.message }, listenAfter = true)
+                            if (alert.riskType == "voice_request") {
+                                if (alert.id == freshVoiceRequest?.id) handleVoiceRequestAlert(alert)
                             } else {
                                 _uiState.update { it.copy(urgentAlert = alert, message = alert.title) }
                                 if (alert.riskType == "fall_detected") return@forEach
@@ -803,6 +797,24 @@ class SmartCaneAppController private constructor(
                 delay(5_000L)
             }
         }
+    }
+
+    private fun handleVoiceRequestAlert(alert: EmergencyAlertDto) {
+        if (!alert.freshForSpeech) return
+        if (!spokenEventIds.tryAcquire(alert.id)) return
+        _uiState.update {
+            it.copy(
+                urgentAlert = null,
+                voiceState = VoiceState.Speaking,
+                message = "盲杖按钮已触发"
+            )
+        }
+        speakText(
+            alert.voicePrompt.ifBlank { alert.message },
+            listenAfter = shouldListenAfterCaneVoiceRequest(alert.riskType),
+            priority = TtsPriority.VOICE_REQUEST,
+            bypassTextCooldown = true
+        )
     }
 
     fun stopAlertPolling() {
@@ -1132,6 +1144,7 @@ class SmartCaneAppController private constructor(
         val utteranceId = "smartcane_${System.currentTimeMillis()}"
         activeTtsUtteranceId = utteranceId
         activeTtsPriority = priority
+        if (listenAfter) pendingAutoListenUtteranceId = utteranceId
         _uiState.update { it.copy(lastSpokenText = cleanText, voiceState = VoiceState.Speaking, message = "正在播报") }
 
         fun finishSpeaking() {
@@ -1140,7 +1153,11 @@ class SmartCaneAppController private constructor(
                 activeTtsUtteranceId = null
                 activeTtsPriority = null
                 if (listenAfter) {
-                    _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "请按住说话", voiceTranscript = "请按住说话") }
+                    if (pendingAutoListenUtteranceId != utteranceId) return@launch
+                    pendingAutoListenUtteranceId = null
+                    _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "正在准备语音识别", voiceTranscript = null) }
+                    startVoiceListening()
+                    return@launch
                 } else {
                     _uiState.update {
                         if (it.voiceState == VoiceState.Speaking) {
@@ -1199,6 +1216,20 @@ class SmartCaneAppController private constructor(
             speakWith(engine)
         } else {
             finishSpeaking()
+        }
+        if (listenAfter) {
+            scope.launch {
+                delay(1_800L)
+                if (pendingAutoListenUtteranceId != utteranceId) return@launch
+                pendingAutoListenUtteranceId = null
+                if (activeTtsUtteranceId == utteranceId) {
+                    tts?.stop()
+                    activeTtsUtteranceId = null
+                    activeTtsPriority = null
+                }
+                _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "正在准备语音识别", voiceTranscript = null) }
+                startVoiceListening()
+            }
         }
     }
 
@@ -1616,6 +1647,7 @@ class SmartCaneAppController private constructor(
         ttsReady = false
         activeTtsUtteranceId = null
         activeTtsPriority = null
+        pendingAutoListenUtteranceId = null
         pendingSpeech.clear()
         voiceRecognitionActive = false
         voiceRecordingJob?.cancel()
@@ -1848,6 +1880,15 @@ internal fun isFreshDeviceEvent(
     ageSeconds in 0..freshnessSeconds
 }.getOrDefault(false)
 
+internal fun latestFreshVoiceRequest(alerts: List<EmergencyAlertDto>): EmergencyAlertDto? =
+    alerts
+        .asSequence()
+        .filter { it.riskType == "voice_request" && it.freshForSpeech }
+        .maxByOrNull { it.id }
+
+internal fun shouldListenAfterCaneVoiceRequest(riskType: String): Boolean =
+    riskType == "voice_request"
+
 internal fun shouldSpeakLocalCue(cue: LocalCueDto, currentDeviceId: String): Boolean {
     if (cue.eventKind != "local_cue") return false
     if (cue.deviceId != currentDeviceId || cue.cue.id.isBlank() || cue.cue.repeat) return false
@@ -1909,10 +1950,11 @@ internal fun hardwareRiskTtsPriority(riskType: String): TtsPriority {
 }
 
 enum class TtsPriority(val rank: Int) {
-    NORMAL(1), ROAD_RISK(2), NAVIGATION(3), OBSTACLE_STOP(4), STEP(5), EMERGENCY(6)
+    NORMAL(1), ROAD_RISK(2), NAVIGATION(3), OBSTACLE_STOP(4), STEP(5), VOICE_REQUEST(6), EMERGENCY(7)
 }
 
 internal fun shouldInterruptCurrentSpeech(current: TtsPriority, incoming: TtsPriority): Boolean {
+    if (incoming == TtsPriority.VOICE_REQUEST) return current != TtsPriority.EMERGENCY
     if (current == TtsPriority.NAVIGATION) return false
     return incoming.rank > current.rank
 }

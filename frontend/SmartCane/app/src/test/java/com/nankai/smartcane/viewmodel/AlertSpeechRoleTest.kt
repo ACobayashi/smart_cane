@@ -5,6 +5,7 @@ import com.nankai.smartcane.data.network.LocalCueFallDto
 import com.nankai.smartcane.data.network.LocalCueMetadataDto
 import com.nankai.smartcane.data.network.LocalCueRiskDto
 import com.nankai.smartcane.data.network.LocalCueSpeechDto
+import com.nankai.smartcane.data.network.EmergencyAlertDto
 import com.nankai.smartcane.data.local.DemoData
 import com.nankai.smartcane.data.model.CareRelation
 import com.nankai.smartcane.data.model.RelationStatus
@@ -15,6 +16,29 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AlertSpeechRoleTest {
+
+    @Test
+    fun startupSelectsOnlyTheLatestFreshVoiceRequest() {
+        val stale = voiceRequestForTest(id = 40, fresh = false)
+        val firstFresh = voiceRequestForTest(id = 41, fresh = true)
+        val latestFresh = voiceRequestForTest(id = 42, fresh = true)
+
+        assertEquals(latestFresh, latestFreshVoiceRequest(listOf(stale, latestFresh, firstFresh)))
+        assertNull(latestFreshVoiceRequest(listOf(stale)))
+    }
+
+    @Test
+    fun caneVoicePromptStillRequestsAutomaticListening() {
+        assertTrue(shouldListenAfterCaneVoiceRequest("voice_request"))
+        assertFalse(shouldListenAfterCaneVoiceRequest("front_obstacle"))
+    }
+
+    @Test
+    fun caneVoicePromptInterruptsNonEmergencySpeech() {
+        assertTrue(shouldInterruptCurrentSpeech(TtsPriority.NAVIGATION, TtsPriority.VOICE_REQUEST))
+        assertTrue(shouldInterruptCurrentSpeech(TtsPriority.STEP, TtsPriority.VOICE_REQUEST))
+        assertFalse(shouldInterruptCurrentSpeech(TtsPriority.EMERGENCY, TtsPriority.VOICE_REQUEST))
+    }
 
     @Test
     fun eventSpeechGateAllowsEachPositiveEventOnlyOnce() {
@@ -255,5 +279,20 @@ class AlertSpeechRoleTest {
         cue = LocalCueMetadataDto("cue-001", "risk_feedback", false, true, true),
         fall = null,
         speech = LocalCueSpeechDto(true, "前方下台阶，请减速")
+    )
+
+    private fun voiceRequestForTest(id: Int, fresh: Boolean) = EmergencyAlertDto(
+        id = id,
+        deviceId = "cane_001",
+        riskType = "voice_request",
+        riskLevel = "low",
+        priority = "info",
+        title = "语音交互请求",
+        message = "请说目的地或指令",
+        voicePrompt = "请说目的地或指令",
+        latitude = null,
+        longitude = null,
+        timestamp = "2026-08-13T10:54:12Z",
+        freshForSpeech = fresh
     )
 }

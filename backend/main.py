@@ -1527,11 +1527,13 @@ def allowed_alert_devices(role: str, user_id: Optional[str], device_id: Optional
         return {device_id}
     if not user_id:
         return None
-    field = "companion_user_id" if role == "companion" else "blind_user_id"
     with db() as conn:
         rows = conn.execute(
-            f"SELECT device_id FROM care_relations WHERE {field} = ? AND status = 'active'",
-            (user_id,),
+            """
+            SELECT DISTINCT device_id FROM care_relations
+            WHERE (blind_user_id = ? OR companion_user_id = ?) AND status = 'active'
+            """,
+            (user_id, user_id),
         ).fetchall()
     devices = {str(row["device_id"]) for row in rows}
     return devices
@@ -1541,7 +1543,10 @@ def alert_target_roles(risk_type: str) -> list[str]:
     if risk_type in {"sos", "fall_detected"}:
         return ["blind", "companion"]
     if risk_type == "voice_request":
-        return ["blind"]
+        # A signed-in account can switch between user and companion mode at
+        # any time.  The physical cane button must therefore reach the phone
+        # in either mode; the bound device still scopes who can receive it.
+        return ["blind", "companion"]
     return ["companion"]
 
 

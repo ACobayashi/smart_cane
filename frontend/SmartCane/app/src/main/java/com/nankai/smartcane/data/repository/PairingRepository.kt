@@ -115,14 +115,25 @@ class RemotePairingRepository(
     }
 
     override suspend fun getCurrentRelation(user: UserProfile, role: UserRole): Result<CareRelation?> {
-        return when (val result = SmartCaneApiClient.getRelations(user.account.ifBlank { user.userId }, role.apiValue)) {
-            is ApiResult.Success -> {
-                val relation = result.data.relation?.toCareRelation()
-                if (relation != null) preferences.saveRelation(relation)
-                Result.success(relation)
+        val account = user.account.ifBlank { user.userId }
+        var firstFailure: String? = null
+        relationRoleFallbackOrder(role).forEach { candidateRole ->
+            when (val result = SmartCaneApiClient.getRelations(account, candidateRole.apiValue)) {
+                is ApiResult.Success -> {
+                    val relation = result.data.relation?.toCareRelation()
+                    if (relation != null) {
+                        preferences.saveRelation(relation)
+                        return Result.success(relation)
+                    }
+                }
+                is ApiResult.Failure -> if (firstFailure == null) {
+                    firstFailure = result.message
+                }
             }
-            is ApiResult.Failure -> Result.failure(IllegalStateException(result.message))
         }
+        return firstFailure
+            ?.let { Result.failure(IllegalStateException(it)) }
+            ?: Result.success(null)
     }
 
     override suspend fun unlinkRelation(relationId: String?): Result<Unit> {
@@ -142,6 +153,11 @@ class RemotePairingRepository(
     override suspend fun clearPairingCode() {
         preferences.savePairingCode(null, null, null)
     }
+}
+
+internal fun relationRoleFallbackOrder(role: UserRole): List<UserRole> = when (role) {
+    UserRole.Blind -> listOf(UserRole.Blind, UserRole.Companion)
+    UserRole.Companion -> listOf(UserRole.Companion, UserRole.Blind)
 }
 
 class DemoPairingRepository(
