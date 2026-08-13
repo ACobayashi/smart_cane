@@ -1101,6 +1101,8 @@ def device_has_recent_heartbeat(device_id: str, now: Optional[datetime] = None) 
     normalized = device_id.strip()
     if not normalized:
         return False
+    if normalized.startswith("mobile_"):
+        return latest_mobile_location_for_device(normalized, max_age_seconds=DEVICE_OFFLINE_SECONDS) is not None
     with db() as conn:
         row = conn.execute(
             "SELECT updated_at FROM device_state WHERE device_id = ? ORDER BY updated_at DESC LIMIT 1",
