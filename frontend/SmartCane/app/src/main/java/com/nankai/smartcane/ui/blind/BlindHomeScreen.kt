@@ -242,7 +242,7 @@ private fun VoiceOrb(
                     val releasedBeforeLongPress = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
                         waitForUpOrCancellation()
                     }
-                    if (releasedBeforeLongPress == null && currentState == VoiceState.Idle) {
+                    if (releasedBeforeLongPress == null && currentState in setOf(VoiceState.Idle, VoiceState.Listening)) {
                         var started = false
                         try {
                             currentOnPressStart()
@@ -256,7 +256,11 @@ private fun VoiceOrb(
             }
             .semantics {
                 role = Role.Button
-                contentDescription = if (state == VoiceState.Idle) "语音按钮，按住开始说话，松开结束" else "语音处理中，按钮暂不可用"
+                contentDescription = when (state) {
+                    VoiceState.Idle -> "语音按钮，按住开始说话，松开结束"
+                    VoiceState.Listening -> "正在录音，长按可切换为手动录音，松开结束"
+                    else -> "语音处理中，按钮暂不可用"
+                }
                 stateDescription = label
             },
         contentAlignment = Alignment.Center

@@ -89,6 +89,8 @@ class SmartCaneAppController private constructor(
     private var backendVoiceRecordingActive = false
     private var backendVoiceRecorder: MediaRecorder? = null
     private var backendVoiceFile: File? = null
+    private var automaticVoiceListeningActive = false
+    private var automaticVoiceTimeoutJob: Job? = null
     private var blindPollingJob: Job? = null
     private var companionPollingJob: Job? = null
     private var alertPollingJob: Job? = null
@@ -1060,8 +1062,13 @@ class SmartCaneAppController private constructor(
     }
 
     fun startVoicePress() {
-        if (_uiState.value.voiceState == VoiceState.Idle) {
-            startVoiceRecording()
+        when (voicePressStartAction(_uiState.value.voiceState, automaticVoiceListeningActive)) {
+            VoicePressStartAction.START_MANUAL -> startVoiceRecording()
+            VoicePressStartAction.TAKE_OVER_AUTOMATIC -> {
+                cancelAutomaticVoiceListeningForManualPress()
+                startVoiceRecording()
+            }
+            VoicePressStartAction.IGNORE -> Unit
         }
     }
 
@@ -1331,6 +1338,7 @@ class SmartCaneAppController private constructor(
         ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     private fun startVoiceListening() {
+        automaticVoiceListeningActive = true
         if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
             startBackendVoiceRecording()
             return
@@ -1351,16 +1359,18 @@ class SmartCaneAppController private constructor(
 
     private fun createRecognitionListener(): RecognitionListener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
+            if (!automaticVoiceListeningActive) return
             _uiState.update { state ->
                 state.copy(
                     voiceState = VoiceState.Listening,
                     message = "\u6b63\u5728\u542c\u4f60\u8bf4",
-                    voiceTranscript = null
+                    voiceTranscript = "自动录音中，请直接说话（最长 8 秒）"
                 )
             }
         }
 
         override fun onBeginningOfSpeech() {
+            if (!automaticVoiceListeningActive) return
             _uiState.update { state -> state.copy(message = "\u6b63\u5728\u8bc6\u522b", voiceTranscript = "\u6b63\u5728\u8bc6\u522b\u2026") }
         }
 
@@ -1368,12 +1378,16 @@ class SmartCaneAppController private constructor(
         override fun onBufferReceived(buffer: ByteArray?) = Unit
 
         override fun onEndOfSpeech() {
+            if (!automaticVoiceListeningActive) return
             voiceRecognitionActive = false
             _uiState.update { state -> state.copy(message = "\u6b63\u5728\u7406\u89e3", voiceTranscript = state.voiceTranscript ?: "\u6b63\u5728\u6574\u7406\u5b57\u5e55\u2026") }
         }
 
         override fun onError(error: Int) {
+            val wasAutomatic = automaticVoiceListeningActive
+            if (!wasAutomatic) return
             voiceRecognitionActive = false
+            finishAutomaticVoiceListening()
             val message = when (error) {
                 SpeechRecognizer.ERROR_NO_MATCH -> "\u6ca1\u542c\u6e05\uff0c\u8bf7\u518d\u6309\u4e00\u6b21\u6309\u94ae"
                 SpeechRecognizer.ERROR_AUDIO -> "\u9ea6\u514b\u98ce\u5f02\u5e38"
@@ -1383,12 +1397,16 @@ class SmartCaneAppController private constructor(
             }
             _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = message, voiceTranscript = message) }
             if (error == SpeechRecognizer.ERROR_NETWORK || error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT || error == SpeechRecognizer.ERROR_SERVER || error == SpeechRecognizer.ERROR_CLIENT) {
+                automaticVoiceListeningActive = true
                 startBackendVoiceRecording()
             }
         }
 
         override fun onResults(results: Bundle?) {
+            val wasAutomatic = automaticVoiceListeningActive
+            if (!wasAutomatic) return
             voiceRecognitionActive = false
+            finishAutomaticVoiceListening()
             val text = results
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull()
@@ -1423,6 +1441,7 @@ class SmartCaneAppController private constructor(
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
+            if (!automaticVoiceListeningActive) return
             val partialText = partialResults
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull()
@@ -1445,10 +1464,44 @@ class SmartCaneAppController private constructor(
 
         try {
             voiceRecognitionActive = true
-            _uiState.update { it.copy(voiceState = VoiceState.Listening, message = "\u6b63\u5728\u542c\u4f60\u8bf4", voiceTranscript = null) }
+            _uiState.update {
+                it.copy(
+                    voiceState = VoiceState.Listening,
+                    message = "\u6b63\u5728\u542c\u4f60\u8bf4",
+                    voiceTranscript = "自动录音中，请直接说话（最长 8 秒）"
+                )
+            }
             recognizer.startListening(intent)
+            automaticVoiceTimeoutJob?.cancel()
+            automaticVoiceTimeoutJob = scope.launch {
+                delay(AUTOMATIC_VOICE_LISTENING_TIMEOUT_MS)
+                if (!automaticVoiceListeningActive) return@launch
+                if (voiceRecognitionActive) {
+                    runCatching { speechRecognizer?.stopListening() }
+                    voiceRecognitionActive = false
+                    _uiState.update {
+                        it.copy(
+                            voiceState = VoiceState.Processing,
+                            message = "正在识别语音",
+                            voiceTranscript = "正在整理识别结果…"
+                        )
+                    }
+                }
+                delay(AUTOMATIC_VOICE_RESULT_TIMEOUT_MS)
+                if (!automaticVoiceListeningActive) return@launch
+                runCatching { speechRecognizer?.cancel() }
+                automaticVoiceListeningActive = false
+                _uiState.update {
+                    it.copy(
+                        voiceState = VoiceState.Idle,
+                        message = "没有听清，请按住说话重试",
+                        voiceTranscript = "没有听清，请按住说话重试"
+                    )
+                }
+            }
         } catch (_: SecurityException) {
             voiceRecognitionActive = false
+            finishAutomaticVoiceListening()
             _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "\u8bf7\u5728\u7cfb\u7edf\u8bbe\u7f6e\u4e2d\u5f00\u542f\u9ea6\u514b\u98ce\u6743\u9650", voiceTranscript = "\u8bf7\u5728\u7cfb\u7edf\u8bbe\u7f6e\u4e2d\u5f00\u542f\u9ea6\u514b\u98ce\u6743\u9650") }
         } catch (_: Exception) {
             voiceRecognitionActive = false
@@ -1482,7 +1535,11 @@ class SmartCaneAppController private constructor(
                 it.copy(
                     voiceState = VoiceState.Listening,
                     message = "\u7cfb\u7edf\u8bed\u97f3\u4e0d\u53ef\u7528\uff0c\u5df2\u5207\u6362\u5230\u540e\u7aef\u5f55\u97f3\u8bc6\u522b",
-                    voiceTranscript = "\u6b63\u5728\u5f55\u97f3\uff0c\u677e\u5f00\u6309\u94ae\u540e\u8bc6\u522b"
+                    voiceTranscript = if (automaticVoiceListeningActive) {
+                        "自动录音中，请直接说话（最长 7 秒）"
+                    } else {
+                        "\u6b63\u5728\u5f55\u97f3\uff0c\u677e\u5f00\u6309\u94ae\u540e\u8bc6\u522b"
+                    }
                 )
             }
             scope.launch {
@@ -1504,6 +1561,7 @@ class SmartCaneAppController private constructor(
         backendVoiceRecorder = null
         backendVoiceFile = null
         backendVoiceRecordingActive = false
+        finishAutomaticVoiceListening()
         runCatching { recorder.stop() }
         runCatching { recorder.release() }
         if (file == null || !file.exists() || file.length() <= 0L) {
@@ -1555,7 +1613,31 @@ class SmartCaneAppController private constructor(
             speechRecognizer?.stopListening()
         }
         voiceRecognitionActive = false
+        finishAutomaticVoiceListening()
         _uiState.update { it.copy(voiceState = VoiceState.Idle, message = message, voiceTranscript = it.voiceTranscript ?: message) }
+    }
+
+    private fun finishAutomaticVoiceListening() {
+        automaticVoiceListeningActive = false
+        automaticVoiceTimeoutJob?.cancel()
+        automaticVoiceTimeoutJob = null
+    }
+
+    private fun cancelAutomaticVoiceListeningForManualPress() {
+        finishAutomaticVoiceListening()
+        runCatching { speechRecognizer?.cancel() }
+        voiceRecognitionActive = false
+        if (backendVoiceRecordingActive) {
+            val recorder = backendVoiceRecorder
+            val file = backendVoiceFile
+            backendVoiceRecorder = null
+            backendVoiceFile = null
+            backendVoiceRecordingActive = false
+            runCatching { recorder?.stop() }
+            runCatching { recorder?.release() }
+            runCatching { file?.delete() }
+        }
+        _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "请按住说话", voiceTranscript = null) }
     }
 
     private fun startLocalSosAlarm() {
@@ -1649,6 +1731,7 @@ class SmartCaneAppController private constructor(
         activeTtsPriority = null
         pendingAutoListenUtteranceId = null
         pendingSpeech.clear()
+        finishAutomaticVoiceListening()
         voiceRecognitionActive = false
         voiceRecordingJob?.cancel()
         voiceRecordingJob = null
@@ -1888,6 +1971,24 @@ internal fun latestFreshVoiceRequest(alerts: List<EmergencyAlertDto>): Emergency
 
 internal fun shouldListenAfterCaneVoiceRequest(riskType: String): Boolean =
     riskType == "voice_request"
+
+private const val AUTOMATIC_VOICE_LISTENING_TIMEOUT_MS = 8_000L
+private const val AUTOMATIC_VOICE_RESULT_TIMEOUT_MS = 2_000L
+
+internal enum class VoicePressStartAction {
+    START_MANUAL,
+    TAKE_OVER_AUTOMATIC,
+    IGNORE
+}
+
+internal fun voicePressStartAction(
+    voiceState: VoiceState,
+    automaticVoiceListeningActive: Boolean
+): VoicePressStartAction = when {
+    voiceState == VoiceState.Idle -> VoicePressStartAction.START_MANUAL
+    voiceState == VoiceState.Listening && automaticVoiceListeningActive -> VoicePressStartAction.TAKE_OVER_AUTOMATIC
+    else -> VoicePressStartAction.IGNORE
+}
 
 internal fun shouldSpeakLocalCue(cue: LocalCueDto, currentDeviceId: String): Boolean {
     if (cue.eventKind != "local_cue") return false

@@ -41,6 +41,14 @@ class AlertSpeechRoleTest {
     }
 
     @Test
+    fun manualPressCanTakeOverOnlyAutomaticListening() {
+        assertEquals(VoicePressStartAction.START_MANUAL, voicePressStartAction(VoiceState.Idle, false))
+        assertEquals(VoicePressStartAction.TAKE_OVER_AUTOMATIC, voicePressStartAction(VoiceState.Listening, true))
+        assertEquals(VoicePressStartAction.IGNORE, voicePressStartAction(VoiceState.Listening, false))
+        assertEquals(VoicePressStartAction.IGNORE, voicePressStartAction(VoiceState.Processing, true))
+    }
+
+    @Test
     fun eventSpeechGateAllowsEachPositiveEventOnlyOnce() {
         val gate = EventSpeechGate()
 
