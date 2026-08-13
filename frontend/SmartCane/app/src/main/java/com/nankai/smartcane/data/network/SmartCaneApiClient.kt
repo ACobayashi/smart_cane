@@ -382,7 +382,8 @@ data class VoiceCommandDto(
     val routeCount: Int,
     val provider: String,
     val model: String,
-    val reply: String = voicePrompt
+    val reply: String = voicePrompt,
+    val route: RouteAdviceDto? = null
 )
 
 data class NearbyRiskWarningDto(
@@ -1408,13 +1409,17 @@ object SmartCaneApiClient {
     private fun JSONObject.toVoiceCommandDto(): VoiceCommandDto {
         val bestRoute = optJSONObject("best_route") ?: optJSONObject("bestRoute")
         val stt = optJSONObject("stt")
+        val route = takeIf {
+            optString("session_id", optString("sessionId", "")).isNotBlank()
+        }?.toRouteAdviceDto()
         return VoiceCommandDto(
             transcript = optString("transcript", optString("text", "")),
             voicePrompt = optString("voice_prompt", optString("voicePrompt", optString("reply", "已收到语音指令"))),
             routeCount = optInt("route_count", optInt("routeCount")),
             provider = stt?.optString("provider").orEmpty(),
             model = stt?.optString("model").orEmpty().ifBlank { bestRoute?.optString("model").orEmpty() },
-            reply = optString("reply", optString("voice_prompt", optString("voicePrompt", "已收到语音指令")))
+            reply = optString("reply", optString("voice_prompt", optString("voicePrompt", "已收到语音指令"))),
+            route = route
         )
     }
 

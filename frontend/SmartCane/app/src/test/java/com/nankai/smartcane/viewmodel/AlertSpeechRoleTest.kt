@@ -155,6 +155,15 @@ class AlertSpeechRoleTest {
     }
 
     @Test
+    fun successfulRouteSpeaksConfirmationBeforeTheOverview() {
+        assertEquals(
+            "收到，已规划好最佳路线。全程八百米，先向北走三百米",
+            plannedRouteSpeech("全程八百米，先向北走三百米")
+        )
+        assertEquals(ROUTE_PLANNED_CONFIRMATION, plannedRouteSpeech("  "))
+    }
+
+    @Test
     fun blindSosNeverUsesCaregiverPrompt() {
         assertNull(
             alertSpeechForRole(

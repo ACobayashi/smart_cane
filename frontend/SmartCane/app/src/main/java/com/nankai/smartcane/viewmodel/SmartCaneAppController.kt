@@ -43,7 +43,9 @@ import com.nankai.smartcane.data.network.LocalCueDto
 import com.nankai.smartcane.data.network.LocationUploadDto
 import com.nankai.smartcane.data.network.NearbyRiskWarningDto
 import com.nankai.smartcane.data.network.NavigationRouteDto
+import com.nankai.smartcane.data.network.RouteAdviceDto
 import com.nankai.smartcane.data.network.SmartCaneApiClient
+import com.nankai.smartcane.data.network.VoiceCommandDto
 import com.nankai.smartcane.data.network.SosRequestDto
 import com.nankai.smartcane.data.repository.AuthRepository
 import com.nankai.smartcane.data.repository.DemoAuthRepository
@@ -185,6 +187,33 @@ class SmartCaneAppController private constructor(
 
     private fun speechCaneDeviceId(): String? =
         speechCaneDeviceId(_uiState.value.currentRelation)
+
+    private fun activateNavigationRoute(route: RouteAdviceDto, deviceId: String): Boolean {
+        val sessionId = route.sessionId ?: return false
+        val bestRoute = route.bestRoute ?: return false
+        NavigationLocationService.latestRoute = route
+        NavigationLocationService.start(appContext, sessionId, deviceId)
+        announcedNavigationSteps.clear()
+        announcedTrafficWarnings.clear()
+        _uiState.update { state ->
+            state.copy(
+                navigationStatus = "active",
+                activeNavigationRoute = bestRoute,
+                alternativeNavigationRoutes = route.routes,
+                selectedRouteIndex = route.selectedRouteIndex
+            )
+        }
+        return true
+    }
+
+    private fun speakVoiceCommandResult(result: VoiceCommandDto, deviceId: String) {
+        val route = result.route
+        if (route != null && activateNavigationRoute(route, deviceId)) {
+            speakText(plannedRouteSpeech(route.voicePrompt), priority = TtsPriority.NAVIGATION)
+        } else {
+            speakText(result.voicePrompt.ifBlank { result.reply.ifBlank { "已收到语音指令" } })
+        }
+    }
 
     private val _uiState = MutableStateFlow(AppUiState(storedState = preferences.state.value))
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
@@ -1228,7 +1257,7 @@ class SmartCaneAppController private constructor(
                             voiceTranscript = result.data.transcript
                         )
                     }
-                    speakText(result.data.voicePrompt.ifBlank { "已收到语音指令" })
+                    speakVoiceCommandResult(result.data, deviceId)
                 }
                 is ApiResult.Failure -> {
                     _uiState.update { it.copy(voiceState = VoiceState.Idle, message = result.message, voiceTranscript = result.message) }
@@ -1320,21 +1349,14 @@ class SmartCaneAppController private constructor(
                     deviceId = deviceId, routePreference = _uiState.value.navigationPreference
                 )) {
                     is ApiResult.Success -> {
-                        result.data.sessionId?.let {
-                            NavigationLocationService.latestRoute = result.data
-                            NavigationLocationService.start(appContext, it, deviceId)
-                            announcedNavigationSteps.clear()
-                            announcedTrafficWarnings.clear()
-                            _uiState.update { state ->
-                                state.copy(
-                                    navigationStatus = "active",
-                                    activeNavigationRoute = result.data.bestRoute,
-                                    alternativeNavigationRoutes = result.data.routes,
-                                    selectedRouteIndex = result.data.selectedRouteIndex
-                                )
-                            }
+                        if (activateNavigationRoute(result.data, deviceId)) {
+                            speakText(
+                                plannedRouteSpeech(result.data.voicePrompt),
+                                priority = TtsPriority.NAVIGATION
+                            )
+                        } else {
+                            speakText(result.data.voicePrompt.ifBlank { "已收到路线请求" })
                         }
-                        speakText(result.data.voicePrompt.ifBlank { "\u5df2\u6536\u5230\u8def\u7ebf\u8bf7\u6c42" })
                     }
                     is ApiResult.Failure -> speakText("\u8bed\u97f3\u6307\u4ee4\u5df2\u6536\u5230\uff0c\u4f46\u540e\u7aef\u6682\u65f6\u4e0d\u53ef\u7528")
                 }
@@ -1454,7 +1476,7 @@ class SmartCaneAppController private constructor(
                 is ApiResult.Success -> {
                     val transcript = result.data.transcript.ifBlank { "\u5df2\u6536\u5230\u8bed\u97f3" }
                     _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "\u4f60\u8bf4\uff1a$transcript", voiceTranscript = transcript) }
-                    speakText(result.data.reply.ifBlank { "\u5df2\u6536\u5230\u8bed\u97f3\u6307\u4ee4" })
+                    speakVoiceCommandResult(result.data, deviceId)
                 }
                 is ApiResult.Failure -> {
                     _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "\u8bed\u97f3\u8bc6\u522b\u6682\u65f6\u4e0d\u53ef\u7528", voiceTranscript = result.message) }
@@ -1641,6 +1663,13 @@ internal fun alertSpeechForRole(
 }
 
 internal const val RISK_POINT_SPEECH_COOLDOWN_MS = 5 * 60 * 1000L
+
+internal const val ROUTE_PLANNED_CONFIRMATION = "收到，已规划好最佳路线"
+
+internal fun plannedRouteSpeech(routePrompt: String): String {
+    val details = routePrompt.trim()
+    return if (details.isBlank()) ROUTE_PLANNED_CONFIRMATION else "$ROUTE_PLANNED_CONFIRMATION。$details"
+}
 
 internal fun compactSpeechText(text: String): String {
     val normalized = text.trim()
