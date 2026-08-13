@@ -659,7 +659,11 @@ class SmartCaneAppController private constructor(
         val distanceCm = (warning.distanceM * 100).toInt().coerceAtLeast(1)
         val directionText = warning.relativeDirectionText.ifBlank { "前方" }
         val fallback = "${directionText}${distanceCm}厘米${riskLevelLabel(warning.riskLevel)}风险"
-        val text = warning.voicePrompt.ifBlank { fallback }
+        val text = hazardSpeechText(
+            riskType = warning.riskType,
+            direction = "",
+            serverText = warning.voicePrompt.ifBlank { fallback }
+        ) ?: return
         _uiState.update { it.copy(message = "附近风险点：${directionText}${distanceCm}厘米", lastSpokenText = text) }
         speakText(text, priority = TtsPriority.ROAD_RISK, requiresOnlineCane = true)
     }
@@ -908,14 +912,15 @@ class SmartCaneAppController private constructor(
         if (!shouldSpeakLocalCue(cue, deviceId)) return
         if (!seenCueIds.tryAcquire(cue.cue.id)) return
         val riskType = cue.risk.type.lowercase(Locale.US)
+        val speechText = hazardSpeechText(riskType, cue.risk.direction, cue.speech.text) ?: return
         _uiState.update {
             it.copy(
                 message = if (riskType == "fall_detected") "检测到跌倒" else "盲杖新提示",
-                voiceTranscript = cue.speech.text
+                voiceTranscript = speechText
             )
         }
         speakText(
-            cue.speech.text,
+            speechText,
             priority = if (riskType == "fall_detected") TtsPriority.EMERGENCY else hardwareRiskTtsPriority(riskType),
             bypassTextCooldown = true,
             requiresOnlineCane = true
@@ -1663,6 +1668,26 @@ internal fun alertSpeechForRole(
 }
 
 internal const val RISK_POINT_SPEECH_COOLDOWN_MS = 5 * 60 * 1000L
+internal const val FRONT_OBSTACLE_SPEECH = "前方障碍，请减速"
+
+internal fun hazardSpeechText(riskType: String, direction: String, serverText: String): String? {
+    val normalizedType = riskType.trim().lowercase(Locale.US)
+    val normalizedDirection = direction.trim().lowercase(Locale.US)
+    val text = serverText.trim()
+    return when {
+        normalizedType == "front_obstacle" -> FRONT_OBSTACLE_SPEECH
+        normalizedType == "ground_step_up" -> FRONT_OBSTACLE_SPEECH
+        normalizedType == "ground_step" && (
+            normalizedDirection == "down" || text.contains("下台阶") || text.contains("落差") || text.contains("坑洼")
+        ) -> null
+        normalizedType == "ground_step" -> FRONT_OBSTACLE_SPEECH
+        normalizedType in setOf("ground_drop", "ground_step_down", "down_no_target") -> null
+        normalizedType == "left_obstacle" -> "左侧有障碍"
+        normalizedType == "right_obstacle" -> "右侧有障碍"
+        text.isBlank() -> null
+        else -> text
+    }
+}
 
 internal const val ROUTE_PLANNED_CONFIRMATION = "收到，已规划好最佳路线"
 

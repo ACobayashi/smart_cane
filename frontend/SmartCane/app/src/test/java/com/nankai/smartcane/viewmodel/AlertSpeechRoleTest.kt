@@ -93,6 +93,17 @@ class AlertSpeechRoleTest {
     }
 
     @Test
+    fun hazardSpeechUsesOneFrontObstaclePromptAndSilencesDownwardGroundRisks() {
+        assertEquals(FRONT_OBSTACLE_SPEECH, hazardSpeechText("front_obstacle", "turn_left", "前方障碍，请向左避让"))
+        assertEquals(FRONT_OBSTACLE_SPEECH, hazardSpeechText("front_obstacle", "turn_right", "前方障碍，请向右避让"))
+        assertEquals(FRONT_OBSTACLE_SPEECH, hazardSpeechText("ground_step", "up", "前方上台阶，注意抬脚"))
+        assertNull(hazardSpeechText("ground_step", "down", "前方下台阶，请减速"))
+        assertNull(hazardSpeechText("ground_drop", "down", "前方有下台阶或落差，请停下"))
+        assertEquals("左侧有障碍", hazardSpeechText("left_obstacle", "keep_right", "左侧有障碍，请向右避让"))
+        assertEquals("右侧有障碍", hazardSpeechText("right_obstacle", "keep_left", "右侧有障碍，请向左避让"))
+    }
+
+    @Test
     fun ordinaryAlertsCannotBypassTheLocalCueStream() {
         assertNull(alertSpeechForRole("blind", "prolonged_obstacle", "旧提示", "旧状态", false))
         assertNull(alertSpeechForRole("blind", "front_obstacle", "旧提示", "旧状态", false, 320))

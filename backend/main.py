@@ -1220,11 +1220,20 @@ def extra_message(item: dict[str, Any]) -> Optional[str]:
 
 
 def legacy_event_message(item: dict[str, Any]) -> str:
+    risk_type = str(item.get("risk_type") or "none")
+    direction = str(item.get("direction") or "")
+    if risk_type == "front_obstacle" or (
+        risk_type in {"ground_step", "ground_step_up"} and direction != "down"
+    ):
+        return FRONT_OBSTACLE_SPEECH
+    if risk_type in {"ground_drop", "ground_step_down", "down_no_target"} or (
+        risk_type == "ground_step" and direction == "down"
+    ):
+        return ""
     custom_message = extra_message(item)
     if custom_message:
         return custom_message.removeprefix("message=")
 
-    risk_type = str(item.get("risk_type") or "none")
     distance = event_distance_mm(item)
     cm_text = f"{int(round(distance / 10))} \u5398\u7c73" if distance is not None else "\u672a\u77e5\u8ddd\u79bb"
     if risk_type == "sos":
@@ -1237,16 +1246,8 @@ def legacy_event_message(item: dict[str, Any]) -> str:
         return "前方障碍持续"
     if risk_type == "approaching_obstacle":
         return "前方障碍正在接近"
-    if risk_type == "ground_drop":
-        return "前方有落差"
-    if risk_type == "ground_step_down":
-        return "前方下台阶"
-    if risk_type in {"ground_step", "ground_step_up"}:
-        return "前方上台阶"
     if risk_type == "down_sensor_unavailable":
         return "下视传感器异常"
-    if risk_type == "front_obstacle":
-        return f"前方{cm_text}有障碍"
     if risk_type == "left_obstacle":
         return f"左侧{cm_text}有障碍"
     if risk_type == "right_obstacle":
@@ -1409,29 +1410,24 @@ def mobile_event_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 
 LOCAL_CUE_FRESHNESS_SECONDS = 3
+FRONT_OBSTACLE_SPEECH = "前方障碍，请减速"
 
 
 def local_cue_speech(item: dict[str, Any]) -> str:
     risk_type = str(item.get("risk_type") or "")
     direction = str(item.get("direction") or "")
     if risk_type == "front_obstacle":
-        return {
-            "stop": "前方障碍，请停下",
-            "turn_left": "前方障碍，请向左避让",
-            "turn_right": "前方障碍，请向右避让",
-        }.get(direction, "前方有障碍，请减速")
+        return FRONT_OBSTACLE_SPEECH
     if risk_type == "left_obstacle":
         return "左侧有障碍，请向右避让"
     if risk_type == "right_obstacle":
         return "右侧有障碍，请向左避让"
     if risk_type in {"ground_step", "ground_step_up"} and direction == "up":
-        return "前方上台阶，注意抬脚"
+        return FRONT_OBSTACLE_SPEECH
     if risk_type in {"ground_step", "ground_step_down"} and direction == "down":
-        return "前方下台阶，请减速"
-    if risk_type == "ground_drop":
-        return "前方落差，请停下"
-    if risk_type == "down_no_target":
-        return "前方落差，请停下确认"
+        return ""
+    if risk_type in {"ground_drop", "down_no_target"}:
+        return ""
     if risk_type == "down_sensor_unavailable":
         return "下视传感器异常，请停下检查"
     if risk_type == "fall_detected":
@@ -3361,21 +3357,21 @@ def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, 
     if risk_type == "approaching_obstacle":
         return "前方障碍正在接近"
     if risk_type == "ground_step" and direction == "up":
-        return "前方上台阶"
+        return FRONT_OBSTACLE_SPEECH
     if risk_type == "ground_step" and direction == "down":
-        return "前方下台阶"
+        return ""
     if risk_type == "ground_drop":
-        return "前方有落差"
+        return ""
     if risk_type == "ground_step_down":
-        return "前方下台阶"
+        return ""
     if risk_type in {"ground_step", "ground_step_up"}:
-        return "前方上台阶"
+        return FRONT_OBSTACLE_SPEECH
     if risk_type == "down_no_target":
         return ""
     if risk_type == "down_sensor_unavailable":
         return "下视传感器异常"
     if risk_type == "front_obstacle":
-        return f"前方{frame.front_cm or '-'}厘米有障碍"
+        return FRONT_OBSTACLE_SPEECH
     if risk_type == "left_obstacle":
         return f"左侧{frame.left_cm or '-'}厘米有障碍"
     if risk_type == "right_obstacle":
@@ -3816,16 +3812,16 @@ def ai_enabled() -> bool:
 def fallback_advice(req: AdviceRequest, history: dict[str, Any]) -> str:
     if req.risk_type == "sos":
         return "求助已发送，请安全等候"
-    if req.risk_type in {"ground_drop", "down_no_target"}:
-        return "前方有落差"
-    if req.risk_type in {"ground_step", "ground_step_down"}:
-        return "前方下台阶"
+    if req.risk_type in {"ground_drop", "down_no_target", "ground_step_down"}:
+        return ""
     if req.risk_type == "ground_step_up":
-        return "前方上台阶"
+        return FRONT_OBSTACLE_SPEECH
+    if req.risk_type == "ground_step":
+        return FRONT_OBSTACLE_SPEECH
     if req.risk_type == "down_sensor_unavailable":
         return "下视传感器异常"
     if req.risk_type == "front_obstacle":
-        return f"前方{req.front_cm or '-'}厘米有障碍"
+        return FRONT_OBSTACLE_SPEECH
     if req.risk_type == "left_obstacle":
         return f"左侧{req.left_cm or '-'}厘米有障碍"
     if req.risk_type == "right_obstacle":
@@ -5517,12 +5513,15 @@ def nearby_warning_text(distance_m: float, risk_level: str, direction: str, even
     saved_prompt = str(event.get("voicePrompt") or event.get("voice_prompt") or event.get("message") or "")
     if risk_type == "sos":
         return f"{direction_text}{distance_text}米有求助风险"
-    if risk_type == "ground_step_up" or (risk_type == "ground_step" and "上台阶" in saved_prompt):
-        return "前方有障碍或上台阶，请停下"
+    if risk_type == "ground_step_up" or (
+        risk_type == "ground_step"
+        and ("上台阶" in saved_prompt or saved_prompt == FRONT_OBSTACLE_SPEECH)
+    ):
+        return FRONT_OBSTACLE_SPEECH
     if risk_type in {"ground_drop", "ground_step", "ground_step_down", "down_no_target", "down_sensor_unavailable"}:
-        return "前方有下台阶或落差，请停下"
+        return ""
     if risk_type == "front_obstacle":
-        return "前方有障碍或上台阶，请停下"
+        return FRONT_OBSTACLE_SPEECH
     if risk_type in {"left_obstacle", "right_obstacle", "prolonged_obstacle", "approaching_obstacle"}:
         if report_count >= LOW_OBSTACLE_PROMOTION_COUNT or risk_level in {"medium", "high"}:
             return f"{direction_text}{distance_text}米有障碍"
@@ -5578,6 +5577,8 @@ def nearby_risk_warning(
             if abs(delta) > fov_deg / 2.0:
                 continue
             direction = relative_direction(delta)
+        if not nearby_warning_text(distance_m, level, direction, event):
+            continue
         confidence = float(event.get("confidence") or 0.0)
         event_id = int(event.get("id") or 0)
         candidates.append((rank, confidence, -distance_m, event_id, event, direction, delta))

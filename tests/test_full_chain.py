@@ -94,14 +94,14 @@ def test_front_warns_at_120cm_and_firmware_ground_direction_is_preserved():
     ), history)
     assert up["risk_type"] == "ground_step"
     assert up["direction"] == "up"
-    assert "上台阶" in up["voice_prompt"]
+    assert up["voice_prompt"] == "前方障碍，请减速"
     down = main.analyze_sensor_frame(frame(
         68, risk_type="ground_step", direction="down", compensated_down_cm=68,
         ground_baseline_cm=55, height_delta_cm=13, ground_state="GROUND_STEP_DOWN"
     ), history)
     assert down["risk_type"] == "ground_step"
     assert down["direction"] == "down"
-    assert "下台阶" in down["voice_prompt"]
+    assert down["voice_prompt"] == ""
     drop = main.analyze_sensor_frame(frame(
         86, risk_type="ground_drop", direction="down", compensated_down_cm=86,
         ground_baseline_cm=55, height_delta_cm=31, ground_state="GROUND_DROP"
@@ -821,7 +821,7 @@ def test_low_obstacle_second_report_promotes_to_history_warning(tmp_path, monkey
     warning = main.nearby_risk_warning(lat=31.0, lng=121.00002, radius=50, min_level="medium", exclude_device_id=None, bearing_deg=None)
     assert warning["found"] is True
     assert warning["warning"]["riskLevel"] == "medium"
-    assert "有障碍" in warning["warning"]["voicePrompt"]
+    assert warning["warning"]["voicePrompt"] == "前方障碍，请减速"
     assert len(warning["warning"]["voicePrompt"]) <= 15
 
 
@@ -836,8 +836,7 @@ def test_realtime_voice_templates_only_describe_conditions_and_confirmed_fall():
         main.voice_prompt_for_risk(frame(55, front_cm=35), "front_obstacle", "high", "stop"),
         main.voice_prompt_for_risk(frame(55), "ground_drop", "high", "down"),
     ]
-    forbidden = ("请", "保持距离", "停下", "探测", "恢复姿态", "立即减速", "重新探测")
-    assert all(not any(word in prompt for word in forbidden) for prompt in realtime_prompts)
+    assert realtime_prompts == ["用户发起紧急求助", "前方障碍，请减速", ""]
     assert main.legacy_event_message({"risk_type": "sos"}) == "用户发起紧急求助"
 
 
@@ -847,10 +846,10 @@ def test_realtime_obstacles_steps_and_drop_only_describe_the_condition():
     down_step = main.voice_prompt_for_risk(frame(68), "ground_step", "high", "down")
     drop = main.voice_prompt_for_risk(frame(86), "ground_drop", "high", "down")
 
-    assert front == "前方35厘米有障碍"
-    assert up_step == "前方上台阶"
-    assert down_step == "前方下台阶"
-    assert drop == "前方有落差"
+    assert front == "前方障碍，请减速"
+    assert up_step == "前方障碍，请减速"
+    assert down_step == ""
+    assert drop == ""
 
     historical_up = main.nearby_warning_text(
         8.0, "high", "front", {"riskType": "ground_step", "voicePrompt": up_step}
@@ -858,8 +857,8 @@ def test_realtime_obstacles_steps_and_drop_only_describe_the_condition():
     historical_down = main.nearby_warning_text(
         8.0, "high", "front", {"riskType": "ground_step", "voicePrompt": down_step}
     )
-    assert historical_up == "前方有障碍或上台阶，请停下"
-    assert historical_down == "前方有下台阶或落差，请停下"
+    assert historical_up == "前方障碍，请减速"
+    assert historical_down == ""
 
 
 def test_obstacle_advice_never_suggests_lateral_avoidance():
@@ -875,8 +874,8 @@ def test_obstacle_advice_never_suggests_lateral_avoidance():
     )
     history = {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": "low"}
 
-    assert main.fallback_advice(request, history) == "前方120厘米有障碍"
-    assert main.deep_advice(request, {"level": "high"}) == "前方120厘米有障碍"
+    assert main.fallback_advice(request, history) == "前方障碍，请减速"
+    assert main.deep_advice(request, {"level": "high"}) == "前方障碍，请减速"
     assert "向左" not in main.fallback_advice(request, history)
     assert "向右" not in main.deep_advice(request, {"level": "high"})
 
@@ -939,7 +938,8 @@ def test_local_cue_string_metadata_is_parsed_and_deduplicated(tmp_path, monkeypa
     assert len(cues["cues"]) == 1
     assert cues["cues"][0]["eventKind"] == "local_cue"
     assert cues["cues"][0]["cue"]["id"] == "cue-device-1"
-    assert cues["cues"][0]["speech"]["text"] == "前方下台阶，请减速"
+    assert cues["cues"][0]["speech"]["shouldSpeak"] is False
+    assert cues["cues"][0]["speech"]["text"] == ""
 
 
 def test_local_cue_repeat_and_non_cue_events_never_speak(tmp_path, monkeypatch):
