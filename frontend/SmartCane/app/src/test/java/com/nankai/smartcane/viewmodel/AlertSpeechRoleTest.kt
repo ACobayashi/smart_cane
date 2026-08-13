@@ -5,6 +5,9 @@ import com.nankai.smartcane.data.network.LocalCueFallDto
 import com.nankai.smartcane.data.network.LocalCueMetadataDto
 import com.nankai.smartcane.data.network.LocalCueRiskDto
 import com.nankai.smartcane.data.network.LocalCueSpeechDto
+import com.nankai.smartcane.data.local.DemoData
+import com.nankai.smartcane.data.model.CareRelation
+import com.nankai.smartcane.data.model.RelationStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -103,6 +106,43 @@ class AlertSpeechRoleTest {
         assertEquals(false, cooldown.tryAcquire(42, 300_999L))
         assertEquals(true, cooldown.tryAcquire(42, 301_000L))
         assertEquals(true, cooldown.tryAcquire(43, 301_001L))
+    }
+
+    @Test
+    fun startupRiskPointBecomesSilentBaselineUntilUserLeavesAndReturns() {
+        val gate = RiskPointApproachGate()
+
+        assertFalse(gate.shouldSpeak(42))
+        assertFalse(gate.shouldSpeak(42))
+        assertFalse(gate.shouldSpeak(null))
+        assertTrue(gate.shouldSpeak(42))
+        assertTrue(gate.shouldSpeak(43))
+    }
+
+    @Test
+    fun speechRequiresAnActiveOnlineBoundCane() {
+        val active = CareRelation(
+            relationId = "relation-001",
+            blindUser = DemoData.blindUser,
+            companionUser = DemoData.companionUser,
+            caneDevice = DemoData.defaultCane,
+            status = RelationStatus.Active,
+            requestedAtMillis = 1L,
+            updatedAtMillis = 1L
+        )
+
+        assertEquals(active.caneDevice.deviceId, speechCaneDeviceId(active))
+        assertNull(speechCaneDeviceId(active.copy(caneDevice = active.caneDevice.copy(online = false))))
+        assertNull(speechCaneDeviceId(active.copy(status = RelationStatus.Removed)))
+        assertNull(speechCaneDeviceId(null))
+    }
+
+    @Test
+    fun staleHeartbeatCannotEnableCaneSpeech() {
+        val now = 1_786_521_610_000L
+
+        assertTrue(isRecentDeviceHeartbeat("2026-08-12T08:00:05Z", nowMillis = now))
+        assertFalse(isRecentDeviceHeartbeat("2026-08-12T07:59:00Z", nowMillis = now))
     }
 
     @Test

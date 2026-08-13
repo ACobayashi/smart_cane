@@ -125,13 +125,16 @@ fun SmartCaneRootApp() {
                 controller.startAlertPolling()
             }
             AppRoute.BlindHome, AppRoute.BlindNavigation -> {
+                controller.startBlindRequestPolling()
                 controller.startAlertPolling()
                 controller.startBlindRiskProximityMonitoring()
             }
             else -> Unit
         }
         onDispose {
-            if (route is AppRoute.BlindPairing || route is AppRoute.CompanionPairing) controller.stopPairingPolling()
+            if (route is AppRoute.BlindPairing || route is AppRoute.BlindHome || route is AppRoute.BlindNavigation || route is AppRoute.CompanionPairing) {
+                controller.stopPairingPolling()
+            }
             if (route is AppRoute.BlindHome || route is AppRoute.BlindNavigation) controller.stopBlindRiskProximityMonitoring()
         }
     }

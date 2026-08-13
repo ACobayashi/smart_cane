@@ -106,6 +106,7 @@ class SmartCaneAppController private constructor(
     private val seenCueIds = CueIdSpeechGate()
     private val spokenEventIds = EventSpeechGate()
     private val nearbyRiskSpeechCooldown = RiskPointSpeechCooldown()
+    private val nearbyRiskApproachGate = RiskPointApproachGate()
     private var selfSosReplayDemoEnabled = true
     private var selfSosReplayStateMachine = SelfSosReplayStateMachine()
     private var navigationReceiverRegistered = false
@@ -174,6 +175,16 @@ class SmartCaneAppController private constructor(
         _uiState.value.currentRelation?.caneDevice?.deviceId
             ?: DemoData.defaultCane.deviceId.takeIf { _uiState.value.currentUser?.isDemo == true }
             ?: ""
+
+    private fun boundCaneDeviceId(): String =
+        _uiState.value.currentRelation
+            ?.takeIf { it.status == RelationStatus.Active }
+            ?.caneDevice?.deviceId
+            ?.trim()
+            .orEmpty()
+
+    private fun speechCaneDeviceId(): String? =
+        speechCaneDeviceId(_uiState.value.currentRelation)
 
     private val _uiState = MutableStateFlow(AppUiState(storedState = preferences.state.value))
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
@@ -384,7 +395,7 @@ class SmartCaneAppController private constructor(
         val user = _uiState.value.currentUser ?: return
         scope.launch {
             val result = pairingRepository.getCurrentRelation(user)
-            val relation = result.getOrNull()
+            val relation = withLiveCaneState(result.getOrNull())
             _uiState.update {
                 it.copy(
                     currentRelation = relation,
@@ -399,7 +410,7 @@ class SmartCaneAppController private constructor(
         val user = _uiState.value.currentUser ?: return
         blindPollingJob = scope.launch {
             while (true) {
-                val relation = pairingRepository.getCurrentRelation(user).getOrNull()
+                val relation = withLiveCaneState(pairingRepository.getCurrentRelation(user).getOrNull())
                 if (relation != null) {
                     _uiState.update { it.copy(currentRelation = relation, pendingRequest = null, pairingStatus = PairingFlowStatus.Connected) }
                 } else {
@@ -428,7 +439,7 @@ class SmartCaneAppController private constructor(
         companionPollingJob = scope.launch {
             while (true) {
                 val relationResult = pairingRepository.getCurrentRelation(user)
-                val relation = relationResult.getOrNull()
+                val relation = withLiveCaneState(relationResult.getOrNull())
                 if (relation != null) {
                     _uiState.update { it.copy(currentRelation = relation, pairingStatus = PairingFlowStatus.Connected, pendingRequest = null, message = "关联成功") }
                 } else {
@@ -451,6 +462,26 @@ class SmartCaneAppController private constructor(
                 delay(4_000L)
             }
         }
+    }
+
+    private suspend fun withLiveCaneState(relation: CareRelation?): CareRelation? {
+        if (relation == null || relation.status != RelationStatus.Active) return relation
+        val deviceId = relation.caneDevice.deviceId.trim()
+        if (deviceId.isBlank()) return relation.copy(
+            caneDevice = relation.caneDevice.copy(online = false, lastSeenText = "未绑定设备")
+        )
+        val online = when (val result = SmartCaneApiClient.getLatestDeviceState(deviceId)) {
+            is ApiResult.Success -> result.data.found &&
+                result.data.state?.online == true &&
+                isRecentDeviceHeartbeat(result.data.state.updatedAt)
+            is ApiResult.Failure -> false
+        }
+        return relation.copy(
+            caneDevice = relation.caneDevice.copy(
+                online = online,
+                lastSeenText = if (online) "刚刚" else "设备离线"
+            )
+        )
     }
 
     fun stopPairingPolling() {
@@ -484,8 +515,8 @@ class SmartCaneAppController private constructor(
                     continue
                 }
 
-                val deviceId = currentCaneDeviceId()
-                if (deviceId.isBlank()) {
+                val deviceId = speechCaneDeviceId()
+                if (deviceId == null) {
                     delay(6_000L)
                     continue
                 }
@@ -508,7 +539,12 @@ class SmartCaneAppController private constructor(
                     bearingDeg = location.bearing.takeIf { location.hasBearing() },
                     excludeDeviceId = deviceId
                 )) {
-                    is ApiResult.Success -> result.data?.let { maybeSpeakNearbyRiskWarning(it) }
+                    is ApiResult.Success -> {
+                        val warning = result.data
+                        if (nearbyRiskApproachGate.shouldSpeak(warning?.eventId)) {
+                            warning?.let { maybeSpeakNearbyRiskWarning(it) }
+                        }
+                    }
                     is ApiResult.Failure -> Unit
                 }
                 delay(6_000L)
@@ -519,6 +555,7 @@ class SmartCaneAppController private constructor(
     fun stopBlindRiskProximityMonitoring() {
         blindRiskMonitorJob?.cancel()
         blindRiskMonitorJob = null
+        nearbyRiskApproachGate.reset()
         stopPhoneLocationUpdates()
     }
 
@@ -535,7 +572,7 @@ class SmartCaneAppController private constructor(
     private fun maybeSpeakNearbyRiskWarning(warning: NearbyRiskWarningDto) {
         if (isNavigationInProgress(_uiState.value.navigationStatus)) return
         if (activeTtsPriority?.rank?.let { it > TtsPriority.ROAD_RISK.rank } == true) return
-        val currentDeviceId = currentCaneDeviceId().trim()
+        val currentDeviceId = speechCaneDeviceId() ?: return
         val isOwnFallRisk = currentDeviceId.isNotEmpty() &&
             warning.riskType == "fall_detected" &&
             warning.sourceDevices.any { sourceDevice -> sourceDevice.trim() == currentDeviceId }
@@ -655,7 +692,11 @@ class SmartCaneAppController private constructor(
                     null -> state.currentUser?.role?.apiValue ?: "blind"
                 }
                 val userId = state.currentUser?.account ?: state.currentUser?.userId
-                val deviceId = currentCaneDeviceId().ifBlank { null }
+                val deviceId = boundCaneDeviceId().ifBlank { null }
+                if (deviceId == null) {
+                    delay(1_000L)
+                    continue
+                }
                 when (val result = SmartCaneApiClient.getLatestAlerts(role, userId, deviceId, lastAlertId)) {
                     is ApiResult.Success -> {
                         val newAlerts = result.data.filter { it.id > lastAlertId }.sortedBy { it.id }
@@ -729,16 +770,47 @@ class SmartCaneAppController private constructor(
                     continue
                 }
 
-                val deviceId = currentCaneDeviceId()
+                val deviceId = boundCaneDeviceId()
                 if (deviceId.isBlank()) {
+                    _uiState.update { it.copy(fallPending = false, fallStage = null) }
                     delay(1_000L)
                     continue
                 }
                 when (val result = SmartCaneApiClient.getLatestDeviceState(deviceId)) {
-                    is ApiResult.Success -> result.data.state?.let {
-                        _uiState.update { state -> state.copy(fallPending = it.fallPending, fallStage = it.fallStage) }
+                    is ApiResult.Success -> {
+                        val deviceState = result.data.state
+                        val online = result.data.found &&
+                            deviceState?.online == true &&
+                            isRecentDeviceHeartbeat(deviceState.updatedAt)
+                        _uiState.update { state ->
+                            val relation = state.currentRelation
+                            val updatedRelation = if (relation?.caneDevice?.deviceId == deviceId) {
+                                relation.copy(
+                                    caneDevice = relation.caneDevice.copy(
+                                        online = online,
+                                        lastSeenText = if (online) "刚刚" else "设备离线"
+                                    )
+                                )
+                            } else relation
+                            state.copy(
+                                currentRelation = updatedRelation,
+                                fallPending = if (online) deviceState?.fallPending == true else false,
+                                fallStage = if (online) deviceState?.fallStage else null
+                            )
+                        }
                     }
-                    is ApiResult.Failure -> Unit
+                    is ApiResult.Failure -> {
+                        _uiState.update { state ->
+                            val relation = state.currentRelation
+                            state.copy(
+                                currentRelation = if (relation?.caneDevice?.deviceId == deviceId) {
+                                    relation.copy(caneDevice = relation.caneDevice.copy(online = false, lastSeenText = "连接不可用"))
+                                } else relation,
+                                fallPending = false,
+                                fallStage = null
+                            )
+                        }
+                    }
                 }
                 delay(1_000L)
             }
@@ -756,8 +828,8 @@ class SmartCaneAppController private constructor(
             while (true) {
                 val state = _uiState.value
                 val role = if (state.currentMode == AppMode.Companion) "companion" else "blind"
-                val deviceId = currentCaneDeviceId()
-                if (deviceId.isBlank()) {
+                val deviceId = speechCaneDeviceId()
+                if (deviceId == null) {
                     delay(1_000L)
                     continue
                 }
@@ -780,7 +852,7 @@ class SmartCaneAppController private constructor(
                     role = role,
                     shouldContinue = {
                         localCueStreamJob?.isActive == true &&
-                            currentCaneDeviceId() == deviceId &&
+                            speechCaneDeviceId() == deviceId &&
                             (if (_uiState.value.currentMode == AppMode.Companion) "companion" else "blind") == role
                     },
                     onCue = { cue ->
@@ -803,6 +875,7 @@ class SmartCaneAppController private constructor(
     }
 
     private fun handleLocalCue(cue: LocalCueDto, deviceId: String) {
+        if (speechCaneDeviceId() != deviceId) return
         if (!shouldSpeakLocalCue(cue, deviceId)) return
         if (!seenCueIds.tryAcquire(cue.cue.id)) return
         val riskType = cue.risk.type.lowercase(Locale.US)
@@ -1575,6 +1648,31 @@ internal class RiskPointSpeechCooldown(
     }
 }
 
+internal class RiskPointApproachGate {
+    private var initialized = false
+    private var currentRiskPointId: Int? = null
+
+    fun shouldSpeak(riskPointId: Int?): Boolean {
+        if (!initialized) {
+            initialized = true
+            currentRiskPointId = riskPointId
+            return false
+        }
+        if (riskPointId == null) {
+            currentRiskPointId = null
+            return false
+        }
+        if (currentRiskPointId == riskPointId) return false
+        currentRiskPointId = riskPointId
+        return true
+    }
+
+    fun reset() {
+        initialized = false
+        currentRiskPointId = null
+    }
+}
+
 internal class EventSpeechGate(
     private val retainedEventCount: Int = 512
 ) {
@@ -1612,6 +1710,26 @@ internal class CueIdSpeechGate(private val retainedCueCount: Int = 512) {
 
 internal const val DEVICE_EVENT_FRESHNESS_SECONDS = 10L
 internal const val LOCAL_CUE_FRESHNESS_SECONDS = 3L
+internal const val DEVICE_HEARTBEAT_FRESHNESS_SECONDS = 15L
+
+internal fun speechCaneDeviceId(relation: CareRelation?): String? =
+    relation
+        ?.takeIf { it.status == RelationStatus.Active && it.caneDevice.online }
+        ?.caneDevice?.deviceId
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+
+internal fun isRecentDeviceHeartbeat(
+    updatedAt: String,
+    nowMillis: Long = System.currentTimeMillis(),
+    freshnessSeconds: Long = DEVICE_HEARTBEAT_FRESHNESS_SECONDS
+): Boolean = runCatching {
+    val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).apply { isLenient = false }
+    val withoutFraction = updatedAt.replace(Regex("\\.\\d+(Z|[+-]\\d{2}:\\d{2})$"), "$1")
+    val updatedAtMillis = parser.parse(withoutFraction)?.time ?: return@runCatching false
+    val ageMillis = nowMillis - updatedAtMillis
+    ageMillis in 0..(freshnessSeconds * 1_000L)
+}.getOrDefault(false)
 
 internal fun isFreshDeviceEvent(
     eventTimestamp: String,

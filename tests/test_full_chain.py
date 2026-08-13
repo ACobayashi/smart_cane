@@ -691,6 +691,28 @@ def test_expired_sos_stays_historical_but_is_not_a_current_alert(tmp_path, monke
     assert any(point["riskType"] == "sos" for point in points)
 
 
+def test_old_event_fallback_does_not_report_device_online(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "offline_fallback.db")
+    main.init_db()
+    old_timestamp = (main.datetime.now(main.timezone.utc) - main.timedelta(minutes=10)).isoformat(timespec="seconds")
+    stored = main.store_event(main.EventCreate(
+        device_id="cane_offline",
+        lat=31.0,
+        lng=121.0,
+        risk_type="ground_drop",
+        risk_level="high",
+        timestamp=old_timestamp,
+        extra_json={"source": "esp32c5"},
+    ))
+    with main.db() as conn:
+        conn.execute("DELETE FROM device_state WHERE device_id = ?", ("cane_offline",))
+
+    state = main.latest_device_state(device_id="cane_offline")["state"]
+
+    assert stored["timestamp"] == old_timestamp
+    assert state["online"] is False
+
+
 def test_recent_sos_is_still_delivered_as_a_current_alert(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "recent_sos.db")
     main.init_db()

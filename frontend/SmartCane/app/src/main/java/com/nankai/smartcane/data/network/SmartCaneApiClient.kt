@@ -1034,7 +1034,7 @@ object SmartCaneApiClient {
     private fun JSONObject.toDeviceStateDto(): DeviceStateDto = DeviceStateDto(
         deviceId = optString("deviceId", optString("device_id", "")),
         updatedAt = optString("updatedAt", optString("updated_at", "")),
-        online = optBoolean("online", true),
+        online = optBoolean("online", false),
         latitude = nullableDouble("latitude") ?: nullableDouble("lat"),
         longitude = nullableDouble("longitude") ?: nullableDouble("lng"),
         battery = nullableInt("battery"),

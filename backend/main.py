@@ -4456,6 +4456,11 @@ def latest_device_state(device_id: Optional[str] = Query(None, min_length=1)) ->
     if not event:
         return {"success": True, "found": False, "state": None}
     item = mobile_event_dict(event)
+    last_seen = parse_time(item.get("timestamp"))
+    online = bool(
+        last_seen
+        and (datetime.now(timezone.utc) - last_seen).total_seconds() <= DEVICE_OFFLINE_SECONDS
+    )
     risk_type, risk_level, risk_score, voice_prompt = current_alert_state(
         item.get("riskType"),
         item.get("riskLevel"),
@@ -4472,7 +4477,7 @@ def latest_device_state(device_id: Optional[str] = Query(None, min_length=1)) ->
             "deviceName": item.get("deviceName") or item.get("device_id") or item.get("deviceId"),
             "device_name": item.get("deviceName") or item.get("device_id") or item.get("deviceId"),
             "updatedAt": item.get("timestamp"),
-            "online": True,
+            "online": online,
             "latitude": item.get("latitude"),
             "longitude": item.get("longitude"),
             "battery": None,

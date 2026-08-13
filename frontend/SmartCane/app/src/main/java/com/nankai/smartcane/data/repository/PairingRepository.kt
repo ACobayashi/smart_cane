@@ -254,8 +254,8 @@ private fun PairingUserDto.toUserProfile(role: UserRole): UserProfile = UserProf
 private fun PairingDeviceDto.toCaneDevice(): CaneDevice = CaneDevice(
     deviceId = deviceId,
     name = name.ifBlank { deviceId },
-    online = true,
-    lastSeenText = "刚刚"
+    online = false,
+    lastSeenText = "等待设备连接"
 )
 
 private fun String.toRelationStatus(): RelationStatus = when (lowercase()) {
@@ -270,5 +270,4 @@ private fun String.toRelationStatus(): RelationStatus = when (lowercase()) {
 private fun String.toEpochMillisOrNowPlusTenMinutes(): Long = runCatching { Instant.parse(this).toEpochMilli() }
     .recoverCatching { OffsetDateTime.parse(this).toInstant().toEpochMilli() }
     .getOrElse { System.currentTimeMillis() + 10 * 60 * 1000L }
-
 
