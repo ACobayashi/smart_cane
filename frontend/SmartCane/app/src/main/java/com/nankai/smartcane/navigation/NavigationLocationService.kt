@@ -26,6 +26,7 @@ class NavigationLocationService : Service(), LocationListener {
     private var listening = false
     private var lastUploadAt = 0L
     private var replanInProgress = false
+    private var nextReplanAllowedAt = 0L
     private var lastAcceptedLocation: Location? = null
     private val executor = Executors.newSingleThreadExecutor()
 
@@ -108,12 +109,13 @@ class NavigationLocationService : Service(), LocationListener {
             if (update.arrived) {
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit().clear().apply()
                 stopSelf()
-            } else if (update.shouldReplan && !replanInProgress) {
+            } else if (update.shouldReplan && !replanInProgress && System.currentTimeMillis() >= nextReplanAllowedAt) {
                 replanInProgress = true
                 sendBroadcast(Intent(ACTION_REPLANNING).setPackage(packageName).putExtra(EXTRA_SESSION_ID, activeSession))
                 val route = SmartCaneApiClient.replanNavigationSession(activeSession)
                 latestRoute = route
                 replanInProgress = false
+                nextReplanAllowedAt = if (route == null) System.currentTimeMillis() + REPLAN_RETRY_DELAY_MS else 0L
                 sendBroadcast(Intent(ACTION_REPLANNED).setPackage(packageName)
                     .putExtra(EXTRA_SESSION_ID, activeSession)
                     .putExtra(EXTRA_REPLAN_SUCCESS, route != null)
@@ -211,6 +213,7 @@ class NavigationLocationService : Service(), LocationListener {
         private const val KEY_DEVICE_ID = "device_id"
         private const val CHANNEL_ID = "navigation_location"
         private const val NOTIFICATION_ID = 2001
+        private const val REPLAN_RETRY_DELAY_MS = 30_000L
 
         fun start(context: Context, sessionId: String, deviceId: String) {
             ContextCompat.startForegroundService(context, Intent(context, NavigationLocationService::class.java)

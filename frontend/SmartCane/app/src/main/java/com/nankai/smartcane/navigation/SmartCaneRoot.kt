@@ -54,7 +54,6 @@ import com.nankai.smartcane.data.model.RelationStatus
 import com.nankai.smartcane.data.network.EmergencyAlertDto
 import com.nankai.smartcane.ui.auth.LoginScreen
 import com.nankai.smartcane.ui.blind.BlindHomeScreen
-import com.nankai.smartcane.ui.blind.BlindNavigationScreen
 import com.nankai.smartcane.ui.companion.CompanionHomeScreen
 import com.nankai.smartcane.ui.components.SmartBg
 import com.nankai.smartcane.ui.components.SmartTeal
@@ -93,14 +92,6 @@ fun SmartCaneRootApp() {
         }
     }
 
-    LaunchedEffect(uiState.navigationStatus) {
-        if (uiState.navigationStatus in setOf("active", "replanning") && uiState.activeNavigationRoute != null) {
-            route = AppRoute.BlindNavigation
-        } else if (uiState.navigationStatus == "arrived" && route is AppRoute.BlindNavigation) {
-            route = AppRoute.BlindHome
-        }
-    }
-
     LaunchedEffect(route) {
         if (route is AppRoute.BlindHome && !hasSmartCaneLocationPermission(context)) {
             locationPermissionLauncher.launch(
@@ -124,7 +115,7 @@ fun SmartCaneRootApp() {
                 controller.startCompanionRelationPolling()
                 controller.startAlertPolling()
             }
-            AppRoute.BlindHome, AppRoute.BlindNavigation -> {
+            AppRoute.BlindHome -> {
                 controller.startBlindRequestPolling()
                 controller.startAlertPolling()
                 controller.startBlindRiskProximityMonitoring()
@@ -132,10 +123,10 @@ fun SmartCaneRootApp() {
             else -> Unit
         }
         onDispose {
-            if (route is AppRoute.BlindPairing || route is AppRoute.BlindHome || route is AppRoute.BlindNavigation || route is AppRoute.CompanionPairing) {
+            if (route is AppRoute.BlindPairing || route is AppRoute.BlindHome || route is AppRoute.CompanionPairing) {
                 controller.stopPairingPolling()
             }
-            if (route is AppRoute.BlindHome || route is AppRoute.BlindNavigation) controller.stopBlindRiskProximityMonitoring()
+            if (route is AppRoute.BlindHome) controller.stopBlindRiskProximityMonitoring()
         }
     }
 
@@ -177,23 +168,16 @@ fun SmartCaneRootApp() {
                 urgentAlert = uiState.urgentAlert,
                 fallPending = uiState.fallPending,
                 navigationPreference = uiState.navigationPreference,
+                navigationStatus = uiState.navigationStatus,
+                navigationInstruction = uiState.currentNavigationInstruction,
                 onVoicePressStart = controller::startVoicePress,
                 onVoicePressEnd = controller::endVoicePress,
                 onRepeat = controller::repeatNavigationPrompt,
                 onSos = controller::sendBlindSos,
                 onDismissAlert = controller::dismissUrgentAlert,
                 onNavigationPreference = controller::setNavigationPreference,
+                onStopNavigation = controller::stopNavigation,
                 onOpenSettings = { route = AppRoute.BlindPairing }
-            )
-            AppRoute.BlindNavigation -> BlindNavigationScreen(
-                route = uiState.activeNavigationRoute,
-                status = uiState.navigationStatus,
-                instruction = uiState.currentNavigationInstruction,
-                onStop = {
-                    controller.stopNavigation()
-                    route = AppRoute.BlindHome
-                },
-                onBack = { route = AppRoute.BlindHome }
             )
             AppRoute.BlindPairing -> BlindPairingScreen(
                 pairingCode = uiState.storedState.pairingCode,
@@ -242,7 +226,9 @@ fun SmartCaneRootApp() {
             AppRoute.CompanionRisk -> CompanionLegacyShell(0, { route = companionTabToRoute(it) }, uiState.urgentAlert, controller::dismissUrgentAlert) {
                 GuidePage(deviceName = uiState.currentRelation?.caneDevice?.name ?: controller.relation()?.caneDevice?.name)
             }
-            AppRoute.CompanionMap -> CompanionLegacyShell(1, { route = companionTabToRoute(it) }, uiState.urgentAlert, controller::dismissUrgentAlert) { MapPage() }
+            AppRoute.CompanionMap -> CompanionLegacyShell(1, { route = companionTabToRoute(it) }, uiState.urgentAlert, controller::dismissUrgentAlert) {
+                MapPage(deviceId = uiState.currentRelation?.caneDevice?.deviceId ?: controller.relation()?.caneDevice?.deviceId)
+            }
             AppRoute.CompanionCollaboration -> CompanionLegacyShell(2, { route = companionTabToRoute(it) }, uiState.urgentAlert, controller::dismissUrgentAlert) { CollaborationPage() }
             AppRoute.CompanionMine -> CompanionLegacyShell(3, { route = companionTabToRoute(it) }, uiState.urgentAlert, controller::dismissUrgentAlert) {
                 MinePage(

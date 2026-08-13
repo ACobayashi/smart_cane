@@ -77,12 +77,14 @@ import com.amap.api.maps.MapsInitializer
 import com.amap.api.maps.TextureMapView
 import com.amap.api.maps.model.BitmapDescriptorFactory
 import com.amap.api.maps.model.LatLng
+import com.amap.api.maps.model.LatLngBounds
 import com.amap.api.maps.model.MarkerOptions
 import com.amap.api.maps.model.MyLocationStyle
 import com.amap.api.maps.model.PolylineOptions
 import com.nankai.smartcane.data.model.CareRelation
 import com.nankai.smartcane.data.network.AiAdviceDto
 import com.nankai.smartcane.data.network.AiAdviceRequestDto
+import com.nankai.smartcane.data.network.ActiveNavigationSessionDto
 import com.nankai.smartcane.data.network.ApiResult
 import com.nankai.smartcane.data.network.CollaborationOverviewDto
 import com.nankai.smartcane.data.network.DeviceDto
@@ -643,18 +645,11 @@ fun StatusRow(label: String, value: String, valueColor: Color = Color(0xFF0F172A
 }
 
 @Composable
-fun MapPage() {
-    val context = LocalContext.current
+fun MapPage(deviceId: String? = null) {
     var retryKey by remember { mutableIntStateOf(0) }
     var state by remember { mutableStateOf<MapRiskUiState>(MapRiskUiState.Loading) }
-    var locationGranted by remember { mutableStateOf(hasLocationPermission(context)) }
     var sheetExpanded by remember { mutableStateOf(false) }
-
-    val locationPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { grants ->
-        locationGranted = grants.values.any { it } || hasLocationPermission(context)
-    }
+    var activeNavigation by remember(deviceId) { mutableStateOf<ActiveNavigationSessionDto?>(null) }
 
     LaunchedEffect(retryKey) {
         state = MapRiskUiState.Loading
@@ -667,40 +662,35 @@ fun MapPage() {
         }
     }
 
-    LaunchedEffect(Unit) {
-        if (!hasLocationPermission(context)) {
-            locationPermissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.ACCESS_FINE_LOCATION,
-                    Manifest.permission.ACCESS_COARSE_LOCATION
-                )
-            )
-        } else {
-            locationGranted = true
+    LaunchedEffect(deviceId) {
+        if (deviceId.isNullOrBlank()) {
+            activeNavigation = null
+            return@LaunchedEffect
+        }
+        while (true) {
+            when (val result = SmartCaneApiClient.getActiveNavigation(deviceId)) {
+                is ApiResult.Success -> activeNavigation = result.data.session.takeIf { result.data.active }
+                is ApiResult.Failure -> Unit
+            }
+            delay(2_000L)
         }
     }
 
     val points = (state as? MapRiskUiState.Success)?.points.orEmpty()
     val events = points.map { it.toRiskEvent() }
-    val highCount = points.count { it.riskLevel.equals("high", ignoreCase = true) }
-    val mediumCount = points.count { it.riskLevel.equals("medium", ignoreCase = true) }
-    val sourceDeviceCount = points.map { it.deviceId }.filter { it.isNotBlank() }.distinct().size
-
     BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFFEEF6F7))) {
         val panelExpandedHeight = maxHeight * 0.55f
         Box(Modifier.fillMaxSize()) {
             RiskMapViewport(
                 points = points,
-                showMyLocation = locationGranted,
+                showMyLocation = false,
+                navigation = activeNavigation,
                 modifier = Modifier.fillMaxSize()
             )
 
             MapTopBar(
                 pointCount = points.size,
-                highCount = highCount,
-                mediumCount = mediumCount,
-                sourceDeviceCount = sourceDeviceCount,
-                locationGranted = locationGranted,
+                navigation = activeNavigation,
                 modifier = Modifier.align(Alignment.TopCenter)
             )
 
@@ -722,18 +712,27 @@ fun MapPage() {
 }
 
 @Composable
-private fun RiskMapViewport(points: List<LatestRiskEventDto>, showMyLocation: Boolean, modifier: Modifier = Modifier) {
+private fun RiskMapViewport(
+    points: List<LatestRiskEventDto>,
+    showMyLocation: Boolean,
+    navigation: ActiveNavigationSessionDto?,
+    modifier: Modifier = Modifier
+) {
     Box(modifier) {
         if (shouldUseNativeAmap()) {
-            AmapRiskMap(points = points, showMyLocation = showMyLocation, modifier = Modifier.fillMaxSize())
+            AmapRiskMap(points = points, showMyLocation = showMyLocation, navigation = navigation, modifier = Modifier.fillMaxSize())
         } else {
-            CompatibleRiskMap(points = points, showMyLocation = showMyLocation, modifier = Modifier.fillMaxSize())
+            CompatibleRiskMap(points = points, showMyLocation = showMyLocation, navigation = navigation, modifier = Modifier.fillMaxSize())
         }
     }
 }
 
 @Composable
-private fun MapTopBar(pointCount: Int, highCount: Int, mediumCount: Int, sourceDeviceCount: Int, locationGranted: Boolean, modifier: Modifier = Modifier) {
+private fun MapTopBar(
+    pointCount: Int,
+    navigation: ActiveNavigationSessionDto?,
+    modifier: Modifier = Modifier
+) {
     Surface(
         modifier = modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp),
         color = Color.White.copy(alpha = 0.94f),
@@ -746,18 +745,37 @@ private fun MapTopBar(pointCount: Int, highCount: Int, mediumCount: Int, sourceD
         ) {
             Column(Modifier.weight(1f)) {
                 Text("风险地图", color = Color(0xFF0F172A), fontSize = 22.sp, fontWeight = FontWeight.Black, maxLines = 1)
-                Text("高德地图 · $pointCount 个多用户风险点", color = Color(0xFF64748B), fontSize = 13.sp, maxLines = 1)
-            }
-            Surface(color = if (locationGranted) Color(0xFFDCFCE7) else Color(0xFFFFF7ED), shape = RoundedCornerShape(999.dp)) {
                 Text(
-                    if (locationGranted) "已授权" else "待授权",
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                    color = if (locationGranted) Color(0xFF166534) else Color(0xFFC2410C),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
+                    navigation?.destinationText?.takeIf { it.isNotBlank() }?.let { "正在前往 $it" }
+                        ?: "高德地图 · $pointCount 个多用户风险点",
+                    color = Color(0xFF64748B), fontSize = 13.sp, maxLines = 1
+                )
+            }
+            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                MapStatusBadge(if (navigation != null) "导航中" else "未导航", navigation != null)
+                MapStatusBadge(
+                    when (navigation?.motionStatus) {
+                        "walking" -> "行走中"
+                        "stationary" -> "静止"
+                        else -> "状态未知"
+                    },
+                    navigation?.motionStatus == "walking"
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun MapStatusBadge(text: String, active: Boolean) {
+    Surface(color = if (active) Color(0xFFDCFCE7) else Color(0xFFF1F5F9), shape = RoundedCornerShape(999.dp)) {
+        Text(
+            text,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            color = if (active) Color(0xFF166534) else Color(0xFF475569),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 
@@ -884,7 +902,12 @@ private fun CompactRiskEventItem(event: RiskEvent) {
 }
 
 @Composable
-private fun CompatibleRiskMap(points: List<LatestRiskEventDto>, showMyLocation: Boolean, modifier: Modifier = Modifier) {
+private fun CompatibleRiskMap(
+    points: List<LatestRiskEventDto>,
+    showMyLocation: Boolean,
+    navigation: ActiveNavigationSessionDto? = null,
+    modifier: Modifier = Modifier
+) {
     Box(modifier = modifier.background(Color(0xFFEAF4FF), RoundedCornerShape(22.dp))) {
         Canvas(Modifier.fillMaxSize().padding(20.dp)) {
             val w = size.width
@@ -899,12 +922,14 @@ private fun CompatibleRiskMap(points: List<LatestRiskEventDto>, showMyLocation: 
                 drawLine(roadColor, Offset(x, 0f), Offset(x, h), strokeWidth = 5f, cap = StrokeCap.Round)
             }
 
-            val route = Path().apply {
-                moveTo(w * 0.18f, h * 0.78f)
-                cubicTo(w * 0.30f, h * 0.66f, w * 0.38f, h * 0.54f, w * 0.50f, h * 0.50f)
-                cubicTo(w * 0.64f, h * 0.45f, w * 0.72f, h * 0.30f, w * 0.86f, h * 0.22f)
+            if (navigation != null) {
+                val route = Path().apply {
+                    moveTo(w * 0.18f, h * 0.78f)
+                    cubicTo(w * 0.30f, h * 0.66f, w * 0.38f, h * 0.54f, w * 0.50f, h * 0.50f)
+                    cubicTo(w * 0.64f, h * 0.45f, w * 0.72f, h * 0.30f, w * 0.86f, h * 0.22f)
+                }
+                drawPath(route, Color(0xFF2563EB), style = Stroke(width = 12f, cap = StrokeCap.Round))
             }
-            drawPath(route, Color(0xFF2563EB), style = Stroke(width = 12f, cap = StrokeCap.Round))
 
             val visible = points.take(8)
             visible.forEachIndexed { index, point ->
@@ -930,8 +955,14 @@ private fun CompatibleRiskMap(points: List<LatestRiskEventDto>, showMyLocation: 
 }
 
 @Composable
-private fun AmapRiskMap(points: List<LatestRiskEventDto>, showMyLocation: Boolean, modifier: Modifier = Modifier) {
+private fun AmapRiskMap(
+    points: List<LatestRiskEventDto>,
+    showMyLocation: Boolean,
+    navigation: ActiveNavigationSessionDto? = null,
+    modifier: Modifier = Modifier
+) {
     val context = LocalContext.current
+    var framedContentKey by remember { mutableStateOf<String?>(null) }
     val mapView = remember {
         MapsInitializer.updatePrivacyShow(context, true, true)
         MapsInitializer.updatePrivacyAgree(context, true)
@@ -952,7 +983,14 @@ private fun AmapRiskMap(points: List<LatestRiskEventDto>, showMyLocation: Boolea
         update = { view ->
             val markers = points.mapNotNull { it.toMapMarker(context) }
             val fallbackCenter = convertGpsToAmap(context, LatLng(DEFAULT_MAP_CENTER_LAT, DEFAULT_MAP_CENTER_LNG))
-            val center = markers.firstOrNull()?.position ?: fallbackCenter
+            val routePoints = navigation?.routePolyline.orEmpty().map { LatLng(it.latitude, it.longitude) }
+            val userPosition = navigation?.let { nav ->
+                val lat = nav.lastLatitude ?: return@let null
+                val lng = nav.lastLongitude ?: return@let null
+                convertGpsToAmap(context, LatLng(lat, lng))
+            }
+            val center = userPosition ?: routePoints.firstOrNull() ?: markers.firstOrNull()?.position ?: fallbackCenter
+            val contentKey = navigation?.sessionId ?: "risks:${points.joinToString(",") { it.id.toString() }}"
             val amap = view.map
             amap.uiSettings.isZoomControlsEnabled = false
             amap.uiSettings.isCompassEnabled = true
@@ -964,7 +1002,22 @@ private fun AmapRiskMap(points: List<LatestRiskEventDto>, showMyLocation: Boolea
                 .strokeWidth(2f)
             amap.isMyLocationEnabled = showMyLocation
             amap.clear()
-            amap.moveCamera(CameraUpdateFactory.newLatLngZoom(center, if (markers.isEmpty()) 16f else 17f))
+            if (routePoints.size >= 2) {
+                amap.addPolyline(PolylineOptions().addAll(routePoints).color(android.graphics.Color.rgb(37, 99, 235)).width(12f))
+                if (framedContentKey != contentKey) {
+                    val bounds = LatLngBounds.builder().apply { routePoints.forEach(::include) }.build()
+                    amap.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 100))
+                }
+            } else if (framedContentKey != contentKey) {
+                amap.moveCamera(CameraUpdateFactory.newLatLngZoom(center, if (markers.isEmpty()) 16f else 17f))
+            }
+            framedContentKey = contentKey
+            userPosition?.let {
+                amap.addMarker(
+                    MarkerOptions().position(it).title("用户当前位置")
+                        .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE))
+                )
+            }
             markers.forEach { marker ->
                 amap.addMarker(
                     MarkerOptions()

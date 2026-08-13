@@ -319,6 +319,24 @@ data class RouteAdviceDto(
     val bestRoute: NavigationRouteDto? = null
 )
 
+data class ActiveNavigationSessionDto(
+    val sessionId: String,
+    val status: String,
+    val motionStatus: String,
+    val destinationText: String,
+    val currentStepIndex: Int,
+    val updatedAt: String,
+    val lastLatitude: Double?,
+    val lastLongitude: Double?,
+    val routePolyline: List<NavigationPointDto>
+)
+
+data class ActiveNavigationResponseDto(
+    val active: Boolean,
+    val deviceId: String,
+    val session: ActiveNavigationSessionDto?
+)
+
 data class NavigationPointDto(val latitude: Double, val longitude: Double)
 
 data class NavigationStepDto(
@@ -532,6 +550,16 @@ object SmartCaneApiClient {
     suspend fun getCollaborationOverview(): ApiResult<CollaborationOverviewDto> = withContext(Dispatchers.IO) {
         try {
             ApiResult.Success(getJson("/api/collaboration/overview").toCollaborationOverviewDto())
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
+    suspend fun getActiveNavigation(deviceId: String): ApiResult<ActiveNavigationResponseDto> = withContext(Dispatchers.IO) {
+        try {
+            ApiResult.Success(
+                getJson("/api/navigation/active?device_id=${deviceId.urlEncode()}").toActiveNavigationResponseDto()
+            )
         } catch (exception: Exception) {
             ApiResult.Failure(exception.toUserMessage())
         }
@@ -1337,6 +1365,31 @@ object SmartCaneApiClient {
             navigationStatus = optString("navigation_status", optString("navigationStatus", "ready")),
             routes = routes,
             bestRoute = bestRoute?.toNavigationRouteDto()
+        )
+    }
+
+    private fun JSONObject.toActiveNavigationResponseDto(): ActiveNavigationResponseDto {
+        val sessionJson = optJSONObject("session")
+        val routePoints = sessionJson?.optJSONArray("route_polyline") ?: JSONArray()
+        return ActiveNavigationResponseDto(
+            active = optBoolean("active", false),
+            deviceId = optString("device_id", optString("deviceId", "")),
+            session = sessionJson?.let { session ->
+                ActiveNavigationSessionDto(
+                    sessionId = session.optString("session_id"),
+                    status = session.optString("status", "active"),
+                    motionStatus = session.optString("motion_status", "unknown"),
+                    destinationText = session.optString("destination_text"),
+                    currentStepIndex = session.optInt("current_step_index"),
+                    updatedAt = session.optString("updated_at"),
+                    lastLatitude = session.nullableDouble("last_lat"),
+                    lastLongitude = session.nullableDouble("last_lng"),
+                    routePolyline = List(routePoints.length()) { index ->
+                        val point = routePoints.getJSONObject(index)
+                        NavigationPointDto(point.optDouble("lat"), point.optDouble("lng"))
+                    }
+                )
+            }
         )
     }
 

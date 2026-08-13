@@ -72,12 +72,15 @@ fun BlindHomeScreen(
     urgentAlert: EmergencyAlertDto?,
     fallPending: Boolean,
     navigationPreference: String,
+    navigationStatus: String,
+    navigationInstruction: String,
     onVoicePressStart: () -> Unit,
     onVoicePressEnd: () -> Unit,
     onRepeat: () -> Unit,
     onSos: () -> Unit,
     onDismissAlert: () -> Unit,
     onNavigationPreference: (String) -> Unit,
+    onStopNavigation: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
     var showSosConfirm by rememberSaveable { mutableStateOf(false) }
@@ -97,7 +100,13 @@ fun BlindHomeScreen(
             microphonePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
-    val prompt = "前方路口建议直行"
+    val navigating = navigationStatus in setOf("active", "off_route", "replanning")
+    val prompt = when {
+        navigationStatus == "replanning" -> "导航中 · 正在重新规划"
+        navigating && navigationInstruction.isNotBlank() -> "导航中 · $navigationInstruction"
+        navigating -> "导航中 · 等待定位更新"
+        else -> "前方路口建议直行"
+    }
 
     Box(
         modifier = Modifier
@@ -124,8 +133,15 @@ fun BlindHomeScreen(
                         maxLines = 2
                     )
                 }
-                TextButton(onClick = if (urgentAlert != null) onDismissAlert else onOpenSettings, modifier = Modifier.semantics { contentDescription = "我的和设置" }) {
-                    Text(if (urgentAlert != null) "知道了" else "设置", color = Color(0xFFE0E7FF), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Column(horizontalAlignment = Alignment.End) {
+                    TextButton(onClick = if (urgentAlert != null) onDismissAlert else onOpenSettings, modifier = Modifier.semantics { contentDescription = "我的和设置" }) {
+                        Text(if (urgentAlert != null) "知道了" else "设置", color = Color(0xFFE0E7FF), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                    if (navigating) {
+                        TextButton(onClick = onStopNavigation, modifier = Modifier.semantics { contentDescription = "结束当前导航" }) {
+                            Text("结束导航", color = Color(0xFFFECACA), fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
 

@@ -55,6 +55,11 @@ DEFAULT_NEARBY_RADIUS_M = 80.0
 REALTIME_NEARBY_WARNING_RADIUS_M = 10.0
 ROUTE_RISK_BUFFER_M = 8.0
 WALKING_NAVIGATION_MAX_DISTANCE_M = 3000.0
+NAVIGATION_OFF_ROUTE_BASE_M = 45.0
+NAVIGATION_OFF_ROUTE_REQUIRED_FRAMES = 5
+NAVIGATION_MOVING_DISTANCE_M = 1.0
+NAVIGATION_MOVING_RECENT_SECONDS = 8
+NAVIGATION_SESSION_VISIBLE_SECONDS = 20
 NAVIGATION_ADVICE_TIMEOUT_SECONDS = 2.0
 NAVIGATION_COMMAND_TIMEOUT_SECONDS = 2.0
 AMAP_TRAFFIC_TIMEOUT_SECONDS = 0.4
@@ -329,6 +334,8 @@ class MapRouteRequest(BaseModel):
     destination_text: Optional[str] = None
     city: Optional[str] = None
     coordsys: str = "gps"
+    origin_coordsys: Optional[str] = None
+    destination_coordsys: Optional[str] = None
     risk_radius_m: float = Field(80.0, gt=0, le=5000)
     route_buffer_m: float = Field(ROUTE_RISK_BUFFER_M, gt=5, le=200)
     route_preference: str = Field("safe", pattern="^(safe|distance)$")
@@ -775,6 +782,7 @@ def init_db() -> None:
         ensure_column(conn, "navigation_sessions", "active_traversal_id", "INTEGER")
         ensure_column(conn, "navigation_sessions", "route_preference", "TEXT NOT NULL DEFAULT 'safe'")
         ensure_column(conn, "navigation_sessions", "destination_coordsys", "TEXT NOT NULL DEFAULT 'gps'")
+        ensure_column(conn, "navigation_sessions", "last_motion_at", "TEXT")
         ensure_column(conn, "device_state", "fall_event_id", "TEXT")
         ensure_column(conn, "device_state", "fall_pending", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "device_state", "fall_detected", "INTEGER NOT NULL DEFAULT 0")
@@ -3713,7 +3721,7 @@ async def resolve_route_endpoint(request: MapRouteRequest) -> tuple[float, float
         origin_meta = await geocode_address(request.origin_text, request.city)
         origin_lat, origin_lng = origin_meta["lat"], origin_meta["lng"]
     elif origin_lat is not None and origin_lng is not None:
-        origin_meta = {"source": "request_coordinate", "coordsys": request.coordsys}
+        origin_meta = {"source": "request_coordinate", "coordsys": request.origin_coordsys or request.coordsys}
     if (origin_lat is None or origin_lng is None) and request.device_id:
         latest = latest_location_for_device(request.device_id)
         if latest:
@@ -3733,7 +3741,7 @@ async def resolve_route_endpoint(request: MapRouteRequest) -> tuple[float, float
         )
         dest_lat, dest_lng = dest_meta["lat"], dest_meta["lng"]
     elif dest_lat is not None and dest_lng is not None:
-        dest_meta = {"source": "request_coordinate", "coordsys": request.coordsys}
+        dest_meta = {"source": "request_coordinate", "coordsys": request.destination_coordsys or request.coordsys}
     if dest_lat is None or dest_lng is None:
         raise HTTPException(status_code=400, detail="destination coordinate or destination_text is required")
     return origin_lat, origin_lng, dest_lat, dest_lng, {"origin": origin_meta, "destination": dest_meta}
@@ -4576,8 +4584,8 @@ def create_navigation_session(
     with db() as conn:
         conn.execute(
             """
-            INSERT INTO navigation_sessions (session_id, device_id, user_id, origin_lat, origin_lng, destination_lat, destination_lng, destination_text, route_polyline_json, route_steps_json, current_step_index, started_at, updated_at, status, last_lat, last_lng)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'active', ?, ?)
+            INSERT INTO navigation_sessions (session_id, device_id, user_id, origin_lat, origin_lng, destination_lat, destination_lng, destination_text, route_polyline_json, route_steps_json, current_step_index, started_at, updated_at, status, last_lat, last_lng, destination_coordsys)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'active', ?, ?, ?)
             """,
             (
                 session_id,
@@ -4594,6 +4602,7 @@ def create_navigation_session(
                 now,
                 float(origin.get("lat") or 0),
                 float(origin.get("lng") or 0),
+                str(destination.get("coordsys") or "gps"),
             ),
         )
         conn.execute(
@@ -4615,6 +4624,42 @@ def navigation_step_index(steps: list[dict[str, Any]], lat: float, lng: float) -
             best_index = idx
             best_distance = distance
     return best_index, best_distance
+
+
+def navigation_route_points(steps: list[dict[str, Any]]) -> list[dict[str, float]]:
+    points: list[dict[str, float]] = []
+    for step in steps:
+        points.extend(parse_polyline(str(step.get("polyline") or "")))
+    return points
+
+
+def align_navigation_location(row: sqlite3.Row, lat: float, lng: float) -> tuple[float, float]:
+    """Align WGS84 phone updates to the GCJ-02 route using the planned origin pair."""
+    try:
+        origin_lat = float(row["origin_lat"])
+        origin_lng = float(row["origin_lng"])
+        route_points = navigation_route_points(json.loads(row["route_steps_json"] or "[]"))
+        route_origin = route_points[0]
+    except (KeyError, TypeError, ValueError, IndexError, json.JSONDecodeError):
+        return lat, lng
+    return lat + route_origin["lat"] - origin_lat, lng + route_origin["lng"] - origin_lng
+
+
+def navigation_off_route_threshold_m(accuracy_m: Optional[float]) -> float:
+    accuracy = max(0.0, float(accuracy_m or 0.0))
+    return max(NAVIGATION_OFF_ROUTE_BASE_M, accuracy * 1.5)
+
+
+def navigation_motion_status(row: sqlite3.Row) -> str:
+    if str(row["status"] or "") not in {"active", "off_route", "replanning"}:
+        return "unknown"
+    updated_at = parse_time(row["updated_at"])
+    if not updated_at or (datetime.now(timezone.utc) - updated_at).total_seconds() > 15:
+        return "unknown"
+    last_motion_at = parse_time(row["last_motion_at"])
+    if last_motion_at and (datetime.now(timezone.utc) - last_motion_at).total_seconds() <= NAVIGATION_MOVING_RECENT_SECONDS:
+        return "walking"
+    return "stationary"
 
 
 def distance_to_step_action_m(step: Optional[dict[str, Any]], lat: float, lng: float) -> float:
@@ -4683,13 +4728,19 @@ def update_navigation_session(session_id: str, update: NavigationSessionUpdate) 
             raise HTTPException(status_code=404, detail="navigation session not found")
         steps = json.loads(row["route_steps_json"] or "[]")
         previous_step_index = int(row["current_step_index"] or 0)
-        step_index, off_route_m = navigation_step_index(steps, update.lat, update.lng)
-        off_route_count = int(row["off_route_count"] or 0) + 1 if off_route_m > 25 else 0
-        destination_distance_m = haversine_m(update.lat, update.lng, float(row["destination_lat"]), float(row["destination_lng"]))
+        route_lat, route_lng = align_navigation_location(row, update.lat, update.lng)
+        step_index, step_off_route_m = navigation_step_index(steps, route_lat, route_lng)
+        route_points = navigation_route_points(steps)
+        off_route_m = min_distance_to_polyline_m(route_lat, route_lng, route_points) if route_points else step_off_route_m
+        off_route_threshold_m = navigation_off_route_threshold_m(update.accuracy_m)
+        off_route_count = int(row["off_route_count"] or 0) + 1 if off_route_m > off_route_threshold_m else 0
+        route_destination = route_points[-1] if route_points else {"lat": row["destination_lat"], "lng": row["destination_lng"]}
+        destination_distance_m = haversine_m(route_lat, route_lng, float(route_destination["lat"]), float(route_destination["lng"]))
         arrival_count = int(row["arrival_count"] or 0) + 1 if destination_distance_m <= 20 else 0
         arrived = arrival_count >= 3
-        should_replan = off_route_count >= 3 and not arrived
+        should_replan = off_route_count >= NAVIGATION_OFF_ROUTE_REQUIRED_FRAMES and not arrived
         status = update.status or ("arrived" if arrived else "off_route" if should_replan else "active")
+        last_motion_at = now_iso() if float(update.distance_delta_m or 0.0) >= NAVIGATION_MOVING_DISTANCE_M else row["last_motion_at"]
         active_traversal_id = row["active_traversal_id"]
         if active_traversal_id:
             conn.execute(
@@ -4744,29 +4795,67 @@ def update_navigation_session(session_id: str, update: NavigationSessionUpdate) 
         conn.execute(
             """UPDATE navigation_sessions
                SET current_step_index = ?, updated_at = ?, status = ?, last_lat = ?, last_lng = ?,
-                   off_route_count = ?, arrival_count = ?, active_traversal_id = ?
+                   off_route_count = ?, arrival_count = ?, active_traversal_id = ?, last_motion_at = ?
                WHERE session_id = ?""",
-            (step_index, now_iso(), status, update.lat, update.lng, off_route_count, arrival_count, active_traversal_id, session_id),
+            (step_index, now_iso(), status, update.lat, update.lng, off_route_count, arrival_count, active_traversal_id, last_motion_at, session_id),
         )
     for segment_id in set(completed_segment_ids):
         recalculate_road_risk_score(segment_id)
     step = steps[step_index] if steps and step_index < len(steps) else None
-    distance_to_next_action_m = distance_to_step_action_m(step, update.lat, update.lng)
+    distance_to_next_action_m = distance_to_step_action_m(step, route_lat, route_lng)
     traffic_distance_m = None
     if step and step.get("traffic_crossing_lat") is not None and step.get("traffic_crossing_lng") is not None:
         traffic_distance_m = haversine_m(
-            update.lat, update.lng,
+            route_lat, route_lng,
             float(step["traffic_crossing_lat"]), float(step["traffic_crossing_lng"]),
         )
     return {
         "success": True, "session_id": session_id, "status": status,
         "current_step_index": step_index, "distance_to_route_m": round(off_route_m, 1),
+        "off_route_threshold_m": round(off_route_threshold_m, 1),
         "distance_to_destination_m": round(destination_distance_m, 1),
         "distance_to_next_action_m": round(distance_to_next_action_m, 1),
         "distance_to_traffic_warning_m": round(traffic_distance_m, 1) if traffic_distance_m is not None else None,
         "off_route": should_replan, "off_route_count": off_route_count,
         "arrived": arrived, "arrival_count": arrival_count,
         "current_step": step, "should_replan": should_replan,
+    }
+
+
+@app.get("/api/navigation/active")
+def active_navigation(device_id: str = Query(..., min_length=1)) -> dict[str, Any]:
+    with db() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM navigation_sessions
+             WHERE device_id = ? AND status IN ('active', 'off_route', 'replanning')
+             ORDER BY updated_at DESC LIMIT 1
+            """,
+            (device_id,),
+        ).fetchone()
+    if not row:
+        return {"success": True, "active": False, "device_id": device_id, "session": None}
+    updated_at = parse_time(row["updated_at"])
+    if not updated_at or (datetime.now(timezone.utc) - updated_at).total_seconds() > NAVIGATION_SESSION_VISIBLE_SECONDS:
+        return {"success": True, "active": False, "device_id": device_id, "session": None}
+    steps = json.loads(row["route_steps_json"] or "[]")
+    route_points = navigation_route_points(steps)
+    return {
+        "success": True,
+        "active": True,
+        "device_id": device_id,
+        "session": {
+            "session_id": row["session_id"],
+            "status": row["status"],
+            "motion_status": navigation_motion_status(row),
+            "destination_text": row["destination_text"],
+            "current_step_index": int(row["current_step_index"] or 0),
+            "updated_at": row["updated_at"],
+            "last_lat": row["last_lat"],
+            "last_lng": row["last_lng"],
+            "route_polyline": route_points,
+            "route_steps": steps,
+        },
     }
 
 
@@ -4801,6 +4890,8 @@ async def replan_navigation_session(session_id: str) -> dict[str, Any]:
         destination_lng=float(row["destination_lng"]),
         destination_text=row["destination_text"],
         coordsys="gps",
+        origin_coordsys="gps",
+        destination_coordsys=str(row["destination_coordsys"] or "gps"),
         route_preference=str(row["route_preference"] or "safe"),
     )
     response = await risk_aware_route(request)
@@ -4813,12 +4904,14 @@ async def replan_navigation_session(session_id: str) -> dict[str, Any]:
         conn.execute(
             """
             UPDATE navigation_sessions
-            SET route_polyline_json = ?, route_steps_json = ?, current_step_index = 0,
+            SET origin_lat = ?, origin_lng = ?, route_polyline_json = ?, route_steps_json = ?, current_step_index = 0,
                 updated_at = ?, status = 'active', off_route_count = 0, arrival_count = 0,
                 active_traversal_id = NULL
             WHERE session_id = ?
             """,
             (
+                float(row["last_lat"]),
+                float(row["last_lng"]),
                 json.dumps(best.get("polyline") or [], ensure_ascii=False),
                 json.dumps(best.get("steps") or [], ensure_ascii=False),
                 now_iso(),

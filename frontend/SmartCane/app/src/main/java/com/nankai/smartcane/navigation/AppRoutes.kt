@@ -5,7 +5,6 @@ sealed class AppRoute {
     data object Login : AppRoute()
     data object ModeSelection : AppRoute()
     data object BlindHome : AppRoute()
-    data object BlindNavigation : AppRoute()
     data object BlindPairing : AppRoute()
     data object CompanionHome : AppRoute()
     data object CompanionPairing : AppRoute()

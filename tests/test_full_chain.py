@@ -185,7 +185,7 @@ def test_navigation_session_update(tmp_path, monkeypatch):
     assert result["should_replan"] is False
 
 
-def test_navigation_requires_three_off_route_and_arrival_frames(tmp_path, monkeypatch):
+def test_navigation_requires_five_off_route_and_three_arrival_frames(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "navigation_state.db")
     main.init_db()
     route = {
@@ -197,14 +197,60 @@ def test_navigation_requires_three_off_route_and_arrival_frames(tmp_path, monkey
         },
     }
     sid = main.create_navigation_session("cane_real", "user", route, "终点")
-    for count in range(1, 4):
+    for count in range(1, 6):
         update = main.update_navigation_session(sid, main.NavigationSessionUpdate(lat=31.0005, lng=121.001))
         assert update["off_route_count"] == count
-        assert update["should_replan"] is (count == 3)
+        assert update["should_replan"] is (count == 5)
     for count in range(1, 4):
         update = main.update_navigation_session(sid, main.NavigationSessionUpdate(lat=31.001, lng=121.0))
         assert update["arrival_count"] == count
         assert update["arrived"] is (count == 3)
+
+
+def test_navigation_aligns_phone_gps_to_amap_route_and_exposes_active_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "navigation_alignment.db")
+    main.init_db()
+    route = {
+        "origin": {"lat": 39.0, "lng": 116.0, "coordsys": "gps"},
+        "destination": {"lat": 39.001, "lng": 116.0, "coordsys": "amap"},
+        "best_route": {
+            "polyline": [{"lat": 39.002, "lng": 116.003}, {"lat": 39.003, "lng": 116.003}],
+            "steps": [{"road": "测试路", "distance": "100", "polyline": "116.003,39.002;116.003,39.003"}],
+        },
+    }
+    sid = main.create_navigation_session("cane_alignment", "user", route, "终点")
+    update = main.update_navigation_session(
+        sid,
+        main.NavigationSessionUpdate(lat=39.0005, lng=116.0, accuracy_m=20, distance_delta_m=2),
+    )
+    assert update["distance_to_route_m"] < 2
+    assert update["off_route_count"] == 0
+    active = main.active_navigation("cane_alignment")
+    assert active["active"] is True
+    assert active["session"]["motion_status"] == "walking"
+    assert active["session"]["route_polyline"] == route["best_route"]["polyline"]
+    main.stop_navigation_session(sid)
+    assert main.active_navigation("cane_alignment")["active"] is False
+
+
+def test_stale_navigation_is_hidden_from_companion_map(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "stale_navigation.db")
+    main.init_db()
+    route = {
+        "origin": {"lat": 31.0, "lng": 121.0},
+        "destination": {"lat": 31.001, "lng": 121.0},
+        "best_route": {
+            "polyline": [{"lat": 31.0, "lng": 121.0}, {"lat": 31.001, "lng": 121.0}],
+            "steps": [{"road": "测试路", "distance": "100", "polyline": "121.0,31.0;121.0,31.001"}],
+        },
+    }
+    sid = main.create_navigation_session("cane_stale", "user", route, "终点")
+    with main.db() as conn:
+        conn.execute(
+            "UPDATE navigation_sessions SET updated_at = ? WHERE session_id = ?",
+            ("2020-01-01T00:00:00+00:00", sid),
+        )
+    assert main.active_navigation("cane_stale")["active"] is False
 
 
 def test_navigation_traversal_lifecycle(tmp_path, monkeypatch):
