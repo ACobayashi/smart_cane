@@ -79,9 +79,7 @@ TEST_DATA_DEVICE_IDS = {
 }
 TEST_DATA_KEYWORDS = ("mock", "simulator", "simulation", "fake", "demo", "test")
 TEST_DATA_SOURCE_IDS = {"android_frontend_sim", "mock", "simulator", "simulation", "test"}
-RISK_POINT_TRANSIENT_TTL_SECONDS = 2 * 60 * 60
-RISK_POINT_FIXED_TTL_SECONDS = 7 * 24 * 60 * 60
-RISK_POINT_EMERGENCY_TTL_SECONDS = 30 * 60
+RISK_POINT_TTL_SECONDS = 7 * 24 * 60 * 60
 
 HARDWARE_PROFILE: dict[str, Any] = {
     "controller": "ESP32-C5 Dev Module / SensairShuttle compatible",
@@ -1603,13 +1601,7 @@ MAPPABLE_RISK_TYPES = {
 
 
 def risk_point_ttl_seconds(risk_type: str, level: str) -> int:
-    if risk_type in {"ground_drop", "ground_step", "user_mark", "history_risk"}:
-        return RISK_POINT_FIXED_TTL_SECONDS
-    if risk_type in {"sos", "fall_detected"}:
-        return RISK_POINT_EMERGENCY_TTL_SECONDS
-    if level == "high":
-        return max(RISK_POINT_TRANSIENT_TTL_SECONDS, 4 * 60 * 60)
-    return RISK_POINT_TRANSIENT_TTL_SECONDS
+    return RISK_POINT_TTL_SECONDS
 
 
 def parse_devices_json(raw: Any) -> list[str]:
@@ -1714,6 +1706,27 @@ def expire_risk_points() -> None:
                 LEGACY_SIM_POINT_LNG + 0.001,
             ),
         )
+
+
+def normalize_risk_point_expirations() -> None:
+    """Apply the current seven-day map lifetime to existing risk points."""
+    current_time = datetime.now(timezone.utc)
+    with db() as conn:
+        rows = conn.execute("SELECT id, last_reported_at FROM risk_points").fetchall()
+        for row in rows:
+            last_reported = parse_time(row["last_reported_at"])
+            if last_reported is None:
+                continue
+            expires_at = last_reported + timedelta(seconds=RISK_POINT_TTL_SECONDS)
+            conn.execute(
+                "UPDATE risk_points SET status = ?, expires_at = ? WHERE id = ?",
+                (
+                    "active" if expires_at >= current_time else "expired",
+                    expires_at.isoformat(timespec="seconds"),
+                    row["id"],
+                ),
+            )
+    expire_risk_points()
 
 
 def risk_point_message_from_event(event: dict[str, Any]) -> str:
@@ -3008,7 +3021,7 @@ def maybe_store_road_observation(event: dict[str, Any]) -> None:
     segment_id = nearest_road_segment_id(lat, lng)
     match_status = "matched" if segment_id else "pending"
     observed_at = str(event.get("timestamp") or now_iso())
-    expires_at = None if is_fixed else (datetime.now(timezone.utc) + timedelta(seconds=RISK_POINT_TRANSIENT_TTL_SECONDS)).isoformat(timespec="seconds")
+    expires_at = None if is_fixed else (datetime.now(timezone.utc) + timedelta(seconds=RISK_POINT_TTL_SECONDS)).isoformat(timespec="seconds")
     level = str(event.get("risk_level") or "low")
     confidence = float(event.get("confidence") or event.get("risk_score") or 0.6)
     if confidence > 1.0:
@@ -3941,6 +3954,7 @@ async def parse_command_with_llm(text: str, device_id: str) -> dict[str, Any]:
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    normalize_risk_point_expirations()
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(timespec="seconds")
     with db() as conn:
         conn.execute(
@@ -5134,36 +5148,14 @@ def map_risk_points(
     limit: int = Query(200, ge=1, le=1000),
 ) -> dict[str, Any]:
     points = active_risk_points(lat, lng, radius if lat is not None and lng is not None else None, limit)
-    if points:
-        return {
-            "risk_count": len(points),
-            "high_count": sum(1 for item in points if item["riskLevel"] == "high"),
-            "medium_count": sum(1 for item in points if item["riskLevel"] == "medium"),
-            "max_level": max((item["riskLevel"] for item in points), key=lambda level: LEVEL_RANK[level], default="low"),
-            "clustered": True,
-            "cluster_radius_m": RISK_POINT_CLUSTER_RADIUS_M,
-            "points": points,
-        }
-
-    # Compatibility fallback for existing databases that only have raw events.
-    if lat is not None and lng is not None:
-        summary = nearby_summary(lat, lng, radius)
-        return {
-            "risk_count": summary["risk_count"],
-            "high_count": summary["high_count"],
-            "medium_count": summary["medium_count"],
-            "max_level": summary["max_level"],
-            "clustered": False,
-            "points": summary["recent_events"][:limit],
-        }
-    events = list_events(limit)
     return {
-        "risk_count": len(events),
-        "high_count": sum(1 for item in events if item["risk_level"] == "high"),
-        "medium_count": sum(1 for item in events if item["risk_level"] == "medium"),
-        "max_level": max((item["risk_level"] for item in events), key=lambda level: LEVEL_RANK[level], default="low"),
-        "clustered": False,
-        "points": events,
+        "risk_count": len(points),
+        "high_count": sum(1 for item in points if item["riskLevel"] == "high"),
+        "medium_count": sum(1 for item in points if item["riskLevel"] == "medium"),
+        "max_level": max((item["riskLevel"] for item in points), key=lambda level: LEVEL_RANK[level], default="low"),
+        "clustered": True,
+        "cluster_radius_m": RISK_POINT_CLUSTER_RADIUS_M,
+        "points": points,
     }
 
 
@@ -6033,4 +6025,5 @@ if __name__ == "__main__":
     import uvicorn
 
     init_db()
+    normalize_risk_point_expirations()
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

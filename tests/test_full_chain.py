@@ -368,7 +368,7 @@ def test_fall_detected_becomes_high_shared_risk_point_and_warns_other_device(tmp
     assert point["latest_event_id"] == first["id"]
     assert main.parse_devices_json(point["source_devices_json"]) == ["cane_device_a"]
     ttl_seconds = (main.parse_time(point["expires_at"]) - main.parse_time(point["last_reported_at"])).total_seconds()
-    assert 1799 <= ttl_seconds <= 1801
+    assert ttl_seconds == 7 * 24 * 60 * 60
 
     warning = main.nearby_risk_warning(
         lat=31.0,
@@ -705,6 +705,86 @@ def test_sos_becomes_historical_risk_point(tmp_path, monkeypatch):
     assert warning["found"] is True
     assert "求助风险" in warning["warning"]["voicePrompt"]
     assert len(warning["warning"]["voicePrompt"]) <= 15
+
+
+def test_all_map_risk_points_have_seven_day_lifetime():
+    expected = 7 * 24 * 60 * 60
+    for risk_type, level in (
+        ("front_obstacle", "low"),
+        ("front_obstacle", "high"),
+        ("ground_drop", "medium"),
+        ("user_mark", "medium"),
+        ("sos", "high"),
+        ("fall_detected", "high"),
+    ):
+        assert main.risk_point_ttl_seconds(risk_type, level) == expected
+
+
+def test_expired_map_points_do_not_fall_back_to_raw_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "map_expiry_no_fallback.db")
+    main.init_db()
+    stored = main.store_event(main.EventCreate(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="front_obstacle",
+        risk_level="medium",
+        extra_json={"source": "esp32c5"},
+    ))
+    with main.db() as conn:
+        conn.execute(
+            "UPDATE risk_points SET expires_at = ?, status = 'active' WHERE latest_event_id = ?",
+            ("2026-01-01T00:00:00+00:00", stored["id"]),
+        )
+
+    response = main.map_risk_points(lat=None, lng=None, radius=500.0, limit=200)
+    assert response["clustered"] is True
+    assert response["risk_count"] == 0
+    assert response["points"] == []
+    with main.db() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM risk_events").fetchone()["c"] == 1
+
+
+def test_existing_points_are_migrated_to_seven_days_from_last_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "map_expiry_migration.db")
+    main.init_db()
+    recent = main.store_event(main.EventCreate(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="front_obstacle",
+        risk_level="medium",
+        extra_json={"source": "esp32c5"},
+    ))
+    old = main.store_event(main.EventCreate(
+        device_id="cane_real",
+        lat=31.01,
+        lng=121.01,
+        risk_type="ground_drop",
+        risk_level="medium",
+        extra_json={"source": "esp32c5"},
+    ))
+    current_time = main.datetime.now(main.timezone.utc).replace(microsecond=0)
+    recent_time = current_time - main.timedelta(days=6)
+    old_time = current_time - main.timedelta(days=8)
+    with main.db() as conn:
+        conn.execute(
+            "UPDATE risk_points SET last_reported_at = ?, status = 'expired' WHERE latest_event_id = ?",
+            (recent_time.isoformat(timespec="seconds"), recent["id"]),
+        )
+        conn.execute(
+            "UPDATE risk_points SET last_reported_at = ?, status = 'active' WHERE latest_event_id = ?",
+            (old_time.isoformat(timespec="seconds"), old["id"]),
+        )
+
+    main.normalize_risk_point_expirations()
+
+    with main.db() as conn:
+        recent_point = conn.execute("SELECT * FROM risk_points WHERE latest_event_id = ?", (recent["id"],)).fetchone()
+        old_point = conn.execute("SELECT * FROM risk_points WHERE latest_event_id = ?", (old["id"],)).fetchone()
+    assert recent_point["status"] == "active"
+    assert main.parse_time(recent_point["expires_at"]) == recent_time + main.timedelta(days=7)
+    assert old_point["status"] == "expired"
 
 
 def test_non_navigation_warning_excludes_risk_points_beyond_ten_meters(tmp_path, monkeypatch):
