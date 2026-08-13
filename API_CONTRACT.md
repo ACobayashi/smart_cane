@@ -35,7 +35,16 @@
 ## 后端导航
 ### POST `/api/navigation/voice-route`
 请求：`device_id,text,current_lat,current_lng,city,coordsys,user_id?`。
-响应：包含 `session_id,best_route,voice_prompt,route_count`。
+响应：包含 `session_id,best_route,voice_prompt,route_count,traffic,traffic_warnings`。
+
+`voice_prompt` 在规划完成后直接给出路线总览，例如“全程430米，先向北走200米，再向东走230米”。
+`best_route.overview_text` 可直接用于导航页展示。步行 step 保留高德的
+`orientation,walk_type,action,assistant_action`；当高德交通态势可用且过街位置附近为
+缓行、拥堵或严重拥堵时，后台为导航会话中接近该路口的 step 增加
+`traffic_status,traffic_warning`。交通态势不可用时 `traffic.status=unavailable`，
+导航主流程仍正常返回。首次规划响应使用 `traffic.status=pending`，不会等待路况接口；
+后续位置更新会取得补充完成的 step，并返回 `distance_to_traffic_warning_m`；Android
+在距该过街点 30 米内按 `traffic_warning_id` 去重播报一次。
 
 ### POST `/api/navigation/sessions/{session_id}/update`
 请求：`lat,lng,accuracy_m?,status?`。

@@ -999,6 +999,83 @@ def test_risk_aware_route_does_not_wait_for_llm(tmp_path, monkeypatch):
     assert result["llm_advice"]["skipped"] == "speed_first"
 
 
+def test_route_overview_speaks_total_distance_and_cardinal_segments():
+    route = {
+        "distance_m": 430,
+        "steps": [
+            {"orientation": "北", "distance": "120", "polyline": "117.0,39.0;117.0,39.001"},
+            {"orientation": "北", "distance": "80", "polyline": "117.0,39.001;117.0,39.002"},
+            {"orientation": "东", "distance": "230", "polyline": "117.0,39.002;117.003,39.002"},
+        ],
+    }
+
+    assert main.route_cardinal_segments(route) == [
+        {"direction": "北", "distance_m": 200},
+        {"direction": "东", "distance_m": 230},
+    ]
+    assert main.route_voice_prompt(route) == "全程430米，先向北走200米，再向东走230米"
+
+
+def test_route_overview_derives_cardinal_direction_from_polyline():
+    route = {
+        "distance_m": 100,
+        "steps": [{"distance": "100", "polyline": "117.0,39.0;117.001,39.0"}],
+    }
+
+    assert main.route_cardinal_segments(route)[0]["direction"] == "东"
+
+
+def test_busy_traffic_is_attached_only_to_crossing_approach(monkeypatch):
+    route = {
+        "polyline": [
+            {"lat": 39.0, "lng": 117.0},
+            {"lat": 39.001, "lng": 117.0},
+            {"lat": 39.001, "lng": 117.001},
+        ],
+        "steps": [
+            {"road": "甲路", "distance": "100", "polyline": "117.0,39.0;117.0,39.001"},
+            {
+                "road": "乙路", "distance": "100", "walk_type": "1",
+                "instruction": "通过人行横道", "polyline": "117.0,39.001;117.001,39.001",
+            },
+        ],
+    }
+
+    async def fake_amap_get(*args, **kwargs):
+        return {
+            "status": "1",
+            "trafficinfo": {
+                "roads": [{
+                    "name": "乙路", "status": "3",
+                    "polyline": "117.0,39.001;117.001,39.001",
+                }]
+            },
+        }
+
+    monkeypatch.setattr(main, "amap_get", fake_amap_get)
+    traffic = main.asyncio.run(main.enrich_route_traffic(route))
+
+    assert traffic["status"] == "available"
+    assert traffic["warnings"][0]["step_index"] == 0
+    assert route["steps"][0]["traffic_status"] == "拥堵"
+    assert route["steps"][0]["traffic_warning"] == "前方路口车流较大"
+    assert route["steps"][0]["traffic_warning_id"] == route["steps"][1]["traffic_warning_id"]
+
+
+def test_traffic_failure_does_not_block_route(monkeypatch):
+    async def unavailable(*args, **kwargs):
+        raise main.HTTPException(status_code=502, detail="NO_PRIVILEGES")
+
+    monkeypatch.setattr(main, "amap_get", unavailable)
+    traffic = main.asyncio.run(main.enrich_route_traffic({
+        "polyline": [{"lat": 39.0, "lng": 117.0}, {"lat": 39.001, "lng": 117.0}],
+        "steps": [{"road": "甲路", "distance": "100", "polyline": "117.0,39.0;117.0,39.001"}],
+    }))
+
+    assert traffic["status"] == "unavailable"
+    assert traffic["warnings"] == []
+
+
 def test_recent_self_obstacle_is_not_rebroadcast_as_history(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "self_suppress.db")
     main.init_db()

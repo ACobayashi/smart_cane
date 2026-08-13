@@ -36,8 +36,14 @@ fun BlindNavigationScreen(
 ) {
     Column(Modifier.fillMaxSize()) {
         Text(
-            text = instruction.ifBlank { if (status == "replanning") "正在重新规划" else "实时导航" },
-            modifier = Modifier.fillMaxWidth().padding(16.dp)
+            text = route?.overviewText?.ifBlank { null }
+                ?: route?.let { "全程 ${it.distanceM} 米" }
+                ?: "路线规划中",
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 4.dp)
+        )
+        Text(
+            text = instruction.ifBlank { if (status == "replanning") "正在重新规划" else "等待定位更新" },
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 12.dp)
         )
         NavigationAmap(route, Modifier.fillMaxWidth().weight(1f))
         Row(Modifier.fillMaxWidth().padding(12.dp)) {

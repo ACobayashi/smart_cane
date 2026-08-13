@@ -329,7 +329,11 @@ data class NavigationStepDto(
     val roadSegmentId: Int?,
     val riskScore: Double,
     val confidenceScore: Double,
-    val polyline: String
+    val polyline: String,
+    val orientation: String = "",
+    val trafficStatus: String = "",
+    val trafficWarning: String = "",
+    val trafficWarningId: String = ""
 )
 
 data class MatchedRiskPointDto(
@@ -351,7 +355,8 @@ data class NavigationRouteDto(
     val lowRiskCount: Int,
     val polyline: List<NavigationPointDto>,
     val steps: List<NavigationStepDto>,
-    val matchedRiskPoints: List<MatchedRiskPointDto>
+    val matchedRiskPoints: List<MatchedRiskPointDto>,
+    val overviewText: String = ""
 )
 
 data class NavigationUpdateDto(
@@ -362,6 +367,7 @@ data class NavigationUpdateDto(
     val distanceToRouteM: Double,
     val distanceToDestinationM: Double,
     val distanceToNextActionM: Double,
+    val distanceToTrafficWarningM: Double?,
     val offRoute: Boolean,
     val offRouteCount: Int,
     val arrived: Boolean,
@@ -1361,7 +1367,8 @@ object SmartCaneApiClient {
                     longitude = point.nullableDouble("route_lng") ?: point.nullableDouble("lng") ?: point.nullableDouble("longitude"),
                     distanceToRouteM = point.optDouble("distance_to_route_m", point.optDouble("distanceToRouteM"))
                 )
-            }
+            },
+            overviewText = optString("overview_text", optString("overviewText"))
         )
     }
 
@@ -1373,7 +1380,11 @@ object SmartCaneApiClient {
         roadSegmentId = nullableInt("road_segment_id"),
         riskScore = optDouble("risk_score"),
         confidenceScore = optDouble("confidence_score"),
-        polyline = optString("polyline")
+        polyline = optString("polyline"),
+        orientation = optString("orientation"),
+        trafficStatus = optString("traffic_status", optString("trafficStatus")),
+        trafficWarning = optString("traffic_warning", optString("trafficWarning")),
+        trafficWarningId = optString("traffic_warning_id", optString("trafficWarningId"))
     )
 
     private fun JSONObject.toNavigationUpdateDto() = NavigationUpdateDto(
@@ -1384,6 +1395,8 @@ object SmartCaneApiClient {
         distanceToRouteM = optDouble("distance_to_route_m"),
         distanceToDestinationM = optDouble("distance_to_destination_m"),
         distanceToNextActionM = optDouble("distance_to_next_action_m"),
+        distanceToTrafficWarningM = nullableDouble("distance_to_traffic_warning_m")
+            ?: nullableDouble("distanceToTrafficWarningM"),
         offRoute = optBoolean("off_route"),
         offRouteCount = optInt("off_route_count"),
         arrived = optBoolean("arrived"),

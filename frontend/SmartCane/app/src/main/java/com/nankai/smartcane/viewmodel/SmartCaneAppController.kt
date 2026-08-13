@@ -117,9 +117,14 @@ class SmartCaneAppController private constructor(
                     val offRoute = intent.getBooleanExtra(NavigationLocationService.EXTRA_OFF_ROUTE, false)
                     val stepIndex = intent.getIntExtra(NavigationLocationService.EXTRA_STEP_INDEX, 0)
                     val instruction = intent.getStringExtra(NavigationLocationService.EXTRA_INSTRUCTION).orEmpty()
+                    val trafficWarning = intent.getStringExtra(NavigationLocationService.EXTRA_TRAFFIC_WARNING).orEmpty()
+                    val trafficWarningId = intent.getStringExtra(NavigationLocationService.EXTRA_TRAFFIC_WARNING_ID).orEmpty()
                     val distanceToRoute = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_ROUTE_M, 0.0)
                     val distanceToDestination = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_DESTINATION_M, 0.0)
                     val distanceToNextAction = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_NEXT_ACTION_M, Double.MAX_VALUE)
+                    val distanceToTrafficWarning = intent.getDoubleExtra(
+                        NavigationLocationService.EXTRA_DISTANCE_TO_TRAFFIC_WARNING_M, Double.MAX_VALUE
+                    )
                     _uiState.update {
                         it.copy(
                             navigationStatus = if (arrived) "arrived" else if (offRoute) "off_route" else "active",
@@ -131,7 +136,9 @@ class SmartCaneAppController private constructor(
                         )
                     }
                     if (arrived) speakText("已到达目的地。", priority = TtsPriority.NAVIGATION)
-                    else maybeSpeakNavigationStep(stepIndex, instruction, distanceToNextAction, distanceToDestination)
+                    else if (!maybeSpeakTrafficWarning(trafficWarningId, trafficWarning, distanceToTrafficWarning)) {
+                        maybeSpeakNavigationStep(stepIndex, instruction, distanceToNextAction, distanceToDestination)
+                    }
                 }
                 NavigationLocationService.ACTION_REPLANNING -> {
                     _uiState.update { it.copy(navigationStatus = "replanning") }
@@ -146,7 +153,11 @@ class SmartCaneAppController private constructor(
                             alternativeNavigationRoutes = NavigationLocationService.latestRoute?.routes ?: it.alternativeNavigationRoutes
                         )
                     }
-                    speakText(if (success) "重新规划完成。" else "重新规划失败，请停在安全位置。", priority = TtsPriority.NAVIGATION)
+                    val routePrompt = intent.getStringExtra(NavigationLocationService.EXTRA_VOICE_PROMPT).orEmpty()
+                    speakText(
+                        if (success) routePrompt.ifBlank { "重新规划完成" } else "重新规划失败，请停在安全位置",
+                        priority = TtsPriority.NAVIGATION
+                    )
                 }
                 NavigationLocationService.ACTION_LOCATION_FAILED -> {
                     val error = intent.getStringExtra(NavigationLocationService.EXTRA_ERROR) ?: "定位不可用，导航已停止。"
@@ -157,6 +168,7 @@ class SmartCaneAppController private constructor(
         }
     }
     private val announcedNavigationSteps = mutableSetOf<String>()
+    private val announcedTrafficWarnings = mutableSetOf<String>()
 
     private fun currentCaneDeviceId(): String =
         _uiState.value.currentRelation?.caneDevice?.deviceId
@@ -198,6 +210,13 @@ class SmartCaneAppController private constructor(
         if (!announcedNavigationSteps.add("$stepIndex:$threshold")) return
         val conciseInstruction = instruction.replace(Regex("[。；;].*"), "").trim()
         speakText("${threshold}米后，$conciseInstruction", priority = TtsPriority.NAVIGATION)
+    }
+
+    private fun maybeSpeakTrafficWarning(warningId: String, warning: String, distanceM: Double): Boolean {
+        if (warningId.isBlank() || warning.isBlank() || distanceM > 30.0) return false
+        if (!announcedTrafficWarnings.add(warningId)) return false
+        speakText(warning, priority = TtsPriority.NAVIGATION)
+        return true
     }
 
     fun login(account: String, password: String, rememberLogin: Boolean) {
@@ -1213,6 +1232,7 @@ class SmartCaneAppController private constructor(
                             NavigationLocationService.latestRoute = result.data
                             NavigationLocationService.start(appContext, it, deviceId)
                             announcedNavigationSteps.clear()
+                            announcedTrafficWarnings.clear()
                             _uiState.update { state ->
                                 state.copy(
                                     navigationStatus = "active",
@@ -1426,6 +1446,7 @@ class SmartCaneAppController private constructor(
     fun stopNavigation() {
         NavigationLocationService.stop(appContext)
         announcedNavigationSteps.clear()
+        announcedTrafficWarnings.clear()
         _uiState.update {
             it.copy(
                 navigationStatus = "idle",

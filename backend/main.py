@@ -57,6 +57,8 @@ ROUTE_RISK_BUFFER_M = 8.0
 WALKING_NAVIGATION_MAX_DISTANCE_M = 3000.0
 NAVIGATION_ADVICE_TIMEOUT_SECONDS = 2.0
 NAVIGATION_COMMAND_TIMEOUT_SECONDS = 2.0
+AMAP_TRAFFIC_TIMEOUT_SECONDS = 0.4
+TRAFFIC_INTERSECTION_MATCH_M = 50.0
 RISK_POINT_CLUSTER_RADIUS_M = 12.0
 LEGACY_SIM_POINT_LAT = 31.2304
 LEGACY_SIM_POINT_LNG = 121.4737
@@ -2518,12 +2520,16 @@ def parse_amap_location(value: Any) -> Optional[tuple[float, float]]:
         return None
 
 
-async def amap_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
+async def amap_get(
+    path: str,
+    params: dict[str, Any],
+    timeout_seconds: float = 12.0,
+) -> dict[str, Any]:
     key = amap_key()
     if not key:
         raise HTTPException(status_code=503, detail="AMAP_WEB_KEY is not configured")
     payload = {**params, "key": key, "output": "JSON"}
-    async with httpx.AsyncClient(timeout=12.0, trust_env=False) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False) as client:
         response = await client.get(f"{AMAP_BASE_URL}{path}", params=payload)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
@@ -3187,6 +3193,8 @@ async def enrich_walking_route(route: dict[str, Any], buffer_m: float) -> dict[s
                 "polyline": points,
             }
         )
+        paths[-1]["overview_text"] = route_voice_prompt(paths[-1])
+        paths[-1]["cardinal_segments"] = route_cardinal_segments(paths[-1])
     shortest = min(paths, key=lambda item: (item["distance_m"], item["duration_s"])) if paths else None
     eligible = [
         item for item in paths
@@ -3217,6 +3225,47 @@ def route_distance_text(distance_m: int) -> str:
     if distance_m < 1000:
         return f"{distance_m}米"
     return f"{distance_m / 1000:.1f}公里"
+
+
+def normalized_cardinal_direction(step: dict[str, Any]) -> str:
+    orientation = str(step.get("orientation") or "").strip()
+    aliases = {
+        "北": "北", "东北": "东北", "东": "东", "东南": "东南",
+        "南": "南", "西南": "西南", "西": "西", "西北": "西北",
+        "north": "北", "northeast": "东北", "east": "东", "southeast": "东南",
+        "south": "南", "southwest": "西南", "west": "西", "northwest": "西北",
+    }
+    normalized = aliases.get(orientation.lower()) or aliases.get(orientation)
+    if normalized:
+        return normalized
+    points = parse_polyline(str(step.get("polyline") or ""))
+    if len(points) < 2:
+        return ""
+    bearing = bearing_between_deg(
+        float(points[0]["lat"]), float(points[0]["lng"]),
+        float(points[-1]["lat"]), float(points[-1]["lng"]),
+    )
+    directions = ("北", "东北", "东", "东南", "南", "西南", "西", "西北")
+    return directions[int((bearing + 22.5) // 45) % 8]
+
+
+def route_cardinal_segments(best: Optional[dict[str, Any]], max_segments: int = 3) -> list[dict[str, Any]]:
+    if not best:
+        return []
+    segments: list[dict[str, Any]] = []
+    for step in best.get("steps") or []:
+        try:
+            distance_m = int(float(step.get("distance_m") or step.get("distance") or 0))
+        except (TypeError, ValueError):
+            continue
+        direction = normalized_cardinal_direction(step)
+        if distance_m <= 0 or not direction:
+            continue
+        if segments and segments[-1]["direction"] == direction:
+            segments[-1]["distance_m"] += distance_m
+        else:
+            segments.append({"direction": direction, "distance_m": distance_m})
+    return segments[:max_segments]
 
 
 def route_direction_text(best: Optional[dict[str, Any]], max_steps: int = 4) -> str:
@@ -3317,7 +3366,152 @@ def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, 
 def route_voice_prompt(best: Optional[dict[str, Any]]) -> str:
     if not best:
         return "未找到步行路线"
-    return "导航开始，请按提示前进"
+    try:
+        distance_m = int(float(best.get("distance_m") or 0))
+    except (TypeError, ValueError):
+        distance_m = 0
+    overview = [f"全程{route_distance_text(distance_m)}"] if distance_m > 0 else ["路线已规划"]
+    for index, segment in enumerate(route_cardinal_segments(best)):
+        prefix = "先" if index == 0 else "再"
+        overview.append(f"{prefix}向{segment['direction']}走{route_distance_text(segment['distance_m'])}")
+    return "，".join(overview)
+
+
+def traffic_status_rank(value: Any) -> int:
+    text = str(value or "").strip().lower()
+    return {
+        "0": 0, "未知": 0, "unknown": 0,
+        "1": 1, "畅通": 1, "smooth": 1, "clear": 1,
+        "2": 2, "缓行": 2, "slow": 2,
+        "3": 3, "拥堵": 3, "congested": 3,
+        "4": 4, "严重拥堵": 4, "severely congested": 4,
+    }.get(text, 0)
+
+
+def traffic_status_name(rank: int) -> str:
+    return {2: "缓行", 3: "拥堵", 4: "严重拥堵"}.get(rank, "未知")
+
+
+def crossing_step_indexes(steps: list[dict[str, Any]]) -> list[int]:
+    indexes: list[int] = []
+    for index, step in enumerate(steps):
+        action_text = " ".join(str(step.get(key) or "") for key in ("instruction", "action", "assistant_action"))
+        walk_type = str(step.get("walk_type") or "")
+        current_road = str(step.get("road") or step.get("road_name") or "").strip()
+        previous_road = "" if index == 0 else str(
+            steps[index - 1].get("road") or steps[index - 1].get("road_name") or ""
+        ).strip()
+        explicit_crossing = walk_type == "1" or any(
+            token in action_text for token in ("人行横道", "过马路", "穿过马路", "道路对面")
+        )
+        road_change = index > 0 and current_road and previous_road and current_road != previous_road
+        if explicit_crossing or road_change:
+            indexes.append(index)
+    return indexes
+
+
+async def enrich_route_traffic(best: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not best:
+        return {"status": "not_requested", "warnings": []}
+    points = best.get("polyline") or []
+    steps = best.get("steps") or []
+    if len(points) < 2 or not steps:
+        return {"status": "no_route_geometry", "warnings": []}
+    latitudes = [float(point["lat"]) for point in points]
+    longitudes = [float(point["lng"]) for point in points]
+    padding = 0.0005
+    rectangle = (
+        f"{min(longitudes) - padding:.6f},{min(latitudes) - padding:.6f};"
+        f"{max(longitudes) + padding:.6f},{max(latitudes) + padding:.6f}"
+    )
+    try:
+        data = await amap_get(
+            "/traffic/status/rectangle",
+            {"rectangle": rectangle, "level": 5, "extensions": "all"},
+            timeout_seconds=AMAP_TRAFFIC_TIMEOUT_SECONDS,
+        )
+    except (HTTPException, httpx.HTTPError, TimeoutError) as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) else exc.__class__.__name__
+        return {"status": "unavailable", "warnings": [], "detail": detail}
+
+    roads = (data.get("trafficinfo") or {}).get("roads") or []
+    if isinstance(roads, dict):
+        roads = [roads]
+    busy_roads: list[dict[str, Any]] = []
+    for road in roads:
+        rank = traffic_status_rank(road.get("status"))
+        road_points = parse_polyline(str(road.get("polyline") or ""))
+        if rank >= 2 and road_points:
+            busy_roads.append({**road, "rank": rank, "points": road_points})
+
+    warnings: list[dict[str, Any]] = []
+    for crossing_index in crossing_step_indexes(steps):
+        crossing_points = parse_polyline(str(steps[crossing_index].get("polyline") or ""))
+        if not crossing_points:
+            continue
+        crossing = crossing_points[0]
+        matched = [
+            road for road in busy_roads
+            if min_distance_to_polyline_m(float(crossing["lat"]), float(crossing["lng"]), road["points"])
+            <= TRAFFIC_INTERSECTION_MATCH_M
+        ]
+        if not matched:
+            continue
+        busiest = max(matched, key=lambda road: road["rank"])
+        approach_index = max(0, crossing_index - 1)
+        warning = {
+            "id": f"traffic:{float(crossing['lat']):.6f},{float(crossing['lng']):.6f}",
+            "step_index": approach_index,
+            "crossing_step_index": crossing_index,
+            "lat": float(crossing["lat"]),
+            "lng": float(crossing["lng"]),
+            "road_name": busiest.get("name") or steps[crossing_index].get("road_name") or steps[crossing_index].get("road"),
+            "traffic_status": traffic_status_name(int(busiest["rank"])),
+            "speech": "前方路口车流较大",
+        }
+        for warning_step_index in {approach_index, crossing_index}:
+            warning_step = steps[warning_step_index]
+            existing_rank = traffic_status_rank(warning_step.get("traffic_status"))
+            if int(busiest["rank"]) >= existing_rank:
+                warning_step.update({
+                    "traffic_warning_id": warning["id"],
+                    "traffic_status": warning["traffic_status"],
+                    "traffic_warning": warning["speech"],
+                    "traffic_crossing_lat": warning["lat"],
+                    "traffic_crossing_lng": warning["lng"],
+                })
+        warnings.append(warning)
+    return {
+        "status": "available",
+        "source": "amap_traffic_status",
+        "warnings": warnings,
+        "busy_road_count": len(busy_roads),
+    }
+
+
+async def enrich_navigation_session_traffic(session_id: str) -> None:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT route_polyline_json, route_steps_json FROM navigation_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    if not row:
+        return
+    try:
+        route = {
+            "polyline": json.loads(row["route_polyline_json"] or "[]"),
+            "steps": json.loads(row["route_steps_json"] or "[]"),
+        }
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return
+    traffic = await enrich_route_traffic(route)
+    if traffic.get("status") != "available":
+        return
+    with db() as conn:
+        conn.execute(
+            "UPDATE navigation_sessions SET route_steps_json = ?, updated_at = ? WHERE session_id = ?",
+            (json.dumps(route["steps"], ensure_ascii=False), now_iso(), session_id),
+        )
 
 
 async def generate_route_advice(
@@ -4537,11 +4731,18 @@ def update_navigation_session(session_id: str, update: NavigationSessionUpdate) 
         recalculate_road_risk_score(segment_id)
     step = steps[step_index] if steps and step_index < len(steps) else None
     distance_to_next_action_m = distance_to_step_action_m(step, update.lat, update.lng)
+    traffic_distance_m = None
+    if step and step.get("traffic_crossing_lat") is not None and step.get("traffic_crossing_lng") is not None:
+        traffic_distance_m = haversine_m(
+            update.lat, update.lng,
+            float(step["traffic_crossing_lat"]), float(step["traffic_crossing_lng"]),
+        )
     return {
         "success": True, "session_id": session_id, "status": status,
         "current_step_index": step_index, "distance_to_route_m": round(off_route_m, 1),
         "distance_to_destination_m": round(destination_distance_m, 1),
         "distance_to_next_action_m": round(distance_to_next_action_m, 1),
+        "distance_to_traffic_warning_m": round(traffic_distance_m, 1) if traffic_distance_m is not None else None,
         "off_route": should_replan, "off_route_count": off_route_count,
         "arrived": arrived, "arrival_count": arrival_count,
         "current_step": step, "should_replan": should_replan,
@@ -4682,6 +4883,9 @@ async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
     if request.route_preference == "distance" and enriched.get("shortest_route"):
         enriched["best_route"] = enriched["shortest_route"]
         enriched["selected_route_index"] = enriched["shortest_route"].get("index")
+    enriched["traffic"] = {"status": "pending", "warnings": []}
+    enriched["traffic_warnings"] = []
+    enriched["voice_prompt"] = route_voice_prompt(enriched.get("best_route"))
     sensor_analysis = None
     if request.sensor_frame:
         history = nearby_summary(origin_lat, origin_lng, request.risk_radius_m)
@@ -4743,6 +4947,7 @@ async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
         response["session_id"] = create_navigation_session(
             request.device_id, None, response, request.destination_text, request.route_preference
         )
+        asyncio.create_task(enrich_navigation_session_traffic(response["session_id"]))
     return response
 
 
