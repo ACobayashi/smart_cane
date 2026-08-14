@@ -146,9 +146,11 @@ class SmartCaneAppController private constructor(
                             navigationArrived = arrived
                         )
                     }
-                    if (arrived) speakText("已到达目的地。", priority = TtsPriority.NAVIGATION)
-                    else if (!maybeSpeakCrossingWarning(crossingWarningId, crossingType, distanceToCrossingWarning)) {
+                    if (arrived) {
+                        speakText("已到达目的地。", priority = TtsPriority.NAVIGATION)
+                    } else {
                         maybeSpeakNavigationStep(stepIndex, instruction, distanceToNextAction)
+                        maybeSpeakCrossingWarning(crossingWarningId, crossingType, distanceToCrossingWarning)
                     }
                 }
                 NavigationLocationService.ACTION_REPLANNING -> {
