@@ -34,6 +34,19 @@ class AlertSpeechRoleTest {
     }
 
     @Test
+    fun automaticRecordingMeasuresPcmSpeechAmplitude() {
+        val samples = byteArrayOf(
+            0xe8.toByte(), 0x03,
+            0x18, 0xfc.toByte(),
+            0x00, 0x00
+        )
+
+        assertEquals(666, pcm16MeanAmplitude(samples))
+        assertEquals(1_000, pcm16MeanAmplitude(samples, 4))
+        assertEquals(0, pcm16MeanAmplitude(byteArrayOf()))
+    }
+
+    @Test
     fun caneVoicePromptInterruptsNonEmergencySpeech() {
         assertTrue(shouldInterruptCurrentSpeech(TtsPriority.NAVIGATION, TtsPriority.VOICE_REQUEST))
         assertTrue(shouldInterruptCurrentSpeech(TtsPriority.STEP, TtsPriority.VOICE_REQUEST))

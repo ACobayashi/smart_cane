@@ -70,6 +70,7 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class SmartCaneAppController private constructor(
@@ -84,6 +85,7 @@ class SmartCaneAppController private constructor(
     private var speechRecognizer: SpeechRecognizer? = null
     private var voiceRecognitionActive = false
     private var voiceRecordingJob: Job? = null
+    private var voiceRecordingSessionId = 0L
     private var voiceRecorder: AudioRecord? = null
     private var voiceRecordingFile: File? = null
     private var backendVoiceRecordingActive = false
@@ -1199,7 +1201,9 @@ class SmartCaneAppController private constructor(
                 if (listenAfter) {
                     if (pendingAutoListenUtteranceId != utteranceId) return@launch
                     pendingAutoListenUtteranceId = null
-                    _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "正在准备语音识别", voiceTranscript = null) }
+                    _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "正在准备录音", voiceTranscript = null) }
+                    delay(AUTOMATIC_VOICE_AFTER_PROMPT_DELAY_MS)
+                    if (activeTtsUtteranceId != null) return@launch
                     startVoiceListening()
                     return@launch
                 } else {
@@ -1263,7 +1267,7 @@ class SmartCaneAppController private constructor(
         }
         if (listenAfter) {
             scope.launch {
-                delay(1_800L)
+                delay(AUTOMATIC_VOICE_TTS_FALLBACK_MS)
                 if (pendingAutoListenUtteranceId != utteranceId) return@launch
                 pendingAutoListenUtteranceId = null
                 if (activeTtsUtteranceId == utteranceId) {
@@ -1271,18 +1275,21 @@ class SmartCaneAppController private constructor(
                     activeTtsUtteranceId = null
                     activeTtsPriority = null
                 }
-                _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "正在准备语音识别", voiceTranscript = null) }
+                _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "正在准备录音", voiceTranscript = null) }
+                delay(AUTOMATIC_VOICE_AFTER_PROMPT_DELAY_MS)
+                if (activeTtsUtteranceId != null) return@launch
                 startVoiceListening()
             }
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun startVoiceRecording() {
+    private fun startVoiceRecording(automatic: Boolean = false) {
         if (!hasAudioPermission()) {
             _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "请给 App 开启麦克风权限", voiceTranscript = "请给 App 开启麦克风权限") }
             return
         }
+        if (voiceRecorder != null || voiceRecordingJob?.isActive == true) return
         val sampleRate = 16_000
         val minBufferSize = AudioRecord.getMinBufferSize(
             sampleRate,
@@ -1311,15 +1318,58 @@ class SmartCaneAppController private constructor(
 
         voiceRecorder = recorder
         voiceRecordingFile = file
+        val recordingSessionId = ++voiceRecordingSessionId
+        automaticVoiceListeningActive = automatic
         voiceRecognitionActive = true
-        _uiState.update { it.copy(voiceState = VoiceState.Listening, message = "正在录音", voiceTranscript = null) }
+        _uiState.update {
+            it.copy(
+                voiceState = VoiceState.Listening,
+                message = if (automatic) "请说目的地或指令" else "正在录音",
+                voiceTranscript = if (automatic) "自动录音中，请直接说话" else null
+            )
+        }
         voiceRecordingJob = scope.launch(Dispatchers.IO) {
+            val startedAt = System.currentTimeMillis()
+            var speechDetected = false
+            var lastSpeechAt = startedAt
+            var submitAfterSilence = false
             FileOutputStream(file).use { output ->
                 val buffer = ByteArray(bufferSize)
                 runCatching { recorder.startRecording() }
-                while (voiceRecognitionActive) {
+                while (voiceRecognitionActive && voiceRecordingSessionId == recordingSessionId) {
                     val read = runCatching { recorder.read(buffer, 0, buffer.size) }.getOrDefault(0)
-                    if (read > 0) output.write(buffer, 0, read)
+                    if (read <= 0) continue
+                    output.write(buffer, 0, read)
+                    if (automatic) {
+                        val now = System.currentTimeMillis()
+                        if (pcm16MeanAmplitude(buffer, read) >= AUTOMATIC_VOICE_ACTIVITY_THRESHOLD) {
+                            speechDetected = true
+                            lastSpeechAt = now
+                        } else if (
+                            speechDetected &&
+                            now - lastSpeechAt >= AUTOMATIC_VOICE_SILENCE_TO_SUBMIT_MS &&
+                            now - startedAt >= AUTOMATIC_VOICE_MIN_CAPTURE_MS
+                        ) {
+                            voiceRecognitionActive = false
+                            submitAfterSilence = true
+                        }
+                    }
+                }
+            }
+            if (submitAfterSilence) {
+                scope.launch {
+                    if (automaticVoiceListeningActive && voiceRecorder === recorder) {
+                        stopVoiceRecordingAndSubmit()
+                    }
+                }
+            }
+        }
+        if (automatic) {
+            automaticVoiceTimeoutJob?.cancel()
+            automaticVoiceTimeoutJob = scope.launch {
+                delay(AUTOMATIC_VOICE_LISTENING_TIMEOUT_MS)
+                if (automaticVoiceListeningActive && voiceRecorder === recorder) {
+                    stopVoiceRecordingAndSubmit()
                 }
             }
         }
@@ -1329,6 +1379,8 @@ class SmartCaneAppController private constructor(
         val file = voiceRecordingFile
         val recorder = voiceRecorder
         val job = voiceRecordingJob
+        finishAutomaticVoiceListening()
+        voiceRecordingSessionId++
         voiceRecognitionActive = false
         runCatching { recorder?.stop() }
         scope.launch {
@@ -1364,7 +1416,7 @@ class SmartCaneAppController private constructor(
                 }
                 is ApiResult.Failure -> {
                     _uiState.update { it.copy(voiceState = VoiceState.Idle, message = result.message, voiceTranscript = result.message) }
-                    speakText("语音请求失败，请检查网络或后端服务")
+                    speakText("语音上传失败，请检查手机网络后重试")
                 }
             }
             runCatching { file.delete() }
@@ -1375,23 +1427,9 @@ class SmartCaneAppController private constructor(
         ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     private fun startVoiceListening() {
-        automaticVoiceListeningActive = true
-        if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
-            startBackendVoiceRecording()
-            return
-        }
-
-        val recognizer = runCatching {
-            speechRecognizer ?: SpeechRecognizer.createSpeechRecognizer(appContext).also {
-                speechRecognizer = it
-                it.setRecognitionListener(createRecognitionListener())
-            }
-        }.getOrElse {
-            startBackendVoiceRecording()
-            return
-        }
-
-        startSystemRecognizer(recognizer)
+        finishAutomaticVoiceListening()
+        runCatching { speechRecognizer?.cancel() }
+        startVoiceRecording(automatic = true)
     }
 
     private fun createRecognitionListener(): RecognitionListener = object : RecognitionListener {
@@ -1666,7 +1704,17 @@ class SmartCaneAppController private constructor(
     private fun cancelAutomaticVoiceListeningForManualPress() {
         finishAutomaticVoiceListening()
         runCatching { speechRecognizer?.cancel() }
+        val pcmRecorder = voiceRecorder
+        val pcmFile = voiceRecordingFile
+        voiceRecordingSessionId++
         voiceRecognitionActive = false
+        voiceRecordingJob?.cancel()
+        voiceRecordingJob = null
+        voiceRecorder = null
+        voiceRecordingFile = null
+        runCatching { pcmRecorder?.stop() }
+        runCatching { pcmRecorder?.release() }
+        runCatching { pcmFile?.delete() }
         if (backendVoiceRecordingActive) {
             val recorder = backendVoiceRecorder
             val file = backendVoiceFile
@@ -2047,8 +2095,28 @@ internal fun latestFreshVoiceRequest(alerts: List<EmergencyAlertDto>): Emergency
 internal fun shouldListenAfterCaneVoiceRequest(riskType: String): Boolean =
     riskType == "voice_request"
 
+private const val AUTOMATIC_VOICE_TTS_FALLBACK_MS = 5_000L
+private const val AUTOMATIC_VOICE_AFTER_PROMPT_DELAY_MS = 350L
 private const val AUTOMATIC_VOICE_LISTENING_TIMEOUT_MS = 8_000L
 private const val AUTOMATIC_VOICE_RESULT_TIMEOUT_MS = 2_000L
+private const val AUTOMATIC_VOICE_ACTIVITY_THRESHOLD = 500
+private const val AUTOMATIC_VOICE_SILENCE_TO_SUBMIT_MS = 900L
+private const val AUTOMATIC_VOICE_MIN_CAPTURE_MS = 1_000L
+
+internal fun pcm16MeanAmplitude(buffer: ByteArray, length: Int = buffer.size): Int {
+    val safeLength = length.coerceIn(0, buffer.size)
+    var index = 0
+    var sampleCount = 0
+    var totalAmplitude = 0L
+    while (index + 1 < safeLength) {
+        val low = buffer[index].toInt() and 0xff
+        val high = buffer[index + 1].toInt() shl 8
+        totalAmplitude += abs((high or low).toShort().toInt()).toLong()
+        sampleCount++
+        index += 2
+    }
+    return if (sampleCount == 0) 0 else (totalAmplitude / sampleCount).toInt()
+}
 
 internal enum class VoicePressStartAction {
     START_MANUAL,
