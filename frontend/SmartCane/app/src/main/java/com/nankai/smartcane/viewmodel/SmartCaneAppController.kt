@@ -275,8 +275,8 @@ class SmartCaneAppController private constructor(
             else -> return
         }
         if (!announcedNavigationSteps.add("$stepIndex:$threshold")) return
-        val conciseInstruction = instruction.replace(Regex("[。；;].*"), "").trim()
-        speakText("${threshold}米后，$conciseInstruction", priority = TtsPriority.NAVIGATION)
+        val maneuver = conciseNavigationManeuver(instruction)
+        speakText("${threshold}米后$maneuver", priority = TtsPriority.NAVIGATION)
     }
 
     private fun maybeSpeakCrossingWarning(warningId: String, crossingType: String, distanceM: Double): Boolean {
@@ -1947,6 +1947,20 @@ internal fun crossingReminderSpeech(crossingType: String, distanceM: Double): Cr
         CrossingReminder(10, "前方即将进入$label，请停下确认安全后通过")
     } else {
         CrossingReminder(30, "前方30米有$label，请减速")
+    }
+}
+
+internal fun conciseNavigationManeuver(instruction: String): String {
+    val text = instruction.replace(Regex("[。；;].*"), "").trim()
+    return when {
+        text.contains("左转") -> "左转"
+        text.contains("右转") -> "右转"
+        text.contains("掉头") -> "掉头"
+        text.contains("向左前方") -> "向左前方行进"
+        text.contains("向右前方") -> "向右前方行进"
+        text.contains("直行") -> "直行"
+        text.contains("到达目的地") -> "到达目的地"
+        else -> text
     }
 }
 

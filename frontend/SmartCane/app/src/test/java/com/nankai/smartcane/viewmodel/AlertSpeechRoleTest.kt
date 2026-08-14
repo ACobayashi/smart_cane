@@ -279,6 +279,14 @@ class AlertSpeechRoleTest {
     }
 
     @Test
+    fun navigationManeuversDoNotRepeatRoadDirectionOrOriginalStepDistance() {
+        assertEquals("左转", conciseNavigationManeuver("向西步行39米左转"))
+        assertEquals("右转", conciseNavigationManeuver("沿秋实路向南步行37米右转"))
+        assertEquals("掉头", conciseNavigationManeuver("沿辅路向北步行20米掉头"))
+        assertEquals("向左前方行进", conciseNavigationManeuver("向左前方步行15米"))
+    }
+
+    @Test
     fun locationSyncUsesOnlyBoundCaneOrDemoCane() {
         assertEquals("cane_123", locationSyncDeviceId(" cane_123 ", isDemoAccount = false))
         assertEquals(DemoData.defaultCane.deviceId, locationSyncDeviceId("", isDemoAccount = true))
