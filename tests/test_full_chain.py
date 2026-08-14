@@ -1430,6 +1430,32 @@ def test_explicit_navigation_command_skips_llm(monkeypatch):
     assert parsed["provider"] == "rule"
 
 
+def test_unknown_navigation_prompt_never_contains_an_example(monkeypatch):
+    async def fake_completion(*args, **kwargs):
+        return (
+            json.dumps({
+                "intent": "unknown",
+                "origin_text": None,
+                "destination_text": None,
+                "confidence": 0.9,
+                "reply": "例如导航到南开大学图书馆",
+            }, ensure_ascii=False),
+            {"provider": "test", "model": "test"},
+        )
+
+    monkeypatch.setattr(main, "call_chat_completion", fake_completion)
+    parsed = main.asyncio.run(main.parse_route_text_with_llm("我还没想好"))
+
+    assert parsed["intent"] == "unknown"
+    assert parsed["reply"] == "请说出想要导航去的地方"
+
+
+def test_greeting_uses_the_same_short_navigation_prompt():
+    parsed = main.asyncio.run(main.parse_route_text_with_llm("你好"))
+
+    assert parsed["reply"] == "请说出想要导航去的地方"
+
+
 def test_risk_aware_route_does_not_wait_for_llm(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "fast_route.db")
     main.init_db()

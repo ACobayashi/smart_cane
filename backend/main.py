@@ -3834,7 +3834,7 @@ async def parse_route_text_with_llm(text: str) -> dict[str, Any]:
             "destination_text": None,
             "intent": "unknown",
             "confidence": 1.0,
-            "reply": "你好，我在。请按住说出要导航去的地方。",
+            "reply": "请说出想要导航去的地方",
             "fallback": True,
         }
     if fallback_destination:
@@ -3853,7 +3853,7 @@ async def parse_route_text_with_llm(text: str) -> dict[str, Any]:
         "destination_text": fallback_destination,
         "intent": "route" if fallback_destination else "unknown",
         "confidence": 0.45 if fallback_destination else 0.2,
-        "reply": None if fallback_destination else "请说出要导航去的地方，例如：导航到南开大学图书馆。",
+        "reply": None if fallback_destination else "请说出想要导航去的地方",
         "fallback": True,
     }
     messages = [
@@ -3889,7 +3889,11 @@ async def parse_route_text_with_llm(text: str) -> dict[str, Any]:
             "destination_text": destination_text,
             "intent": intent,
             "confidence": parsed.get("confidence", 0.0),
-            "reply": parsed.get("reply") or (None if destination_text else fallback["reply"]),
+            "reply": (
+                "请说出想要导航去的地方"
+                if intent == "unknown" and not destination_text
+                else parsed.get("reply") or (None if destination_text else fallback["reply"])
+            ),
             "fallback": False,
             "provider": meta["provider"],
             "model": meta["model"],
