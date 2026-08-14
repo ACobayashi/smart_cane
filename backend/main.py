@@ -3451,6 +3451,17 @@ def traffic_status_name(rank: int) -> str:
     return {2: "缓行", 3: "拥堵", 4: "严重拥堵"}.get(rank, "未知")
 
 
+def step_has_traffic_light(step: dict[str, Any]) -> bool:
+    for key in ("traffic_lights", "traffic_light_count", "trafficLightCount", "trafficLightNumber"):
+        value = step.get(key)
+        try:
+            if int(value or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def crossing_type_for_step(steps: list[dict[str, Any]], index: int) -> Optional[str]:
     step = steps[index]
     action_text = " ".join(
@@ -3461,8 +3472,10 @@ def crossing_type_for_step(steps: list[dict[str, Any]], index: int) -> Optional[
         token in action_text for token in ("斑马线", "人行横道", "过马路", "穿过马路", "道路对面")
     ):
         return "crosswalk"
+    if step_has_traffic_light(step) or (index > 0 and step_has_traffic_light(steps[index - 1])):
+        return "crosswalk"
     if any(token in action_text for token in ("十字路口", "交叉口", "路口")):
-        return "intersection"
+        return "crosswalk"
     current_road = str(step.get("road") or step.get("road_name") or "").strip()
     previous_road = "" if index == 0 else str(
         steps[index - 1].get("road") or steps[index - 1].get("road_name") or ""
@@ -3475,7 +3488,15 @@ def crossing_type_for_step(steps: list[dict[str, Any]], index: int) -> Optional[
         and previous_road != "未命名道路"
         and current_road != previous_road
     ):
-        return "intersection"
+        return "crosswalk"
+    if index > 0:
+        previous_step = steps[index - 1]
+        previous_action_text = " ".join(
+            str(previous_step.get(key) or "")
+            for key in ("instruction", "action", "assistant_action")
+        )
+        if any(token in previous_action_text for token in ("左转", "右转", "向左", "向右")):
+            return "intersection"
     return None
 
 

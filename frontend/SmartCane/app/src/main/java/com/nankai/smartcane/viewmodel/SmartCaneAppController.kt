@@ -309,7 +309,6 @@ class SmartCaneAppController private constructor(
     fun loginDemoCompanion() = login(DemoData.COMPANION_ACCOUNT, DemoData.DEMO_PASSWORD, true)
 
     fun selectMode(mode: AppMode) {
-        stopNavigation()
         preferences.saveMode(mode)
         preferences.saveFirstGuideCompleted(true)
         _uiState.update { it.copy(message = "已切换") }
@@ -1860,7 +1859,7 @@ internal fun crossingReminderSpeech(crossingType: String, distanceM: Double): Cr
     if (!distanceM.isFinite() || distanceM < 0.0 || distanceM > 30.0) return null
     val label = when (crossingType.trim().lowercase(Locale.US)) {
         "crosswalk" -> "斑马线"
-        "intersection" -> "十字路口"
+        "intersection" -> "路口"
         else -> return null
     }
     return if (distanceM <= 10.0) {

@@ -250,11 +250,11 @@ class AlertSpeechRoleTest {
             crossingReminderSpeech("crosswalk", 8.0)
         )
         assertEquals(
-            CrossingReminder(30, "前方30米有十字路口，请减速"),
+            CrossingReminder(30, "前方30米有路口，请减速"),
             crossingReminderSpeech("intersection", 30.0)
         )
         assertEquals(
-            CrossingReminder(10, "前方即将进入十字路口，请停下确认安全后通过"),
+            CrossingReminder(10, "前方即将进入路口，请停下确认安全后通过"),
             crossingReminderSpeech("intersection", 10.0)
         )
         assertNull(crossingReminderSpeech("intersection", 30.1))

@@ -1411,11 +1411,42 @@ def test_crosswalk_warning_is_attached_to_approach_and_crossing_steps():
     assert route["steps"][0]["crossing_lng"] == 117.0
 
 
-def test_road_change_is_annotated_as_intersection_without_traffic_data():
+def test_named_road_change_uses_fast_signalized_crosswalk_fallback():
     route = {
         "steps": [
             {"road": "甲路", "polyline": "117.0,39.0;117.0,39.001"},
             {"road": "乙路", "polyline": "117.0,39.001;117.001,39.001"},
+        ],
+    }
+
+    warnings = main.annotate_route_crossings(route)
+
+    assert warnings[0]["type"] == "crosswalk"
+    assert route["steps"][0]["crossing_type"] == "crosswalk"
+    assert route["steps"][1]["crossing_type"] == "crosswalk"
+
+
+def test_amap_traffic_light_field_is_treated_as_crosswalk_without_extra_request():
+    route = {
+        "steps": [
+            {
+                "road": "甲路", "traffic_lights": "1",
+                "polyline": "117.0,39.0;117.0,39.001",
+            },
+        ],
+    }
+
+    warnings = main.annotate_route_crossings(route)
+
+    assert warnings[0]["type"] == "crosswalk"
+    assert route["steps"][0]["crossing_type"] == "crosswalk"
+
+
+def test_turn_between_unnamed_paths_is_annotated_as_intersection():
+    route = {
+        "steps": [
+            {"road": "", "instruction": "向东步行80米左转", "polyline": "117.0,39.0;117.001,39.0"},
+            {"road": "", "instruction": "向北步行50米", "polyline": "117.001,39.0;117.001,39.001"},
         ],
     }
 
