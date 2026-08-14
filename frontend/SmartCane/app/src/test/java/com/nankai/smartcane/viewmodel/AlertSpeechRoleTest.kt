@@ -291,10 +291,24 @@ class AlertSpeechRoleTest {
         assertEquals("前方左转", navigationTurnReminder("向西步行39米左转", 10.0))
         assertEquals("前方右转", navigationTurnReminder("沿秋实路向南步行37米右转", 4.5))
         assertEquals("前方左转", navigationTurnReminder("通过红绿灯路口后左转", 6.0))
+        assertEquals("前方右转", navigationTurnReminder("向西南步行18米向右后方行走", 8.0))
+        assertEquals("前方左转", navigationTurnReminder("向左前方步行15米", 9.0))
+        assertEquals("前方右转", navigationTurnReminder("沿松榆北路向东步行80米右转", 11.36, 4.26))
+        assertEquals("前方左转", navigationTurnReminder("向西步行39米左转", 15.0, 50.0))
+        assertNull(navigationTurnReminder("向西步行39米左转", 15.1, 50.0))
         assertNull(navigationTurnReminder("向西步行39米左转", 10.1))
         assertNull(navigationTurnReminder("继续直行", 5.0))
         assertNull(navigationTurnReminder("向西步行39米左转", -1.0))
         assertNull(navigationTurnReminder("向西步行39米左转", Double.NaN))
+    }
+
+    @Test
+    fun completedStepProvidesTurnFallbackWhenDistanceThresholdWasSkipped() {
+        assertEquals("前方左转", completedNavigationTurnReminder(2, 3, "向西步行39米左转"))
+        assertNull(completedNavigationTurnReminder(2, 2, "向西步行39米左转"))
+        assertNull(completedNavigationTurnReminder(3, 2, "向西步行39米左转"))
+        assertNull(completedNavigationTurnReminder(null, 1, "向西步行39米左转"))
+        assertNull(completedNavigationTurnReminder(2, 3, "继续直行"))
     }
 
     @Test

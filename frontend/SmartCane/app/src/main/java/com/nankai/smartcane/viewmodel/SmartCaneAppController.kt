@@ -133,6 +133,7 @@ class SmartCaneAppController private constructor(
                     val distanceToRoute = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_ROUTE_M, 0.0)
                     val distanceToDestination = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_DESTINATION_M, 0.0)
                     val distanceToNextAction = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_NEXT_ACTION_M, Double.MAX_VALUE)
+                    val locationAccuracy = intent.getDoubleExtra(NavigationLocationService.EXTRA_LOCATION_ACCURACY_M, 0.0)
                     val distanceToCrossingWarning = intent.getDoubleExtra(
                         NavigationLocationService.EXTRA_DISTANCE_TO_CROSSING_WARNING_M, Double.MAX_VALUE
                     )
@@ -147,11 +148,15 @@ class SmartCaneAppController private constructor(
                         )
                     }
                     if (arrived) {
+                        maybeSpeakCompletedNavigationTurn(stepIndex)
                         speakText("已到达目的地。", priority = TtsPriority.NAVIGATION)
                     } else {
-                        maybeSpeakNavigationStep(stepIndex, instruction, distanceToNextAction)
+                        maybeSpeakCompletedNavigationTurn(stepIndex)
+                        maybeSpeakNavigationStep(stepIndex, instruction, distanceToNextAction, locationAccuracy)
                         maybeSpeakCrossingWarning(crossingWarningId, crossingType, distanceToCrossingWarning)
                     }
+                    lastNavigationStepIndex = stepIndex
+                    lastNavigationInstruction = instruction
                 }
                 NavigationLocationService.ACTION_REPLANNING -> {
                     _uiState.update { it.copy(navigationStatus = "replanning") }
@@ -159,6 +164,7 @@ class SmartCaneAppController private constructor(
                 }
                 NavigationLocationService.ACTION_REPLANNED -> {
                     val success = intent.getBooleanExtra(NavigationLocationService.EXTRA_REPLAN_SUCCESS, false)
+                    if (success) resetNavigationAnnouncementState()
                     _uiState.update {
                         it.copy(
                             navigationStatus = if (success) "active" else "replan_failed",
@@ -182,6 +188,8 @@ class SmartCaneAppController private constructor(
     }
     private val announcedNavigationSteps = mutableSetOf<String>()
     private val announcedCrossingWarnings = mutableSetOf<String>()
+    private var lastNavigationStepIndex: Int? = null
+    private var lastNavigationInstruction: String = ""
 
     private fun currentCaneDeviceId(): String =
         _uiState.value.currentRelation?.caneDevice?.deviceId
@@ -218,8 +226,7 @@ class SmartCaneAppController private constructor(
         val bestRoute = route.bestRoute ?: return false
         NavigationLocationService.latestRoute = route
         NavigationLocationService.start(appContext, sessionId, deviceId)
-        announcedNavigationSteps.clear()
-        announcedCrossingWarnings.clear()
+        resetNavigationAnnouncementState()
         _uiState.update { state ->
             state.copy(
                 navigationStatus = "active",
@@ -266,12 +273,39 @@ class SmartCaneAppController private constructor(
     private fun maybeSpeakNavigationStep(
         stepIndex: Int,
         instruction: String,
-        distanceToNextActionM: Double
+        distanceToNextActionM: Double,
+        locationAccuracyM: Double
     ) {
         if (instruction.isBlank()) return
-        val reminder = navigationTurnReminder(instruction, distanceToNextActionM) ?: return
+        val reminder = navigationTurnReminder(instruction, distanceToNextActionM, locationAccuracyM) ?: return
         if (!announcedNavigationSteps.add("$stepIndex:turn")) return
-        speakText(reminder, priority = TtsPriority.NAVIGATION)
+        Log.i(
+            NAVIGATION_TURN_LOG_TAG,
+            "trigger=radius step=$stepIndex distanceM=$distanceToNextActionM accuracyM=$locationAccuracyM text=$reminder"
+        )
+        speakText(reminder, priority = TtsPriority.NAVIGATION, bypassTextCooldown = true)
+    }
+
+    private fun maybeSpeakCompletedNavigationTurn(currentStepIndex: Int) {
+        val previousStepIndex = lastNavigationStepIndex ?: return
+        val reminder = completedNavigationTurnReminder(
+            previousStepIndex,
+            currentStepIndex,
+            lastNavigationInstruction
+        ) ?: return
+        if (!announcedNavigationSteps.add("$previousStepIndex:turn")) return
+        Log.i(
+            NAVIGATION_TURN_LOG_TAG,
+            "trigger=step_transition previousStep=$previousStepIndex currentStep=$currentStepIndex text=$reminder"
+        )
+        speakText(reminder, priority = TtsPriority.NAVIGATION, bypassTextCooldown = true)
+    }
+
+    private fun resetNavigationAnnouncementState() {
+        announcedNavigationSteps.clear()
+        announcedCrossingWarnings.clear()
+        lastNavigationStepIndex = null
+        lastNavigationInstruction = ""
     }
 
     private fun maybeSpeakCrossingWarning(warningId: String, crossingType: String, distanceM: Double): Boolean {
@@ -1793,8 +1827,7 @@ class SmartCaneAppController private constructor(
     }
 
     private fun clearNavigationUiState() {
-        announcedNavigationSteps.clear()
-        announcedCrossingWarnings.clear()
+        resetNavigationAnnouncementState()
         _uiState.update {
             it.copy(
                 navigationStatus = "idle",
@@ -1859,6 +1892,7 @@ class SmartCaneAppController private constructor(
 
     companion object {
         private const val SELF_SOS_REPLAY_LOG_TAG = "SelfSosReplay"
+        private const val NAVIGATION_TURN_LOG_TAG = "SmartCaneTurn"
         private const val LOCATION_MAX_AGE_MS = 5 * 60 * 1000L
         private const val NAVIGATION_LOCATION_MAX_AGE_MS = 90 * 1000L
         private const val LOCATION_MAX_ACCURACY_M = 80f
@@ -1959,14 +1993,39 @@ internal fun conciseNavigationManeuver(instruction: String): String {
     }
 }
 
-internal fun navigationTurnReminder(instruction: String, distanceM: Double): String? {
-    if (!distanceM.isFinite() || distanceM < 0.0 || distanceM > 10.0) return null
-    return when (conciseNavigationManeuver(instruction)) {
-        "左转" -> "前方左转"
-        "右转" -> "前方右转"
+internal const val NAVIGATION_TURN_BASE_RADIUS_M = 10.0
+internal const val NAVIGATION_TURN_MAX_ACCURACY_COMPENSATION_M = 5.0
+
+internal fun navigationTurnSpeech(instruction: String): String? {
+    val text = instruction.replace(Regex("[。；;].*"), "").trim()
+    return when {
+        text.contains("左转") || text.contains("向左前方") || text.contains("向左后方") -> "前方左转"
+        text.contains("右转") || text.contains("向右前方") || text.contains("向右后方") -> "前方右转"
         else -> null
     }
 }
+
+internal fun navigationTurnReminder(
+    instruction: String,
+    distanceM: Double,
+    locationAccuracyM: Double = 0.0
+): String? {
+    if (!distanceM.isFinite() || distanceM < 0.0) return null
+    val accuracyCompensationM = locationAccuracyM
+        .takeIf { it.isFinite() && it > 0.0 }
+        ?.coerceAtMost(NAVIGATION_TURN_MAX_ACCURACY_COMPENSATION_M)
+        ?: 0.0
+    if (distanceM > NAVIGATION_TURN_BASE_RADIUS_M + accuracyCompensationM) return null
+    return navigationTurnSpeech(instruction)
+}
+
+internal fun completedNavigationTurnReminder(
+    previousStepIndex: Int?,
+    currentStepIndex: Int,
+    previousInstruction: String
+): String? = if (previousStepIndex != null && currentStepIndex > previousStepIndex) {
+    navigationTurnSpeech(previousInstruction)
+} else null
 
 internal fun locationSyncDeviceId(boundDeviceId: String, isDemoAccount: Boolean): String? =
     boundDeviceId.trim().ifBlank { DemoData.defaultCane.deviceId.takeIf { isDemoAccount } }
