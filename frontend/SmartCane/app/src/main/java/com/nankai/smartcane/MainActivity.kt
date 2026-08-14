@@ -95,6 +95,7 @@ import com.nankai.smartcane.data.network.SmartCaneApiClient
 import com.nankai.smartcane.data.network.SosRequestDto
 import com.nankai.smartcane.navigation.SmartCaneRootApp
 import com.nankai.smartcane.location.PhoneHeadingProvider
+import com.nankai.smartcane.viewmodel.SmartCaneAppController
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -655,9 +656,12 @@ fun StatusRow(label: String, value: String, valueColor: Color = Color(0xFF0F172A
 
 @Composable
 fun MapPage(deviceId: String? = null) {
+    val context = LocalContext.current
+    val controller = remember { SmartCaneAppController.get(context) }
     var retryKey by remember { mutableIntStateOf(0) }
     var state by remember { mutableStateOf<MapRiskUiState>(MapRiskUiState.Loading) }
     var sheetExpanded by remember { mutableStateOf(false) }
+    var showStopNavigationConfirm by remember { mutableStateOf(false) }
     var activeNavigation by remember(deviceId) { mutableStateOf<ActiveNavigationSessionDto?>(null) }
 
     LaunchedEffect(retryKey) {
@@ -692,7 +696,7 @@ fun MapPage(deviceId: String? = null) {
         Box(Modifier.fillMaxSize()) {
             RiskMapViewport(
                 points = points,
-                showMyLocation = hasLocationPermission(LocalContext.current),
+                showMyLocation = hasLocationPermission(context),
                 navigation = activeNavigation,
                 modifier = Modifier.fillMaxSize()
             )
@@ -700,6 +704,7 @@ fun MapPage(deviceId: String? = null) {
             MapTopBar(
                 pointCount = points.size,
                 navigation = activeNavigation,
+                onStopNavigation = { showStopNavigationConfirm = true },
                 modifier = Modifier.align(Alignment.TopCenter)
             )
 
@@ -717,6 +722,25 @@ fun MapPage(deviceId: String? = null) {
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
         }
+    }
+
+    if (showStopNavigationConfirm) {
+        AlertDialog(
+            onDismissRequest = { showStopNavigationConfirm = false },
+            title = { Text("结束导航") },
+            text = { Text("确认结束当前导航吗？结束后将停止路线、路口和斑马线提醒。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    val sessionId = activeNavigation?.sessionId
+                    showStopNavigationConfirm = false
+                    activeNavigation = null
+                    controller.stopNavigationSession(sessionId)
+                }) { Text("确认结束") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showStopNavigationConfirm = false }) { Text("继续导航") }
+            }
+        )
     }
 }
 
@@ -740,6 +764,7 @@ private fun RiskMapViewport(
 private fun MapTopBar(
     pointCount: Int,
     navigation: ActiveNavigationSessionDto?,
+    onStopNavigation: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -770,6 +795,11 @@ private fun MapTopBar(
                     },
                     navigation?.motionStatus == "walking"
                 )
+                if (navigation != null) {
+                    TextButton(onClick = onStopNavigation) {
+                        Text("结束导航", color = Color(0xFFB91C1C), fontWeight = FontWeight.Bold)
+                    }
+                }
             }
         }
     }

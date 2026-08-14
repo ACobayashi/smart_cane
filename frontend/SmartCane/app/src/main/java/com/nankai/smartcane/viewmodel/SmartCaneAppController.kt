@@ -309,6 +309,7 @@ class SmartCaneAppController private constructor(
     fun loginDemoCompanion() = login(DemoData.COMPANION_ACCOUNT, DemoData.DEMO_PASSWORD, true)
 
     fun selectMode(mode: AppMode) {
+        stopNavigation()
         preferences.saveMode(mode)
         preferences.saveFirstGuideCompleted(true)
         _uiState.update { it.copy(message = "已切换") }
@@ -320,6 +321,7 @@ class SmartCaneAppController private constructor(
     }
 
     fun logout() {
+        stopNavigation()
         stopPairingPolling()
         stopAlertPolling()
         scope.launch {
@@ -1708,6 +1710,15 @@ class SmartCaneAppController private constructor(
 
     fun stopNavigation() {
         NavigationLocationService.stop(appContext)
+        clearNavigationUiState()
+    }
+
+    fun stopNavigationSession(sessionId: String?) {
+        NavigationLocationService.stop(appContext, sessionId)
+        clearNavigationUiState()
+    }
+
+    private fun clearNavigationUiState() {
         announcedNavigationSteps.clear()
         announcedCrossingWarnings.clear()
         _uiState.update {

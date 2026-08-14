@@ -12,7 +12,10 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -29,7 +32,21 @@ class NavigationLocationService : Service(), LocationListener {
     private var replanInProgress = false
     private var nextReplanAllowedAt = 0L
     private var lastAcceptedLocation: Location? = null
+    private var lastUsableLocationAt = 0L
+    private var stopping = false
     private val executor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val locationTimeoutCheck = object : Runnable {
+        override fun run() {
+            if (!listening || stopping) return
+            val now = SystemClock.elapsedRealtime()
+            if (navigationLocationTimedOut(now, lastUsableLocationAt, LOCATION_UNAVAILABLE_TIMEOUT_MS)) {
+                failNavigation("长时间无法获取有效定位，导航已停止。")
+            } else {
+                mainHandler.postDelayed(this, LOCATION_TIMEOUT_CHECK_INTERVAL_MS)
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -43,7 +60,7 @@ class NavigationLocationService : Service(), LocationListener {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            stopNavigation()
+            stopNavigation(intent.getStringExtra(EXTRA_SESSION_ID))
             return START_NOT_STICKY
         }
         intent?.getStringExtra(EXTRA_SESSION_ID)?.takeIf(String::isNotBlank)?.let {
@@ -72,6 +89,7 @@ class NavigationLocationService : Service(), LocationListener {
 
     override fun onLocationChanged(location: Location) {
         if (isMock(location) || (location.hasAccuracy() && location.accuracy > 50f)) return
+        lastUsableLocationAt = SystemClock.elapsedRealtime()
         if (System.currentTimeMillis() - lastUploadAt < 2_000L) return
         val activeSession = sessionId() ?: return
         val activeDevice = deviceId() ?: return
@@ -132,34 +150,46 @@ class NavigationLocationService : Service(), LocationListener {
     private fun startUpdates() {
         if (listening) return
         if (!hasPermission()) {
-            sendBroadcast(Intent(ACTION_LOCATION_FAILED).setPackage(packageName)
-                .putExtra(EXTRA_ERROR, "定位权限已失效，导航已停止。"))
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().clear().apply()
-            stopSelf()
+            failNavigation("定位权限已失效，导航已停止。")
             return
         }
         val locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
         manager = locationManager
-        listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER).forEach { provider ->
-            runCatching {
-                if (locationManager.isProviderEnabled(provider)) {
-                    locationManager.requestLocationUpdates(provider, 2_000L, 1f, this)
-                }
-            }.onFailure {
-                if (it is SecurityException) {
-                    sendBroadcast(Intent(ACTION_LOCATION_FAILED).setPackage(packageName)
-                        .putExtra(EXTRA_ERROR, "无法访问定位服务，导航已停止。"))
-                    stopSelf()
-                }
-            }
+        val enabledProviders = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+            .filter { provider -> runCatching { locationManager.isProviderEnabled(provider) }.getOrDefault(false) }
+        if (enabledProviders.isEmpty()) {
+            failNavigation("定位服务未开启，导航已停止。")
+            return
         }
+        val registered = enabledProviders.map { provider ->
+            runCatching {
+                locationManager.requestLocationUpdates(provider, 2_000L, 1f, this)
+                true
+            }.getOrElse { false }
+        }.any { it }
+        if (!registered) {
+            failNavigation("无法访问定位服务，导航已停止。")
+            return
+        }
+        lastUsableLocationAt = SystemClock.elapsedRealtime()
         listening = true
+        mainHandler.removeCallbacks(locationTimeoutCheck)
+        mainHandler.postDelayed(locationTimeoutCheck, LOCATION_TIMEOUT_CHECK_INTERVAL_MS)
     }
 
-    private fun stopNavigation() {
-        sessionId()?.let { executor.execute { SmartCaneApiClient.stopNavigationSession(it) } }
+    private fun stopNavigation(requestedSessionId: String? = null) {
+        if (stopping) return
+        stopping = true
+        navigationSessionToStop(requestedSessionId, sessionId())?.let { activeSession ->
+            if (!executor.isShutdown) executor.execute { SmartCaneApiClient.stopNavigationSession(activeSession) }
+        }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().clear().apply()
         stopSelf()
+    }
+
+    private fun failNavigation(message: String) {
+        sendBroadcast(Intent(ACTION_LOCATION_FAILED).setPackage(packageName).putExtra(EXTRA_ERROR, message))
+        stopNavigation()
     }
 
     private fun sessionId() = getSharedPreferences(PREFS, MODE_PRIVATE)
@@ -178,6 +208,7 @@ class NavigationLocationService : Service(), LocationListener {
         }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacks(locationTimeoutCheck)
         if (listening) runCatching { manager?.removeUpdates(this) }
         listening = false
         executor.shutdown()
@@ -217,14 +248,27 @@ class NavigationLocationService : Service(), LocationListener {
         private const val CHANNEL_ID = "navigation_location"
         private const val NOTIFICATION_ID = 2001
         private const val REPLAN_RETRY_DELAY_MS = 30_000L
+        private const val LOCATION_UNAVAILABLE_TIMEOUT_MS = 60_000L
+        private const val LOCATION_TIMEOUT_CHECK_INTERVAL_MS = 5_000L
 
         fun start(context: Context, sessionId: String, deviceId: String) {
             ContextCompat.startForegroundService(context, Intent(context, NavigationLocationService::class.java)
                 .setAction(ACTION_START).putExtra(EXTRA_SESSION_ID, sessionId).putExtra(EXTRA_DEVICE_ID, deviceId))
         }
 
-        fun stop(context: Context) {
-            context.startService(Intent(context, NavigationLocationService::class.java).setAction(ACTION_STOP))
+        fun stop(context: Context, sessionId: String? = null) {
+            context.startService(
+                Intent(context, NavigationLocationService::class.java)
+                    .setAction(ACTION_STOP)
+                    .putExtra(EXTRA_SESSION_ID, sessionId)
+            )
         }
     }
 }
+
+internal fun navigationLocationTimedOut(nowMs: Long, lastUsableLocationAtMs: Long, timeoutMs: Long): Boolean =
+    lastUsableLocationAtMs > 0L && nowMs - lastUsableLocationAtMs >= timeoutMs
+
+internal fun navigationSessionToStop(requestedSessionId: String?, storedSessionId: String?): String? =
+    requestedSessionId?.trim()?.takeIf(String::isNotEmpty)
+        ?: storedSessionId?.trim()?.takeIf(String::isNotEmpty)
