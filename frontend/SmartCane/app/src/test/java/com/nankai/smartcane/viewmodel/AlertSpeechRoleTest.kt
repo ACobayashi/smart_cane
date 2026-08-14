@@ -287,6 +287,16 @@ class AlertSpeechRoleTest {
     }
 
     @Test
+    fun turnReminderSpeaksOnceInsideTenMeterBoundaryWithoutDistance() {
+        assertEquals("前方左转", navigationTurnReminder("向西步行39米左转", 10.0))
+        assertEquals("前方右转", navigationTurnReminder("沿秋实路向南步行37米右转", 4.5))
+        assertNull(navigationTurnReminder("向西步行39米左转", 10.1))
+        assertNull(navigationTurnReminder("继续直行", 5.0))
+        assertNull(navigationTurnReminder("向西步行39米左转", -1.0))
+        assertNull(navigationTurnReminder("向西步行39米左转", Double.NaN))
+    }
+
+    @Test
     fun locationSyncUsesOnlyBoundCaneOrDemoCane() {
         assertEquals("cane_123", locationSyncDeviceId(" cane_123 ", isDemoAccount = false))
         assertEquals(DemoData.defaultCane.deviceId, locationSyncDeviceId("", isDemoAccount = true))

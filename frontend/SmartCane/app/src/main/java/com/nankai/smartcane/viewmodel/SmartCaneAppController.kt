@@ -148,7 +148,7 @@ class SmartCaneAppController private constructor(
                     }
                     if (arrived) speakText("已到达目的地。", priority = TtsPriority.NAVIGATION)
                     else if (!maybeSpeakCrossingWarning(crossingWarningId, crossingType, distanceToCrossingWarning)) {
-                        maybeSpeakNavigationStep(stepIndex, instruction, distanceToNextAction, distanceToDestination)
+                        maybeSpeakNavigationStep(stepIndex, instruction, distanceToNextAction)
                     }
                 }
                 NavigationLocationService.ACTION_REPLANNING -> {
@@ -264,19 +264,12 @@ class SmartCaneAppController private constructor(
     private fun maybeSpeakNavigationStep(
         stepIndex: Int,
         instruction: String,
-        distanceToNextActionM: Double,
-        distanceToDestinationM: Double
+        distanceToNextActionM: Double
     ) {
         if (instruction.isBlank()) return
-        if (distanceToDestinationM <= 20.0) return
-        val threshold = when {
-            distanceToNextActionM <= 10.0 -> 10
-            distanceToNextActionM <= 30.0 -> 30
-            else -> return
-        }
-        if (!announcedNavigationSteps.add("$stepIndex:$threshold")) return
-        val maneuver = conciseNavigationManeuver(instruction)
-        speakText("${threshold}米后$maneuver", priority = TtsPriority.NAVIGATION)
+        val reminder = navigationTurnReminder(instruction, distanceToNextActionM) ?: return
+        if (!announcedNavigationSteps.add("$stepIndex:turn")) return
+        speakText(reminder, priority = TtsPriority.NAVIGATION)
     }
 
     private fun maybeSpeakCrossingWarning(warningId: String, crossingType: String, distanceM: Double): Boolean {
@@ -1961,6 +1954,15 @@ internal fun conciseNavigationManeuver(instruction: String): String {
         text.contains("直行") -> "直行"
         text.contains("到达目的地") -> "到达目的地"
         else -> text
+    }
+}
+
+internal fun navigationTurnReminder(instruction: String, distanceM: Double): String? {
+    if (!distanceM.isFinite() || distanceM < 0.0 || distanceM > 10.0) return null
+    return when (conciseNavigationManeuver(instruction)) {
+        "左转" -> "前方左转"
+        "右转" -> "前方右转"
+        else -> null
     }
 }
 
