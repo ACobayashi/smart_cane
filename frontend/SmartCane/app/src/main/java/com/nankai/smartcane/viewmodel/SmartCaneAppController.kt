@@ -1937,13 +1937,17 @@ internal const val ROUTE_PLANNED_CONFIRMATION = "收到，已规划好最佳路�
 internal data class CrossingReminder(val thresholdM: Int, val text: String)
 
 internal fun crossingReminderSpeech(crossingType: String, distanceM: Double): CrossingReminder? {
-    if (!distanceM.isFinite() || distanceM < 0.0 || distanceM > 10.0) return null
+    if (!distanceM.isFinite() || distanceM < 0.0 || distanceM > 30.0) return null
     val label = when (crossingType.trim().lowercase(Locale.US)) {
         "crosswalk" -> "斑马线"
         "intersection" -> "路口"
         else -> return null
     }
-    return CrossingReminder(10, "前方即将进入$label，请停下确认安全后通过")
+    return if (distanceM <= 10.0) {
+        CrossingReminder(10, "前方即将进入$label，请停下确认安全后通过")
+    } else {
+        CrossingReminder(30, "前方30米有$label，请减速")
+    }
 }
 
 internal fun locationSyncDeviceId(boundDeviceId: String, isDemoAccount: Boolean): String? =
