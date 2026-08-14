@@ -227,6 +227,15 @@ class AlertSpeechRoleTest {
     }
 
     @Test
+    fun realtimeNavigationDetectsEveryActiveVoiceCapturePath() {
+        assertTrue(hasActiveVoiceCapture(true, false, false, false))
+        assertTrue(hasActiveVoiceCapture(false, true, false, false))
+        assertTrue(hasActiveVoiceCapture(false, false, true, false))
+        assertTrue(hasActiveVoiceCapture(false, false, false, true))
+        assertFalse(hasActiveVoiceCapture(false, false, false, false))
+    }
+
+    @Test
     fun successfulRouteSpeaksConfirmationBeforeTheOverview() {
         assertEquals(
             "收到，已规划好最佳路线。全程八百米，先向北走三百米",

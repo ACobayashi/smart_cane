@@ -128,7 +128,7 @@ class NavigationLocationService : Service(), LocationListener {
                 distanceDeltaM,
                 walkingBearing?.toDouble()
             ) ?: return@execute
-            sendBroadcast(Intent(ACTION_STATE_CHANGED).setPackage(packageName)
+            val progressIntent = Intent(ACTION_STATE_CHANGED).setPackage(packageName)
                 .putExtra(EXTRA_SESSION_ID, activeSession)
                 .putExtra(EXTRA_STATUS, update.status)
                 .putExtra(EXTRA_STEP_INDEX, update.currentStepIndex)
@@ -155,7 +155,8 @@ class NavigationLocationService : Service(), LocationListener {
                 .putExtra(EXTRA_ARRIVED, update.arrived)
                 .putExtra(EXTRA_INSTRUCTION, update.currentStep?.instruction.orEmpty())
                 .putExtra(EXTRA_CROSSING_TYPE, update.currentStep?.crossingType.orEmpty())
-                .putExtra(EXTRA_CROSSING_WARNING_ID, update.currentStep?.crossingWarningId.orEmpty()))
+                .putExtra(EXTRA_CROSSING_WARNING_ID, update.currentStep?.crossingWarningId.orEmpty())
+            mainHandler.post { NavigationProgressDispatcher.dispatch(progressIntent) }
             if (update.arrived) {
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit().clear().apply()
                 stopSelf()
@@ -310,6 +311,23 @@ internal fun navigationLocationTimedOut(nowMs: Long, lastUsableLocationAtMs: Lon
 internal fun navigationSessionToStop(requestedSessionId: String?, storedSessionId: String?): String? =
     requestedSessionId?.trim()?.takeIf(String::isNotEmpty)
         ?: storedSessionId?.trim()?.takeIf(String::isNotEmpty)
+
+internal object NavigationProgressDispatcher {
+    @Volatile
+    private var listener: ((Intent) -> Unit)? = null
+
+    fun register(listener: (Intent) -> Unit) {
+        this.listener = listener
+    }
+
+    fun unregister(listener: (Intent) -> Unit) {
+        if (this.listener === listener) this.listener = null
+    }
+
+    fun dispatch(intent: Intent) {
+        listener?.invoke(intent)
+    }
+}
 
 internal fun navigationWalkingBearing(
     gpsBearingDeg: Float?,

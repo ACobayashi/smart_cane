@@ -54,6 +54,7 @@ import com.nankai.smartcane.data.repository.PairingRepository
 import com.nankai.smartcane.data.repository.RemoteAuthRepository
 import com.nankai.smartcane.data.repository.RemotePairingRepository
 import com.nankai.smartcane.navigation.NavigationLocationService
+import com.nankai.smartcane.navigation.NavigationProgressDispatcher
 import com.nankai.smartcane.location.PhoneHeadingProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -221,6 +222,9 @@ class SmartCaneAppController private constructor(
             }
         }
     }
+    private val navigationProgressListener: (Intent) -> Unit = { intent ->
+        navigationReceiver.onReceive(appContext, intent)
+    }
     private val announcedNavigationSteps = mutableSetOf<String>()
     private val announcedCrossingWarnings = mutableSetOf<String>()
     private var lastNavigationStepIndex: Int? = null
@@ -299,6 +303,7 @@ class SmartCaneAppController private constructor(
 
     init {
         PhoneHeadingProvider.start(appContext)
+        NavigationProgressDispatcher.register(navigationProgressListener)
         val filter = IntentFilter().apply {
             addAction(NavigationLocationService.ACTION_STATE_CHANGED)
             addAction(NavigationLocationService.ACTION_REPLANNING)
@@ -341,6 +346,7 @@ class SmartCaneAppController private constructor(
             NAVIGATION_TURN_LOG_TAG,
             "trigger=direction_radius step=$stepIndex nextDirection=$nextDirection text=$reminder"
         )
+        prepareForRealtimeNavigationSpeech()
         speakText(reminder, priority = TtsPriority.NAVIGATION, bypassTextCooldown = true)
     }
 
@@ -359,7 +365,27 @@ class SmartCaneAppController private constructor(
             NAVIGATION_TURN_LOG_TAG,
             "trigger=direction_step_transition previousStep=$previousStepIndex currentStep=$currentStepIndex text=$reminder"
         )
+        prepareForRealtimeNavigationSpeech()
         speakText(reminder, priority = TtsPriority.NAVIGATION, bypassTextCooldown = true)
+    }
+
+    private fun prepareForRealtimeNavigationSpeech() {
+        if (hasActiveVoiceCapture(
+                voiceRecognitionActive = voiceRecognitionActive,
+                hasPcmRecorder = voiceRecorder != null,
+                hasBackendRecorder = backendVoiceRecordingActive,
+                automaticListeningActive = automaticVoiceListeningActive
+            )
+        ) {
+            cancelAutomaticVoiceListeningForManualPress()
+        }
+        pendingAutoListenUtteranceId = null
+        pendingSpeech.removeAll { it.priority == TtsPriority.VOICE_REQUEST }
+        if (activeTtsUtteranceId != null && activeTtsPriority != TtsPriority.EMERGENCY) {
+            tts?.stop()
+            activeTtsUtteranceId = null
+            activeTtsPriority = null
+        }
     }
 
     private fun maybeSpeakCompletedNavigationTurn(currentStepIndex: Int) {
@@ -1927,6 +1953,7 @@ class SmartCaneAppController private constructor(
     }
 
     fun release() {
+        NavigationProgressDispatcher.unregister(navigationProgressListener)
         stopPairingPolling()
         stopAlertPolling()
         stopBlindRiskProximityMonitoring()
@@ -2433,6 +2460,13 @@ internal fun shouldInterruptCurrentSpeech(current: TtsPriority, incoming: TtsPri
     if (current == TtsPriority.NAVIGATION) return false
     return incoming.rank > current.rank
 }
+
+internal fun hasActiveVoiceCapture(
+    voiceRecognitionActive: Boolean,
+    hasPcmRecorder: Boolean,
+    hasBackendRecorder: Boolean,
+    automaticListeningActive: Boolean
+): Boolean = voiceRecognitionActive || hasPcmRecorder || hasBackendRecorder || automaticListeningActive
 
 data class QueuedSpeech(
     val text: String,
