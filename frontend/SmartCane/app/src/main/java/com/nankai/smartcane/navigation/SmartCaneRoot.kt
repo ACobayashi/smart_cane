@@ -92,6 +92,11 @@ fun SmartCaneRootApp() {
         }
     }
 
+    DisposableEffect(uiState.isLoggedIn, uiState.currentUser?.userId) {
+        if (uiState.isLoggedIn) controller.startCaneLocationSync()
+        onDispose { controller.stopCaneLocationSync() }
+    }
+
     LaunchedEffect(route) {
         if ((route is AppRoute.BlindHome || route is AppRoute.CompanionMap) && !hasSmartCaneLocationPermission(context)) {
             locationPermissionLauncher.launch(

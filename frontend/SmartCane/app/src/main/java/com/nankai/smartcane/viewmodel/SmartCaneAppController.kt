@@ -98,6 +98,7 @@ class SmartCaneAppController private constructor(
     private var localCueStreamJob: Job? = null
     private var sosAlarmJob: Job? = null
     private var blindRiskMonitorJob: Job? = null
+    private var caneLocationSyncJob: Job? = null
     private var locationUpdatesActive = false
     private var phoneLocationListener: LocationListener? = null
     private var lastKnownPhoneLocation: Location? = null
@@ -183,6 +184,11 @@ class SmartCaneAppController private constructor(
             ?: DemoData.defaultCane.deviceId.takeIf { _uiState.value.currentUser?.isDemo == true }
             ?: mobileObserverId()
             ?: ""
+
+    private fun locationSyncCaneDeviceId(): String? = locationSyncDeviceId(
+        boundDeviceId = boundCaneDeviceId(),
+        isDemoAccount = _uiState.value.currentUser?.isDemo == true
+    )
 
     private fun mobileObserverId(): String? =
         _uiState.value.currentUser
@@ -321,6 +327,7 @@ class SmartCaneAppController private constructor(
 
     fun logout() {
         stopNavigation()
+        stopCaneLocationSync()
         stopPairingPolling()
         stopAlertPolling()
         scope.launch {
@@ -574,19 +581,6 @@ class SmartCaneAppController private constructor(
                     delay(6_000L)
                     continue
                 }
-                SmartCaneApiClient.postLocation(
-                    LocationUploadDto(
-                        deviceId = deviceId,
-                        latitude = location.latitude,
-                        longitude = location.longitude,
-                        provider = location.provider,
-                        quality = if (location.isFromMockProvider) "mock" else "usable",
-                        accuracyM = location.accuracy.takeIf { it > 0f },
-                        bearingDeg = location.bearing.takeIf { location.hasBearing() }
-                            ?: PhoneHeadingProvider.latestHeadingDeg()
-                    )
-                )
-
                 when (val result = SmartCaneApiClient.getNearbyRiskWarning(
                     location.latitude,
                     location.longitude,
@@ -613,7 +607,45 @@ class SmartCaneAppController private constructor(
         blindRiskMonitorJob?.cancel()
         blindRiskMonitorJob = null
         nearbyRiskApproachGate.reset()
-        stopPhoneLocationUpdates()
+        if (caneLocationSyncJob?.isActive != true) stopPhoneLocationUpdates()
+    }
+
+    fun startCaneLocationSync() {
+        if (caneLocationSyncJob?.isActive == true) return
+        caneLocationSyncJob = scope.launch {
+            while (true) {
+                startPhoneLocationUpdates()
+                val state = _uiState.value
+                if (state.isLoggedIn && !isNavigationInProgress(state.navigationStatus)) {
+                    val deviceId = locationSyncCaneDeviceId()
+                    val location = latestPhoneLocation()
+                    if (deviceId != null && location != null) {
+                        SmartCaneApiClient.postLocation(
+                            LocationUploadDto(
+                                deviceId = deviceId,
+                                latitude = location.latitude,
+                                longitude = location.longitude,
+                                source = "android_cane_location_sync",
+                                provider = location.provider,
+                                quality = if (location.isFromMockProvider) "mock" else "usable",
+                                accuracyM = location.accuracy.takeIf { it > 0f },
+                                bearingDeg = location.bearing.takeIf { location.hasBearing() }
+                                    ?: PhoneHeadingProvider.latestHeadingDeg()
+                            )
+                        )
+                    }
+                }
+                delay(6_000L)
+            }
+        }
+    }
+
+    fun stopCaneLocationSync() {
+        caneLocationSyncJob?.cancel()
+        caneLocationSyncJob = null
+        if (blindRiskMonitorJob?.isActive != true && !isNavigationInProgress(_uiState.value.navigationStatus)) {
+            stopPhoneLocationUpdates()
+        }
     }
 
     fun setSelfSosReplayDemoEnabled(enabled: Boolean) {
@@ -1740,6 +1772,7 @@ class SmartCaneAppController private constructor(
         stopPairingPolling()
         stopAlertPolling()
         stopBlindRiskProximityMonitoring()
+        stopCaneLocationSync()
         tts?.stop()
         tts?.shutdown()
         tts = null
@@ -1856,18 +1889,17 @@ internal const val ROUTE_PLANNED_CONFIRMATION = "收到，已规划好最佳路�
 internal data class CrossingReminder(val thresholdM: Int, val text: String)
 
 internal fun crossingReminderSpeech(crossingType: String, distanceM: Double): CrossingReminder? {
-    if (!distanceM.isFinite() || distanceM < 0.0 || distanceM > 30.0) return null
+    if (!distanceM.isFinite() || distanceM < 0.0 || distanceM > 10.0) return null
     val label = when (crossingType.trim().lowercase(Locale.US)) {
         "crosswalk" -> "斑马线"
         "intersection" -> "路口"
         else -> return null
     }
-    return if (distanceM <= 10.0) {
-        CrossingReminder(10, "前方即将进入$label，请停下确认安全后通过")
-    } else {
-        CrossingReminder(30, "前方30米有$label，请减速")
-    }
+    return CrossingReminder(10, "前方即将进入$label，请停下确认安全后通过")
 }
+
+internal fun locationSyncDeviceId(boundDeviceId: String, isDemoAccount: Boolean): String? =
+    boundDeviceId.trim().ifBlank { DemoData.defaultCane.deviceId.takeIf { isDemoAccount } }
 
 internal fun plannedRouteSpeech(routePrompt: String, headingDeg: Float? = null): String {
     val details = routePrompt.trim()

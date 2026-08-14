@@ -1874,7 +1874,13 @@ def risk_point_to_event_dict(row: sqlite3.Row, origin_lat: Optional[float] = Non
     }
 
 
-def active_risk_points(lat: Optional[float] = None, lng: Optional[float] = None, radius: Optional[float] = None, limit: int = 200) -> list[dict[str, Any]]:
+def active_risk_points(
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    radius: Optional[float] = None,
+    limit: int = 200,
+    order_by_latest: bool = False,
+) -> list[dict[str, Any]]:
     expire_risk_points()
     with db() as conn:
         rows = conn.execute("SELECT * FROM risk_points WHERE status = 'active' ORDER BY last_reported_at DESC LIMIT ?", (max(limit * 5, limit),)).fetchall()
@@ -1903,7 +1909,8 @@ def active_risk_points(lat: Optional[float] = None, lng: Optional[float] = None,
                 continue
         point = risk_point_to_event_dict(row, lat, lng)
         points.append(point)
-    points.sort(key=lambda item: (LEVEL_RANK.get(str(item.get("riskLevel") or "low"), 0), item.get("confidence") or 0, -(item.get("distanceM") or 0)), reverse=True)
+    if not order_by_latest:
+        points.sort(key=lambda item: (LEVEL_RANK.get(str(item.get("riskLevel") or "low"), 0), item.get("confidence") or 0, -(item.get("distanceM") or 0)), reverse=True)
     return points[:limit]
 
 
@@ -5220,7 +5227,13 @@ def map_risk_points(
     radius: float = Query(500.0, gt=0, le=10000),
     limit: int = Query(200, ge=1, le=1000),
 ) -> dict[str, Any]:
-    points = active_risk_points(lat, lng, radius if lat is not None and lng is not None else None, limit)
+    points = active_risk_points(
+        lat,
+        lng,
+        radius if lat is not None and lng is not None else None,
+        limit,
+        order_by_latest=True,
+    )
     return {
         "risk_count": len(points),
         "high_count": sum(1 for item in points if item["riskLevel"] == "high"),

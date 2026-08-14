@@ -750,13 +750,14 @@ object SmartCaneApiClient {
     suspend fun getMapRiskPoints(
         latitude: Double? = null,
         longitude: Double? = null,
-        radiusM: Int = 500
+        radiusM: Int = 500,
+        limit: Int = 200
     ): ApiResult<List<LatestRiskEventDto>> = withContext(Dispatchers.IO) {
         try {
             val path = if (latitude != null && longitude != null) {
-                "/api/map/risk-points?lat=$latitude&lng=$longitude&radius=$radiusM"
+                "/api/map/risk-points?lat=$latitude&lng=$longitude&radius=$radiusM&limit=$limit"
             } else {
-                "/api/map/risk-points"
+                "/api/map/risk-points?limit=$limit"
             }
             val response = getJson(path)
             val points = response.optJSONArray("points") ?: JSONArray()

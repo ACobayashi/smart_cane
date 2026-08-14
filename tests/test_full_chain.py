@@ -720,6 +720,43 @@ def test_all_map_risk_points_have_seven_day_lifetime():
         assert main.risk_point_ttl_seconds(risk_type, level) == expected
 
 
+def test_map_returns_latest_points_instead_of_old_high_risk_points(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "map_latest_queue.db")
+    main.init_db()
+    high = main.store_event(main.EventCreate(
+        device_id="cane_real",
+        lat=31.0,
+        lng=121.0,
+        risk_type="sos",
+        risk_level="high",
+        extra_json={"source": "esp32c5"},
+    ))
+    low = main.store_event(main.EventCreate(
+        device_id="cane_real",
+        lat=31.01,
+        lng=121.01,
+        risk_type="front_obstacle",
+        risk_level="low",
+        extra_json={"source": "esp32c5"},
+    ))
+    current_time = main.datetime.now(main.timezone.utc).replace(microsecond=0)
+    with main.db() as conn:
+        conn.execute(
+            "UPDATE risk_points SET last_reported_at = ? WHERE latest_event_id = ?",
+            ((current_time - main.timedelta(minutes=1)).isoformat(), high["id"]),
+        )
+        conn.execute(
+            "UPDATE risk_points SET last_reported_at = ? WHERE latest_event_id = ?",
+            (current_time.isoformat(), low["id"]),
+        )
+
+    response = main.map_risk_points(lat=None, lng=None, radius=500.0, limit=1)
+
+    assert response["risk_count"] == 1
+    assert response["points"][0]["riskType"] == "front_obstacle"
+    assert response["points"][0]["riskLevel"] == "low"
+
+
 def test_expired_map_points_do_not_fall_back_to_raw_history(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "map_expiry_no_fallback.db")
     main.init_db()
