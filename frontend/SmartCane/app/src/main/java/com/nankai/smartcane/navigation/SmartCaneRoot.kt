@@ -77,7 +77,11 @@ fun SmartCaneRootApp() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { }
 
-    DisposableEffect(Unit) { onDispose { controller.release() } }
+    // SmartCaneAppController is application-scoped. Releasing it with this
+    // composition unregisters live navigation callbacks while the singleton is
+    // still reused after an Activity/Compose recreation, leaving turn guidance
+    // frozen at the route's initial step. Keep it alive for the process lifetime
+    // so NavigationLocationService updates continue reaching the blind UI/TTS.
 
     LaunchedEffect(Unit) {
         delay(350L)

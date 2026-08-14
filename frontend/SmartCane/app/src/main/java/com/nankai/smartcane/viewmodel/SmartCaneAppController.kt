@@ -303,7 +303,18 @@ class SmartCaneAppController private constructor(
 
     init {
         PhoneHeadingProvider.start(appContext)
+        ensureNavigationProgressBindings()
+        scope.launch {
+            preferences.state.collectLatest { stored ->
+                _uiState.update { current -> current.copy(storedState = stored) }
+            }
+        }
+    }
+
+    @Synchronized
+    private fun ensureNavigationProgressBindings() {
         NavigationProgressDispatcher.register(navigationProgressListener)
+        if (navigationReceiverRegistered) return
         val filter = IntentFilter().apply {
             addAction(NavigationLocationService.ACTION_STATE_CHANGED)
             addAction(NavigationLocationService.ACTION_REPLANNING)
@@ -312,11 +323,6 @@ class SmartCaneAppController private constructor(
         }
         ContextCompat.registerReceiver(appContext, navigationReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         navigationReceiverRegistered = true
-        scope.launch {
-            preferences.state.collectLatest { stored ->
-                _uiState.update { current -> current.copy(storedState = stored) }
-            }
-        }
     }
 
     private fun maybeSpeakNavigationStep(
@@ -2008,7 +2014,7 @@ class SmartCaneAppController private constructor(
         private const val NAVIGATION_LOCATION_MAX_ACCURACY_M = 50f
         @Volatile private var INSTANCE: SmartCaneAppController? = null
         fun get(context: Context): SmartCaneAppController {
-            return INSTANCE ?: synchronized(this) {
+            val controller = INSTANCE ?: synchronized(this) {
                 INSTANCE ?: run {
                     val prefs = LocalAppPreferences(context.applicationContext)
                     val controller = SmartCaneAppController(
@@ -2021,6 +2027,10 @@ class SmartCaneAppController private constructor(
                     controller
                 }
             }
+            // Recover bindings if an older lifecycle path released them while
+            // retaining this application-scoped singleton.
+            controller.ensureNavigationProgressBindings()
+            return controller
         }
     }
 }
