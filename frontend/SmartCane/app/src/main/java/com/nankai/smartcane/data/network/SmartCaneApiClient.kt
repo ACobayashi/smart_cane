@@ -352,7 +352,9 @@ data class NavigationStepDto(
     val orientation: String = "",
     val trafficStatus: String = "",
     val trafficWarning: String = "",
-    val trafficWarningId: String = ""
+    val trafficWarningId: String = "",
+    val crossingType: String = "",
+    val crossingWarningId: String = ""
 )
 
 data class MatchedRiskPointDto(
@@ -387,6 +389,7 @@ data class NavigationUpdateDto(
     val distanceToDestinationM: Double,
     val distanceToNextActionM: Double,
     val distanceToTrafficWarningM: Double?,
+    val distanceToCrossingWarningM: Double?,
     val offRoute: Boolean,
     val offRouteCount: Int,
     val arrived: Boolean,
@@ -1448,7 +1451,9 @@ object SmartCaneApiClient {
         orientation = optString("orientation"),
         trafficStatus = optString("traffic_status", optString("trafficStatus")),
         trafficWarning = optString("traffic_warning", optString("trafficWarning")),
-        trafficWarningId = optString("traffic_warning_id", optString("trafficWarningId"))
+        trafficWarningId = optString("traffic_warning_id", optString("trafficWarningId")),
+        crossingType = optString("crossing_type", optString("crossingType")),
+        crossingWarningId = optString("crossing_warning_id", optString("crossingWarningId"))
     )
 
     private fun JSONObject.toNavigationUpdateDto() = NavigationUpdateDto(
@@ -1461,6 +1466,8 @@ object SmartCaneApiClient {
         distanceToNextActionM = optDouble("distance_to_next_action_m"),
         distanceToTrafficWarningM = nullableDouble("distance_to_traffic_warning_m")
             ?: nullableDouble("distanceToTrafficWarningM"),
+        distanceToCrossingWarningM = nullableDouble("distance_to_crossing_warning_m")
+            ?: nullableDouble("distanceToCrossingWarningM"),
         offRoute = optBoolean("off_route"),
         offRouteCount = optInt("off_route_count"),
         arrived = optBoolean("arrived"),

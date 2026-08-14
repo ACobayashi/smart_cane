@@ -125,13 +125,13 @@ class SmartCaneAppController private constructor(
                     val offRoute = intent.getBooleanExtra(NavigationLocationService.EXTRA_OFF_ROUTE, false)
                     val stepIndex = intent.getIntExtra(NavigationLocationService.EXTRA_STEP_INDEX, 0)
                     val instruction = intent.getStringExtra(NavigationLocationService.EXTRA_INSTRUCTION).orEmpty()
-                    val trafficWarning = intent.getStringExtra(NavigationLocationService.EXTRA_TRAFFIC_WARNING).orEmpty()
-                    val trafficWarningId = intent.getStringExtra(NavigationLocationService.EXTRA_TRAFFIC_WARNING_ID).orEmpty()
+                    val crossingType = intent.getStringExtra(NavigationLocationService.EXTRA_CROSSING_TYPE).orEmpty()
+                    val crossingWarningId = intent.getStringExtra(NavigationLocationService.EXTRA_CROSSING_WARNING_ID).orEmpty()
                     val distanceToRoute = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_ROUTE_M, 0.0)
                     val distanceToDestination = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_DESTINATION_M, 0.0)
                     val distanceToNextAction = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_NEXT_ACTION_M, Double.MAX_VALUE)
-                    val distanceToTrafficWarning = intent.getDoubleExtra(
-                        NavigationLocationService.EXTRA_DISTANCE_TO_TRAFFIC_WARNING_M, Double.MAX_VALUE
+                    val distanceToCrossingWarning = intent.getDoubleExtra(
+                        NavigationLocationService.EXTRA_DISTANCE_TO_CROSSING_WARNING_M, Double.MAX_VALUE
                     )
                     _uiState.update {
                         it.copy(
@@ -144,7 +144,7 @@ class SmartCaneAppController private constructor(
                         )
                     }
                     if (arrived) speakText("已到达目的地。", priority = TtsPriority.NAVIGATION)
-                    else if (!maybeSpeakTrafficWarning(trafficWarningId, trafficWarning, distanceToTrafficWarning)) {
+                    else if (!maybeSpeakCrossingWarning(crossingWarningId, crossingType, distanceToCrossingWarning)) {
                         maybeSpeakNavigationStep(stepIndex, instruction, distanceToNextAction, distanceToDestination)
                     }
                 }
@@ -176,7 +176,7 @@ class SmartCaneAppController private constructor(
         }
     }
     private val announcedNavigationSteps = mutableSetOf<String>()
-    private val announcedTrafficWarnings = mutableSetOf<String>()
+    private val announcedCrossingWarnings = mutableSetOf<String>()
 
     private fun currentCaneDeviceId(): String =
         _uiState.value.currentRelation?.caneDevice?.deviceId
@@ -209,7 +209,7 @@ class SmartCaneAppController private constructor(
         NavigationLocationService.latestRoute = route
         NavigationLocationService.start(appContext, sessionId, deviceId)
         announcedNavigationSteps.clear()
-        announcedTrafficWarnings.clear()
+        announcedCrossingWarnings.clear()
         _uiState.update { state ->
             state.copy(
                 navigationStatus = "active",
@@ -271,10 +271,11 @@ class SmartCaneAppController private constructor(
         speakText("${threshold}米后，$conciseInstruction", priority = TtsPriority.NAVIGATION)
     }
 
-    private fun maybeSpeakTrafficWarning(warningId: String, warning: String, distanceM: Double): Boolean {
-        if (warningId.isBlank() || warning.isBlank() || distanceM > 30.0) return false
-        if (!announcedTrafficWarnings.add(warningId)) return false
-        speakText(warning, priority = TtsPriority.NAVIGATION)
+    private fun maybeSpeakCrossingWarning(warningId: String, crossingType: String, distanceM: Double): Boolean {
+        if (warningId.isBlank()) return false
+        val reminder = crossingReminderSpeech(crossingType, distanceM) ?: return false
+        if (!announcedCrossingWarnings.add("$warningId:${reminder.thresholdM}")) return false
+        speakText(reminder.text, priority = TtsPriority.NAVIGATION)
         return true
     }
 
@@ -1708,7 +1709,7 @@ class SmartCaneAppController private constructor(
     fun stopNavigation() {
         NavigationLocationService.stop(appContext)
         announcedNavigationSteps.clear()
-        announcedTrafficWarnings.clear()
+        announcedCrossingWarnings.clear()
         _uiState.update {
             it.copy(
                 navigationStatus = "idle",
@@ -1841,6 +1842,22 @@ internal fun nearbyRiskPointSpeechText(riskType: String, serverText: String): St
 }
 
 internal const val ROUTE_PLANNED_CONFIRMATION = "收到，已规划好最佳路线"
+
+internal data class CrossingReminder(val thresholdM: Int, val text: String)
+
+internal fun crossingReminderSpeech(crossingType: String, distanceM: Double): CrossingReminder? {
+    if (!distanceM.isFinite() || distanceM < 0.0 || distanceM > 30.0) return null
+    val label = when (crossingType.trim().lowercase(Locale.US)) {
+        "crosswalk" -> "斑马线"
+        "intersection" -> "十字路口"
+        else -> return null
+    }
+    return if (distanceM <= 10.0) {
+        CrossingReminder(10, "前方即将进入$label，请停下确认安全后通过")
+    } else {
+        CrossingReminder(30, "前方30米有$label，请减速")
+    }
+}
 
 internal fun plannedRouteSpeech(routePrompt: String, headingDeg: Float? = null): String {
     val details = routePrompt.trim()

@@ -3451,22 +3451,72 @@ def traffic_status_name(rank: int) -> str:
     return {2: "缓行", 3: "拥堵", 4: "严重拥堵"}.get(rank, "未知")
 
 
+def crossing_type_for_step(steps: list[dict[str, Any]], index: int) -> Optional[str]:
+    step = steps[index]
+    action_text = " ".join(
+        str(step.get(key) or "") for key in ("instruction", "action", "assistant_action")
+    )
+    walk_type = str(step.get("walk_type") or "")
+    if walk_type == "1" or any(
+        token in action_text for token in ("斑马线", "人行横道", "过马路", "穿过马路", "道路对面")
+    ):
+        return "crosswalk"
+    if any(token in action_text for token in ("十字路口", "交叉口", "路口")):
+        return "intersection"
+    current_road = str(step.get("road") or step.get("road_name") or "").strip()
+    previous_road = "" if index == 0 else str(
+        steps[index - 1].get("road") or steps[index - 1].get("road_name") or ""
+    ).strip()
+    if (
+        index > 0
+        and current_road
+        and previous_road
+        and current_road != "未命名道路"
+        and previous_road != "未命名道路"
+        and current_road != previous_road
+    ):
+        return "intersection"
+    return None
+
+
 def crossing_step_indexes(steps: list[dict[str, Any]]) -> list[int]:
-    indexes: list[int] = []
-    for index, step in enumerate(steps):
-        action_text = " ".join(str(step.get(key) or "") for key in ("instruction", "action", "assistant_action"))
-        walk_type = str(step.get("walk_type") or "")
-        current_road = str(step.get("road") or step.get("road_name") or "").strip()
-        previous_road = "" if index == 0 else str(
-            steps[index - 1].get("road") or steps[index - 1].get("road_name") or ""
-        ).strip()
-        explicit_crossing = walk_type == "1" or any(
-            token in action_text for token in ("人行横道", "过马路", "穿过马路", "道路对面")
-        )
-        road_change = index > 0 and current_road and previous_road and current_road != previous_road
-        if explicit_crossing or road_change:
-            indexes.append(index)
-    return indexes
+    return [index for index in range(len(steps)) if crossing_type_for_step(steps, index)]
+
+
+def annotate_route_crossings(best: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not best:
+        return []
+    steps = best.get("steps") or []
+    warnings: list[dict[str, Any]] = []
+    for crossing_index in crossing_step_indexes(steps):
+        crossing_points = parse_polyline(str(steps[crossing_index].get("polyline") or ""))
+        if not crossing_points:
+            continue
+        crossing = crossing_points[0]
+        crossing_type = crossing_type_for_step(steps, crossing_index)
+        if not crossing_type:
+            continue
+        approach_index = max(0, crossing_index - 1)
+        warning = {
+            "id": (
+                f"crossing:{crossing_type}:"
+                f"{float(crossing['lat']):.6f},{float(crossing['lng']):.6f}"
+            ),
+            "type": crossing_type,
+            "step_index": approach_index,
+            "crossing_step_index": crossing_index,
+            "lat": float(crossing["lat"]),
+            "lng": float(crossing["lng"]),
+        }
+        for warning_step_index in {approach_index, crossing_index}:
+            steps[warning_step_index].update({
+                "crossing_warning_id": warning["id"],
+                "crossing_type": warning["type"],
+                "crossing_lat": warning["lat"],
+                "crossing_lng": warning["lng"],
+            })
+        warnings.append(warning)
+    return warnings
 
 
 async def enrich_route_traffic(best: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -4845,11 +4895,11 @@ def update_navigation_session(session_id: str, update: NavigationSessionUpdate) 
         recalculate_road_risk_score(segment_id)
     step = steps[step_index] if steps and step_index < len(steps) else None
     distance_to_next_action_m = distance_to_step_action_m(step, route_lat, route_lng)
-    traffic_distance_m = None
-    if step and step.get("traffic_crossing_lat") is not None and step.get("traffic_crossing_lng") is not None:
-        traffic_distance_m = haversine_m(
+    crossing_distance_m = None
+    if step and step.get("crossing_lat") is not None and step.get("crossing_lng") is not None:
+        crossing_distance_m = haversine_m(
             route_lat, route_lng,
-            float(step["traffic_crossing_lat"]), float(step["traffic_crossing_lng"]),
+            float(step["crossing_lat"]), float(step["crossing_lng"]),
         )
     return {
         "success": True, "session_id": session_id, "status": status,
@@ -4857,7 +4907,8 @@ def update_navigation_session(session_id: str, update: NavigationSessionUpdate) 
         "off_route_threshold_m": round(off_route_threshold_m, 1),
         "distance_to_destination_m": round(destination_distance_m, 1),
         "distance_to_next_action_m": round(distance_to_next_action_m, 1),
-        "distance_to_traffic_warning_m": round(traffic_distance_m, 1) if traffic_distance_m is not None else None,
+        "distance_to_crossing_warning_m": round(crossing_distance_m, 1) if crossing_distance_m is not None else None,
+        "distance_to_traffic_warning_m": None,
         "off_route": should_replan, "off_route_count": off_route_count,
         "arrived": arrived, "arrival_count": arrival_count,
         "current_step": step, "should_replan": should_replan,
@@ -5039,7 +5090,9 @@ async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
     if request.route_preference == "distance" and enriched.get("shortest_route"):
         enriched["best_route"] = enriched["shortest_route"]
         enriched["selected_route_index"] = enriched["shortest_route"].get("index")
-    enriched["traffic"] = {"status": "pending", "warnings": []}
+    crossing_warnings = annotate_route_crossings(enriched.get("best_route"))
+    enriched["crossing_warnings"] = crossing_warnings
+    enriched["traffic"] = {"status": "disabled", "warnings": []}
     enriched["traffic_warnings"] = []
     enriched["voice_prompt"] = route_voice_prompt(enriched.get("best_route"))
     sensor_analysis = None
@@ -5103,7 +5156,6 @@ async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
         response["session_id"] = create_navigation_session(
             request.device_id, None, response, request.destination_text, request.route_preference
         )
-        asyncio.create_task(enrich_navigation_session_traffic(response["session_id"]))
     return response
 
 

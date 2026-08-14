@@ -1391,6 +1391,79 @@ def test_route_overview_derives_cardinal_direction_from_polyline():
     assert main.route_cardinal_segments(route)[0]["direction"] == "东"
 
 
+def test_crosswalk_warning_is_attached_to_approach_and_crossing_steps():
+    route = {
+        "steps": [
+            {"road": "甲路", "polyline": "117.0,39.0;117.0,39.001"},
+            {
+                "road": "乙路", "walk_type": "1", "instruction": "通过人行横道",
+                "polyline": "117.0,39.001;117.001,39.001",
+            },
+        ],
+    }
+
+    warnings = main.annotate_route_crossings(route)
+
+    assert warnings[0]["type"] == "crosswalk"
+    assert route["steps"][0]["crossing_type"] == "crosswalk"
+    assert route["steps"][0]["crossing_warning_id"] == route["steps"][1]["crossing_warning_id"]
+    assert route["steps"][0]["crossing_lat"] == 39.001
+    assert route["steps"][0]["crossing_lng"] == 117.0
+
+
+def test_road_change_is_annotated_as_intersection_without_traffic_data():
+    route = {
+        "steps": [
+            {"road": "甲路", "polyline": "117.0,39.0;117.0,39.001"},
+            {"road": "乙路", "polyline": "117.0,39.001;117.001,39.001"},
+        ],
+    }
+
+    warnings = main.annotate_route_crossings(route)
+
+    assert warnings[0]["type"] == "intersection"
+    assert route["steps"][0]["crossing_type"] == "intersection"
+    assert route["steps"][1]["crossing_type"] == "intersection"
+
+
+def test_navigation_update_returns_distance_to_crossing(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "crossing_distance.db")
+    main.init_db()
+    best_route = {
+        "polyline": [
+            {"lat": 31.0, "lng": 121.0},
+            {"lat": 31.001, "lng": 121.0},
+            {"lat": 31.001, "lng": 121.001},
+        ],
+        "steps": [
+            {"road": "甲路", "polyline": "121.0,31.0;121.0,31.001"},
+            {
+                "road": "乙路", "instruction": "通过斑马线",
+                "polyline": "121.0,31.001;121.001,31.001",
+            },
+        ],
+    }
+    main.annotate_route_crossings(best_route)
+    sid = main.create_navigation_session(
+        "cane_real",
+        None,
+        {
+            "origin": {"lat": 31.0, "lng": 121.0},
+            "destination": {"lat": 31.001, "lng": 121.001},
+            "best_route": best_route,
+        },
+        "终点",
+    )
+
+    result = main.update_navigation_session(
+        sid, main.NavigationSessionUpdate(lat=31.0008, lng=121.0, distance_delta_m=3.0)
+    )
+
+    assert result["current_step"]["crossing_type"] == "crosswalk"
+    assert 15 <= result["distance_to_crossing_warning_m"] <= 30
+    assert result["distance_to_traffic_warning_m"] is None
+
+
 def test_busy_traffic_is_attached_only_to_crossing_approach(monkeypatch):
     route = {
         "polyline": [

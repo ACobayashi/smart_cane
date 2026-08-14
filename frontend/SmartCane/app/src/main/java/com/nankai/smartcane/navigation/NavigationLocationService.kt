@@ -103,12 +103,12 @@ class NavigationLocationService : Service(), LocationListener {
                 .putExtra(EXTRA_DISTANCE_TO_ROUTE_M, update.distanceToRouteM)
                 .putExtra(EXTRA_DISTANCE_TO_DESTINATION_M, update.distanceToDestinationM)
                 .putExtra(EXTRA_DISTANCE_TO_NEXT_ACTION_M, update.distanceToNextActionM)
-                .putExtra(EXTRA_DISTANCE_TO_TRAFFIC_WARNING_M, update.distanceToTrafficWarningM ?: Double.MAX_VALUE)
+                .putExtra(EXTRA_DISTANCE_TO_CROSSING_WARNING_M, update.distanceToCrossingWarningM ?: Double.MAX_VALUE)
                 .putExtra(EXTRA_OFF_ROUTE, update.offRoute)
                 .putExtra(EXTRA_ARRIVED, update.arrived)
                 .putExtra(EXTRA_INSTRUCTION, update.currentStep?.instruction.orEmpty())
-                .putExtra(EXTRA_TRAFFIC_WARNING, update.currentStep?.trafficWarning.orEmpty())
-                .putExtra(EXTRA_TRAFFIC_WARNING_ID, update.currentStep?.trafficWarningId.orEmpty()))
+                .putExtra(EXTRA_CROSSING_TYPE, update.currentStep?.crossingType.orEmpty())
+                .putExtra(EXTRA_CROSSING_WARNING_ID, update.currentStep?.crossingWarningId.orEmpty()))
             if (update.arrived) {
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit().clear().apply()
                 stopSelf()
@@ -199,12 +199,12 @@ class NavigationLocationService : Service(), LocationListener {
         const val EXTRA_DISTANCE_TO_ROUTE_M = "distance_to_route_m"
         const val EXTRA_DISTANCE_TO_DESTINATION_M = "distance_to_destination_m"
         const val EXTRA_DISTANCE_TO_NEXT_ACTION_M = "distance_to_next_action_m"
-        const val EXTRA_DISTANCE_TO_TRAFFIC_WARNING_M = "distance_to_traffic_warning_m"
+        const val EXTRA_DISTANCE_TO_CROSSING_WARNING_M = "distance_to_crossing_warning_m"
         const val EXTRA_OFF_ROUTE = "off_route"
         const val EXTRA_ARRIVED = "arrived"
         const val EXTRA_INSTRUCTION = "instruction"
-        const val EXTRA_TRAFFIC_WARNING = "traffic_warning"
-        const val EXTRA_TRAFFIC_WARNING_ID = "traffic_warning_id"
+        const val EXTRA_CROSSING_TYPE = "crossing_type"
+        const val EXTRA_CROSSING_WARNING_ID = "crossing_warning_id"
         const val EXTRA_REPLAN_SUCCESS = "replan_success"
         const val EXTRA_SELECTED_ROUTE_INDEX = "selected_route_index"
         const val EXTRA_ROUTE_COUNT = "route_count"
