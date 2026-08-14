@@ -972,6 +972,7 @@ private fun AmapRiskMap(
 ) {
     val context = LocalContext.current
     var framedContentKey by remember { mutableStateOf<String?>(null) }
+    var centeredOnMyLocation by remember { mutableStateOf(false) }
     val mapView = remember {
         MapsInitializer.updatePrivacyShow(context, true, true)
         MapsInitializer.updatePrivacyAgree(context, true)
@@ -1010,15 +1011,33 @@ private fun AmapRiskMap(
                 .strokeColor(android.graphics.Color.argb(80, 37, 99, 235))
                 .radiusFillColor(android.graphics.Color.argb(35, 37, 99, 235))
                 .strokeWidth(2f)
+            amap.setOnMyLocationChangeListener { location ->
+                if (shouldAutoCenterMap(
+                        alreadyCentered = centeredOnMyLocation,
+                        locationEnabled = showMyLocation,
+                        latitude = location.latitude,
+                        longitude = location.longitude,
+                        accuracyM = location.accuracy.takeIf { location.hasAccuracy() }
+                    )
+                ) {
+                    centeredOnMyLocation = true
+                    amap.animateCamera(
+                        CameraUpdateFactory.newLatLngZoom(
+                            LatLng(location.latitude, location.longitude),
+                            17f
+                        )
+                    )
+                }
+            }
             amap.isMyLocationEnabled = showMyLocation
             amap.clear()
             if (routePoints.size >= 2) {
                 amap.addPolyline(PolylineOptions().addAll(routePoints).color(android.graphics.Color.rgb(37, 99, 235)).width(12f))
-                if (framedContentKey != contentKey) {
+                if (!centeredOnMyLocation && framedContentKey != contentKey) {
                     val bounds = LatLngBounds.builder().apply { routePoints.forEach(::include) }.build()
                     amap.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 100))
                 }
-            } else if (framedContentKey != contentKey) {
+            } else if (!centeredOnMyLocation && framedContentKey != contentKey) {
                 amap.moveCamera(CameraUpdateFactory.newLatLngZoom(center, if (markers.isEmpty()) 16f else 17f))
             }
             framedContentKey = contentKey
@@ -1040,6 +1059,20 @@ private fun AmapRiskMap(
         }
     )
 }
+
+internal fun shouldAutoCenterMap(
+    alreadyCentered: Boolean,
+    locationEnabled: Boolean,
+    latitude: Double,
+    longitude: Double,
+    accuracyM: Float?
+): Boolean =
+    !alreadyCentered &&
+        locationEnabled &&
+        latitude.isFinite() && latitude in -90.0..90.0 &&
+        longitude.isFinite() && longitude in -180.0..180.0 &&
+        (latitude != 0.0 || longitude != 0.0) &&
+        (accuracyM == null || accuracyM <= 100f)
 
 @Composable
 fun RouteLegend(text: String, color: Color, modifier: Modifier = Modifier) {
