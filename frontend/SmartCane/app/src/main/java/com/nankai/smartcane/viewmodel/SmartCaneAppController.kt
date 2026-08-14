@@ -43,6 +43,7 @@ import com.nankai.smartcane.data.network.LocalCueDto
 import com.nankai.smartcane.data.network.LocationUploadDto
 import com.nankai.smartcane.data.network.NearbyRiskWarningDto
 import com.nankai.smartcane.data.network.NavigationRouteDto
+import com.nankai.smartcane.data.network.NavigationStepDto
 import com.nankai.smartcane.data.network.RouteAdviceDto
 import com.nankai.smartcane.data.network.SmartCaneApiClient
 import com.nankai.smartcane.data.network.VoiceCommandDto
@@ -71,6 +72,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.roundToInt
 
 class SmartCaneAppController private constructor(
@@ -133,10 +137,6 @@ class SmartCaneAppController private constructor(
                     val distanceToRoute = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_ROUTE_M, 0.0)
                     val distanceToDestination = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_DESTINATION_M, 0.0)
                     val distanceToNextAction = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_NEXT_ACTION_M, Double.MAX_VALUE)
-                    val locationAccuracy = intent.getDoubleExtra(NavigationLocationService.EXTRA_LOCATION_ACCURACY_M, 0.0)
-                    val hasServerEffectiveDistance = intent.hasExtra(
-                        NavigationLocationService.EXTRA_EFFECTIVE_DISTANCE_TO_NEXT_ACTION_M
-                    )
                     val turnTriggerDistance = intent.getDoubleExtra(
                         NavigationLocationService.EXTRA_EFFECTIVE_DISTANCE_TO_NEXT_ACTION_M,
                         distanceToNextAction
@@ -144,31 +144,43 @@ class SmartCaneAppController private constructor(
                     val distanceToCrossingWarning = intent.getDoubleExtra(
                         NavigationLocationService.EXTRA_DISTANCE_TO_CROSSING_WARNING_M, Double.MAX_VALUE
                     )
+                    val currentDirection = intent.getStringExtra(
+                        NavigationLocationService.EXTRA_CURRENT_DIRECTION
+                    ).orEmpty()
+                    val nextDirection = intent.getStringExtra(
+                        NavigationLocationService.EXTRA_NEXT_DIRECTION
+                    ).orEmpty()
+                    val directionChangeDue = intent.getBooleanExtra(
+                        NavigationLocationService.EXTRA_DIRECTION_CHANGE_DUE, false
+                    )
+                    val distanceToDirectionChange = intent.getDoubleExtra(
+                        NavigationLocationService.EXTRA_EFFECTIVE_DISTANCE_TO_DIRECTION_CHANGE_M,
+                        turnTriggerDistance
+                    )
                     _uiState.update {
                         it.copy(
                             navigationStatus = if (arrived) "arrived" else if (offRoute) "off_route" else "active",
                             currentStepIndex = stepIndex,
                             currentNavigationInstruction = instruction,
+                            currentPlannedDirection = currentDirection,
+                            nextPlannedDirection = nextDirection,
+                            distanceToDirectionChangeM = distanceToDirectionChange,
                             distanceToRouteM = distanceToRoute,
                             distanceToDestinationM = distanceToDestination,
                             navigationArrived = arrived
                         )
                     }
                     if (arrived) {
-                        maybeSpeakCompletedNavigationTurn(stepIndex)
                         speakText("已到达目的地。", priority = TtsPriority.NAVIGATION)
                     } else {
-                        maybeSpeakCompletedNavigationTurn(stepIndex)
-                        maybeSpeakNavigationStep(
-                            stepIndex,
-                            instruction,
-                            turnTriggerDistance,
-                            if (hasServerEffectiveDistance) 0.0 else locationAccuracy
-                        )
+                        maybeSpeakCompletedNavigationDirection(stepIndex, currentDirection)
+                        maybeSpeakNavigationDirectionChange(stepIndex, nextDirection, directionChangeDue)
                         maybeSpeakCrossingWarning(crossingWarningId, crossingType, distanceToCrossingWarning)
                     }
                     lastNavigationStepIndex = stepIndex
                     lastNavigationInstruction = instruction
+                    lastNavigationCurrentDirection = currentDirection
+                    lastNavigationNextDirection = nextDirection
                 }
                 NavigationLocationService.ACTION_REPLANNING -> {
                     _uiState.update { it.copy(navigationStatus = "replanning") }
@@ -177,11 +189,22 @@ class SmartCaneAppController private constructor(
                 NavigationLocationService.ACTION_REPLANNED -> {
                     val success = intent.getBooleanExtra(NavigationLocationService.EXTRA_REPLAN_SUCCESS, false)
                     if (success) resetNavigationAnnouncementState()
+                    val replannedRoute = NavigationLocationService.latestRoute?.bestRoute
+                    val replannedDirection = plannedNavigationSegment(replannedRoute?.steps.orEmpty(), 0)
                     _uiState.update {
                         it.copy(
                             navigationStatus = if (success) "active" else "replan_failed",
-                            activeNavigationRoute = NavigationLocationService.latestRoute?.bestRoute ?: it.activeNavigationRoute,
-                            alternativeNavigationRoutes = NavigationLocationService.latestRoute?.routes ?: it.alternativeNavigationRoutes
+                            activeNavigationRoute = replannedRoute ?: it.activeNavigationRoute,
+                            alternativeNavigationRoutes = NavigationLocationService.latestRoute?.routes ?: it.alternativeNavigationRoutes,
+                            currentStepIndex = if (success) 0 else it.currentStepIndex,
+                            currentNavigationInstruction = replannedRoute?.steps?.firstOrNull()?.instruction
+                                ?: it.currentNavigationInstruction,
+                            currentPlannedDirection = replannedDirection?.currentDirection
+                                ?: it.currentPlannedDirection,
+                            nextPlannedDirection = replannedDirection?.nextDirection
+                                ?: it.nextPlannedDirection,
+                            distanceToDirectionChangeM = replannedDirection?.distanceToChangeM
+                                ?: it.distanceToDirectionChangeM
                         )
                     }
                     val routePrompt = intent.getStringExtra(NavigationLocationService.EXTRA_VOICE_PROMPT).orEmpty()
@@ -202,6 +225,8 @@ class SmartCaneAppController private constructor(
     private val announcedCrossingWarnings = mutableSetOf<String>()
     private var lastNavigationStepIndex: Int? = null
     private var lastNavigationInstruction: String = ""
+    private var lastNavigationCurrentDirection: String = ""
+    private var lastNavigationNextDirection: String = ""
 
     private fun currentCaneDeviceId(): String =
         _uiState.value.currentRelation?.caneDevice?.deviceId
@@ -239,12 +264,19 @@ class SmartCaneAppController private constructor(
         NavigationLocationService.latestRoute = route
         NavigationLocationService.start(appContext, sessionId, deviceId)
         resetNavigationAnnouncementState()
+        val initialStep = bestRoute.steps.firstOrNull()
+        val initialDirection = plannedNavigationSegment(bestRoute.steps, 0)
         _uiState.update { state ->
             state.copy(
                 navigationStatus = "active",
                 activeNavigationRoute = bestRoute,
                 alternativeNavigationRoutes = route.routes,
-                selectedRouteIndex = route.selectedRouteIndex
+                selectedRouteIndex = route.selectedRouteIndex,
+                currentStepIndex = 0,
+                currentNavigationInstruction = initialStep?.instruction.orEmpty(),
+                currentPlannedDirection = initialDirection?.currentDirection.orEmpty(),
+                nextPlannedDirection = initialDirection?.nextDirection.orEmpty(),
+                distanceToDirectionChangeM = initialDirection?.distanceToChangeM
             )
         }
         return true
@@ -298,6 +330,38 @@ class SmartCaneAppController private constructor(
         speakText(reminder, priority = TtsPriority.NAVIGATION, bypassTextCooldown = true)
     }
 
+    private fun maybeSpeakNavigationDirectionChange(
+        stepIndex: Int,
+        nextDirection: String,
+        directionChangeDue: Boolean
+    ) {
+        val reminder = navigationDirectionChangeReminder(nextDirection, directionChangeDue) ?: return
+        if (!announcedNavigationSteps.add("$stepIndex:direction")) return
+        Log.i(
+            NAVIGATION_TURN_LOG_TAG,
+            "trigger=direction_radius step=$stepIndex nextDirection=$nextDirection text=$reminder"
+        )
+        speakText(reminder, priority = TtsPriority.NAVIGATION, bypassTextCooldown = true)
+    }
+
+    private fun maybeSpeakCompletedNavigationDirection(
+        currentStepIndex: Int,
+        currentDirection: String
+    ) {
+        val previousStepIndex = lastNavigationStepIndex ?: return
+        if (currentStepIndex <= previousStepIndex) return
+        if (currentDirection.isBlank() || currentDirection == lastNavigationCurrentDirection) return
+        val direction = lastNavigationNextDirection.ifBlank { lastNavigationCurrentDirection }
+        if (direction.isBlank()) return
+        if (!announcedNavigationSteps.add("$previousStepIndex:direction")) return
+        val reminder = "现在请向${direction}走"
+        Log.i(
+            NAVIGATION_TURN_LOG_TAG,
+            "trigger=direction_step_transition previousStep=$previousStepIndex currentStep=$currentStepIndex text=$reminder"
+        )
+        speakText(reminder, priority = TtsPriority.NAVIGATION, bypassTextCooldown = true)
+    }
+
     private fun maybeSpeakCompletedNavigationTurn(currentStepIndex: Int) {
         val previousStepIndex = lastNavigationStepIndex ?: return
         val reminder = completedNavigationTurnReminder(
@@ -318,6 +382,8 @@ class SmartCaneAppController private constructor(
         announcedCrossingWarnings.clear()
         lastNavigationStepIndex = null
         lastNavigationInstruction = ""
+        lastNavigationCurrentDirection = ""
+        lastNavigationNextDirection = ""
     }
 
     private fun maybeSpeakCrossingWarning(warningId: String, crossingType: String, distanceM: Double): Boolean {
@@ -1845,7 +1911,11 @@ class SmartCaneAppController private constructor(
                 navigationStatus = "idle",
                 activeNavigationRoute = null,
                 alternativeNavigationRoutes = emptyList(),
-                navigationArrived = false
+                navigationArrived = false,
+                currentNavigationInstruction = "",
+                currentPlannedDirection = "",
+                nextPlannedDirection = "",
+                distanceToDirectionChangeM = null
             )
         }
     }
@@ -2055,6 +2125,74 @@ internal fun eightPointCompassDirection(headingDeg: Float?): String? {
     val directions = arrayOf("北", "东北", "东", "东南", "南", "西南", "西", "西北")
     val index = (((normalized + 22.5f) / 45f).toInt()) % directions.size
     return directions[index]
+}
+
+internal fun plannedNavigationDirection(step: NavigationStepDto?): String? {
+    step ?: return null
+    val aliases = mapOf(
+        "北" to "北", "东北" to "东北", "东" to "东", "东南" to "东南",
+        "南" to "南", "西南" to "西南", "西" to "西", "西北" to "西北",
+        "north" to "北", "northeast" to "东北", "east" to "东", "southeast" to "东南",
+        "south" to "南", "southwest" to "西南", "west" to "西", "northwest" to "西北"
+    )
+    aliases[step.orientation.trim().lowercase(Locale.ROOT)]?.let { return it }
+    Regex("向(东北|东南|西北|西南|东|南|西|北)").find(step.instruction)?.groupValues?.getOrNull(1)?.let {
+        return it
+    }
+    val points = step.polyline.split(';').mapNotNull { coordinate ->
+        val values = coordinate.split(',')
+        if (values.size < 2) null else {
+            val lng = values[0].toDoubleOrNull()
+            val lat = values[1].toDoubleOrNull()
+            if (lat == null || lng == null) null else lat to lng
+        }
+    }
+    val start = points.firstOrNull() ?: return null
+    val end = points.lastOrNull() ?: return null
+    if (start == end) return null
+    val startLat = Math.toRadians(start.first)
+    val endLat = Math.toRadians(end.first)
+    val deltaLng = Math.toRadians(end.second - start.second)
+    val bearing = Math.toDegrees(
+        atan2(
+            sin(deltaLng) * cos(endLat),
+            cos(startLat) * sin(endLat) - sin(startLat) * cos(endLat) * cos(deltaLng)
+        )
+    ).toFloat()
+    return eightPointCompassDirection(bearing)
+}
+
+internal fun navigationDirectionChangeReminder(nextDirection: String, due: Boolean): String? =
+    nextDirection.trim().takeIf { due && it in setOf("北", "东北", "东", "东南", "南", "西南", "西", "西北") }
+        ?.let { "10米后向${it}走" }
+
+internal data class PlannedNavigationSegment(
+    val currentDirection: String,
+    val nextDirection: String,
+    val distanceToChangeM: Double?
+)
+
+internal fun plannedNavigationSegment(
+    steps: List<NavigationStepDto>,
+    stepIndex: Int
+): PlannedNavigationSegment? {
+    val currentStep = steps.getOrNull(stepIndex) ?: return null
+    val currentDirection = plannedNavigationDirection(currentStep).orEmpty()
+    var distanceM = currentStep.distanceM.coerceAtLeast(0).toDouble()
+    var nextDirection = ""
+    for (futureStep in steps.drop(stepIndex + 1)) {
+        val futureDirection = plannedNavigationDirection(futureStep).orEmpty()
+        if (futureDirection.isNotBlank() && futureDirection != currentDirection) {
+            nextDirection = futureDirection
+            break
+        }
+        distanceM += futureStep.distanceM.coerceAtLeast(0)
+    }
+    return PlannedNavigationSegment(
+        currentDirection = currentDirection,
+        nextDirection = nextDirection,
+        distanceToChangeM = distanceM.takeIf { nextDirection.isNotBlank() }
+    )
 }
 
 internal fun compactSpeechText(text: String): String {
@@ -2321,6 +2459,9 @@ data class AppUiState(
     val navigationStatus: String = "idle",
     val currentStepIndex: Int = 0,
     val currentNavigationInstruction: String = "",
+    val currentPlannedDirection: String = "",
+    val nextPlannedDirection: String = "",
+    val distanceToDirectionChangeM: Double? = null,
     val distanceToRouteM: Double = 0.0,
     val distanceToDestinationM: Double = 0.0,
     val navigationArrived: Boolean = false

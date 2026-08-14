@@ -62,6 +62,7 @@ import com.nankai.smartcane.ui.design.SmartCaneColors
 import com.nankai.smartcane.viewmodel.SosActionState
 import com.nankai.smartcane.viewmodel.VoiceState
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.roundToInt
 
 @Composable
 fun BlindHomeScreen(
@@ -74,6 +75,9 @@ fun BlindHomeScreen(
     navigationPreference: String,
     navigationStatus: String,
     navigationInstruction: String,
+    currentPlannedDirection: String,
+    nextPlannedDirection: String,
+    distanceToDirectionChangeM: Double?,
     onVoicePressStart: () -> Unit,
     onVoicePressEnd: () -> Unit,
     onRepeat: () -> Unit,
@@ -103,6 +107,19 @@ fun BlindHomeScreen(
     val navigating = navigationStatus in setOf("active", "off_route", "replanning")
     val prompt = when {
         navigationStatus == "replanning" -> "导航中 · 正在重新规划"
+        navigating && currentPlannedDirection.isNotBlank() -> buildString {
+            append("导航中 · 当前规划方向：")
+            append(currentPlannedDirection)
+            val distanceM = distanceToDirectionChangeM
+                ?.takeIf { it.isFinite() && it >= 0.0 && nextPlannedDirection.isNotBlank() }
+            if (distanceM != null) {
+                append("\n距向")
+                append(nextPlannedDirection)
+                append("转向点 ")
+                append(distanceM.roundToInt())
+                append(" 米")
+            }
+        }
         navigating && navigationInstruction.isNotBlank() -> "导航中 · $navigationInstruction"
         navigating -> "导航中 · 等待定位更新"
         else -> "前方路口建议直行"

@@ -24,4 +24,13 @@ class NavigationLocationPolicyTest {
         assertEquals("local-session", navigationSessionToStop(null, " local-session "))
         assertNull(navigationSessionToStop(" ", null))
     }
+
+    @Test
+    fun walkingBearingPrefersGpsCourseThenMovementThenPhoneHeading() {
+        assertEquals(91f, navigationWalkingBearing(91f, 1.2f, 88f, 270f))
+        assertEquals(88f, navigationWalkingBearing(null, null, 88f, 270f))
+        assertEquals(270f, navigationWalkingBearing(null, null, null, 270f))
+        assertEquals(359f, navigationWalkingBearing(-1f, null, null, null))
+        assertNull(navigationWalkingBearing(null, null, null, null))
+    }
 }

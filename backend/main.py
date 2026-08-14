@@ -64,6 +64,10 @@ NAVIGATION_ADVICE_TIMEOUT_SECONDS = 2.0
 NAVIGATION_COMMAND_TIMEOUT_SECONDS = 2.0
 NAVIGATION_ACTION_ACCURACY_COMPENSATION_MAX_M = 5.0
 NAVIGATION_STEP_SWITCH_BASE_M = 3.0
+NAVIGATION_DIRECTION_CHANGE_RADIUS_M = 10.0
+NAVIGATION_DIRECTION_MATCH_BASE_M = 20.0
+NAVIGATION_DIRECTION_MATCH_MAX_M = 35.0
+NAVIGATION_DIRECTION_ALIGNMENT_DEGREES = 67.5
 AMAP_TRAFFIC_TIMEOUT_SECONDS = 0.4
 TRAFFIC_INTERSECTION_MATCH_M = 50.0
 RISK_POINT_CLUSTER_RADIUS_M = 12.0
@@ -358,6 +362,7 @@ class NavigationSessionUpdate(BaseModel):
     lat: float = Field(..., ge=-90, le=90)
     lng: float = Field(..., ge=-180, le=180)
     accuracy_m: Optional[float] = None
+    bearing_deg: Optional[float] = Field(None, ge=0, lt=360)
     status: Optional[str] = None
     distance_delta_m: Optional[float] = Field(None, ge=0)
     risk_event_count_delta: int = Field(0, ge=0)
@@ -2853,10 +2858,27 @@ def min_distance_to_polyline_m(lat: float, lng: float, points: list[dict[str, fl
 
 
 def remaining_distance_on_polyline_m(lat: float, lng: float, points: list[dict[str, float]]) -> float:
+    return float(polyline_projection_state(lat, lng, points)["remaining_m"])
+
+
+def polyline_projection_state(
+    lat: float,
+    lng: float,
+    points: list[dict[str, float]],
+) -> dict[str, float]:
     if not points:
-        return float("inf")
+        return {
+            "remaining_m": float("inf"),
+            "cross_track_m": float("inf"),
+            "planned_bearing_deg": float("nan"),
+        }
     if len(points) == 1:
-        return haversine_m(lat, lng, points[0]["lat"], points[0]["lng"])
+        distance_m = haversine_m(lat, lng, points[0]["lat"], points[0]["lng"])
+        return {
+            "remaining_m": distance_m,
+            "cross_track_m": distance_m,
+            "planned_bearing_deg": float("nan"),
+        }
     segment_lengths = [
         haversine_m(
             points[index]["lat"], points[index]["lng"],
@@ -2877,7 +2899,18 @@ def remaining_distance_on_polyline_m(lat: float, lng: float, points: list[dict[s
     ]
     segment_index = min(range(len(projections)), key=lambda index: projections[index][0])
     progress = projections[segment_index][1]
-    return (1.0 - progress) * segment_lengths[segment_index] + sum(segment_lengths[segment_index + 1:])
+    planned_bearing_deg = bearing_between_deg(
+        points[segment_index]["lat"],
+        points[segment_index]["lng"],
+        points[segment_index + 1]["lat"],
+        points[segment_index + 1]["lng"],
+    )
+    return {
+        "remaining_m": (1.0 - progress) * segment_lengths[segment_index]
+        + sum(segment_lengths[segment_index + 1:]),
+        "cross_track_m": projections[segment_index][0],
+        "planned_bearing_deg": planned_bearing_deg,
+    }
 
 
 ROAD_FIXED_RISK_TYPES = {"ground_step_down", "ground_step_up", "ground_drop", "ground_step", "confirmed_user_mark", "fixed_obstacle"}
@@ -4854,6 +4887,82 @@ def effective_navigation_action_distance_m(distance_m: float, accuracy_m: Option
     return max(0.0, float(distance_m) - navigation_accuracy_compensation_m(accuracy_m))
 
 
+def angular_difference_deg(first: float, second: float) -> float:
+    return abs((float(first) - float(second) + 180.0) % 360.0 - 180.0)
+
+
+def navigation_direction_match_radius_m(accuracy_m: Optional[float]) -> float:
+    try:
+        accuracy = max(0.0, float(accuracy_m or 0.0))
+    except (TypeError, ValueError):
+        accuracy = 0.0
+    return min(
+        NAVIGATION_DIRECTION_MATCH_MAX_M,
+        max(NAVIGATION_DIRECTION_MATCH_BASE_M, accuracy * 1.5),
+    )
+
+
+def navigation_direction_state(
+    steps: list[dict[str, Any]],
+    step_index: int,
+    lat: float,
+    lng: float,
+    accuracy_m: Optional[float],
+    bearing_deg: Optional[float],
+) -> dict[str, Any]:
+    step = steps[step_index] if steps and 0 <= step_index < len(steps) else None
+    current_direction = normalized_cardinal_direction(step or {})
+    points = parse_polyline(str((step or {}).get("polyline") or ""))
+    projection = polyline_projection_state(lat, lng, points)
+    raw_distance_m = float(projection["remaining_m"])
+    next_direction = ""
+    for future_step in steps[step_index + 1:]:
+        future_direction = normalized_cardinal_direction(future_step)
+        if future_direction and future_direction != current_direction:
+            next_direction = future_direction
+            break
+        future_points = parse_polyline(str(future_step.get("polyline") or ""))
+        if len(future_points) >= 2:
+            raw_distance_m += road_segment_length(future_points)
+        else:
+            try:
+                raw_distance_m += max(
+                    0.0,
+                    float(future_step.get("distance_m") or future_step.get("distance") or 0.0),
+                )
+            except (TypeError, ValueError):
+                pass
+    effective_distance_m = effective_navigation_action_distance_m(raw_distance_m, accuracy_m)
+    cross_track_m = float(projection["cross_track_m"])
+    planned_bearing_deg = float(projection["planned_bearing_deg"])
+    position_near_route = cross_track_m <= navigation_direction_match_radius_m(accuracy_m)
+    direction_aligned = True
+    heading_difference_maybe: Optional[float] = None
+    if bearing_deg is not None and math.isfinite(planned_bearing_deg):
+        heading_difference_maybe = angular_difference_deg(bearing_deg, planned_bearing_deg)
+        direction_aligned = heading_difference_maybe <= NAVIGATION_DIRECTION_ALIGNMENT_DEGREES
+    direction_change_due = bool(
+        next_direction
+        and current_direction != next_direction
+        and effective_distance_m <= NAVIGATION_DIRECTION_CHANGE_RADIUS_M
+        and position_near_route
+        and direction_aligned
+    )
+    return {
+        "current_direction": current_direction,
+        "next_direction": next_direction,
+        "distance_to_direction_change_m": raw_distance_m,
+        "effective_distance_to_direction_change_m": effective_distance_m,
+        "route_cross_track_m": cross_track_m,
+        "planned_bearing_deg": planned_bearing_deg if math.isfinite(planned_bearing_deg) else None,
+        "walking_bearing_deg": bearing_deg,
+        "heading_difference_deg": heading_difference_maybe,
+        "position_near_route": position_near_route,
+        "direction_aligned": direction_aligned,
+        "direction_change_due": direction_change_due,
+    }
+
+
 def finish_active_traversal(
     conn: sqlite3.Connection,
     traversal_id: Optional[int],
@@ -4996,6 +5105,14 @@ def update_navigation_session(session_id: str, update: NavigationSessionUpdate) 
     effective_distance_to_next_action_m = effective_navigation_action_distance_m(
         distance_to_next_action_m, update.accuracy_m
     )
+    direction_state = navigation_direction_state(
+        steps,
+        step_index,
+        route_lat,
+        route_lng,
+        update.accuracy_m,
+        update.bearing_deg,
+    )
     crossing_distance_m = None
     if step and step.get("crossing_lat") is not None and step.get("crossing_lng") is not None:
         crossing_distance_m = haversine_m(
@@ -5009,6 +5126,26 @@ def update_navigation_session(session_id: str, update: NavigationSessionUpdate) 
         "distance_to_destination_m": round(destination_distance_m, 1),
         "distance_to_next_action_m": round(distance_to_next_action_m, 1),
         "effective_distance_to_next_action_m": round(effective_distance_to_next_action_m, 1),
+        "current_direction": direction_state["current_direction"],
+        "next_direction": direction_state["next_direction"],
+        "distance_to_direction_change_m": round(direction_state["distance_to_direction_change_m"], 1),
+        "effective_distance_to_direction_change_m": round(direction_state["effective_distance_to_direction_change_m"], 1),
+        "route_cross_track_m": round(direction_state["route_cross_track_m"], 1),
+        "planned_bearing_deg": (
+            round(direction_state["planned_bearing_deg"], 1)
+            if direction_state["planned_bearing_deg"] is not None else None
+        ),
+        "walking_bearing_deg": (
+            round(float(direction_state["walking_bearing_deg"]), 1)
+            if direction_state["walking_bearing_deg"] is not None else None
+        ),
+        "heading_difference_deg": (
+            round(direction_state["heading_difference_deg"], 1)
+            if direction_state["heading_difference_deg"] is not None else None
+        ),
+        "position_near_route": direction_state["position_near_route"],
+        "direction_aligned": direction_state["direction_aligned"],
+        "direction_change_due": direction_state["direction_change_due"],
         "location_accuracy_m": round(max(0.0, float(update.accuracy_m or 0.0)), 1),
         "distance_to_crossing_warning_m": round(crossing_distance_m, 1) if crossing_distance_m is not None else None,
         "distance_to_traffic_warning_m": None,

@@ -568,6 +568,9 @@ def test_navigation_returns_distance_to_next_action(tmp_path, monkeypatch):
         sid, main.NavigationSessionUpdate(lat=31.00075, lng=121.0, distance_delta_m=3.0)
     )
     assert 20 <= result["distance_to_next_action_m"] <= 35
+    assert result["current_direction"] == "北"
+    assert result["next_direction"] == ""
+    assert result["direction_change_due"] is False
 
 
 def test_navigation_action_distance_follows_route_progress_instead_of_straight_line():
@@ -602,6 +605,65 @@ def test_navigation_step_progress_is_monotonic_and_switches_only_near_step_end()
 def test_navigation_effective_action_distance_caps_accuracy_compensation():
     assert main.effective_navigation_action_distance_m(11.36, 4.26) < 10
     assert main.effective_navigation_action_distance_m(20.0, 50.0) == 15.0
+
+
+def test_navigation_direction_change_requires_near_route_and_matching_walking_direction():
+    steps = [
+        {
+            "orientation": "东",
+            "instruction": "向东步行100米左转",
+            "polyline": "121.0,31.0;121.001,31.0",
+        },
+        {
+            "orientation": "北",
+            "instruction": "向北步行100米",
+            "polyline": "121.001,31.0;121.001,31.001",
+        },
+    ]
+    aligned = main.navigation_direction_state(
+        steps, 0, 31.00009, 121.0009, accuracy_m=3.0, bearing_deg=90.0
+    )
+    assert aligned["current_direction"] == "东"
+    assert aligned["next_direction"] == "北"
+    assert aligned["route_cross_track_m"] < 15
+    assert aligned["effective_distance_to_direction_change_m"] <= 10
+    assert aligned["position_near_route"] is True
+    assert aligned["direction_aligned"] is True
+    assert aligned["direction_change_due"] is True
+
+    reverse = main.navigation_direction_state(
+        steps, 0, 31.00009, 121.0009, accuracy_m=3.0, bearing_deg=270.0
+    )
+    assert reverse["direction_aligned"] is False
+    assert reverse["direction_change_due"] is False
+
+
+def test_navigation_direction_falls_back_to_polyline_when_map_orientation_is_empty():
+    steps = [
+        {"orientation": [], "polyline": "121.0,31.0;121.001,31.0"},
+        {"orientation": [], "polyline": "121.001,31.0;121.001,31.001"},
+    ]
+    state = main.navigation_direction_state(
+        steps, 0, 31.0, 121.0009, accuracy_m=3.0, bearing_deg=90.0
+    )
+    assert state["current_direction"] == "东"
+    assert state["next_direction"] == "北"
+    assert state["direction_change_due"] is True
+
+
+def test_navigation_direction_change_skips_consecutive_steps_in_the_same_direction():
+    steps = [
+        {"orientation": "东", "distance": "40", "polyline": "121.0,31.0;121.0004,31.0"},
+        {"orientation": "东", "distance": "60", "polyline": "121.0004,31.0;121.001,31.0"},
+        {"orientation": "北", "distance": "100", "polyline": "121.001,31.0;121.001,31.001"},
+    ]
+    state = main.navigation_direction_state(
+        steps, 0, 31.0, 121.0003, accuracy_m=3.0, bearing_deg=90.0
+    )
+    assert state["current_direction"] == "东"
+    assert state["next_direction"] == "北"
+    assert state["distance_to_direction_change_m"] > 60
+    assert state["direction_change_due"] is False
 
 
 def test_firmware_source_contains_local_step_and_fall_contract():

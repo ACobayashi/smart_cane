@@ -389,6 +389,17 @@ data class NavigationUpdateDto(
     val distanceToDestinationM: Double,
     val distanceToNextActionM: Double,
     val effectiveDistanceToNextActionM: Double?,
+    val currentDirection: String,
+    val nextDirection: String,
+    val distanceToDirectionChangeM: Double?,
+    val effectiveDistanceToDirectionChangeM: Double?,
+    val routeCrossTrackM: Double?,
+    val plannedBearingDeg: Double?,
+    val walkingBearingDeg: Double?,
+    val headingDifferenceDeg: Double?,
+    val positionNearRoute: Boolean,
+    val directionAligned: Boolean,
+    val directionChangeDue: Boolean,
     val distanceToTrafficWarningM: Double?,
     val distanceToCrossingWarningM: Double?,
     val offRoute: Boolean,
@@ -813,12 +824,14 @@ object SmartCaneApiClient {
         latitude: Double,
         longitude: Double,
         accuracyM: Double,
-        distanceDeltaM: Double
+        distanceDeltaM: Double,
+        bearingDeg: Double?
     ): NavigationUpdateDto? = try {
         postJson(
             "/api/navigation/sessions/${sessionId.urlEncode()}/update",
             JSONObject().put("lat", latitude).put("lng", longitude)
                 .put("accuracy_m", accuracyM).put("distance_delta_m", distanceDeltaM)
+                .put("bearing_deg", bearingDeg ?: JSONObject.NULL)
         ).toNavigationUpdateDto()
     } catch (_: Exception) {
         null
@@ -1468,6 +1481,17 @@ object SmartCaneApiClient {
         distanceToNextActionM = optDouble("distance_to_next_action_m"),
         effectiveDistanceToNextActionM = nullableDouble("effective_distance_to_next_action_m")
             ?: nullableDouble("effectiveDistanceToNextActionM"),
+        currentDirection = optString("current_direction"),
+        nextDirection = optString("next_direction"),
+        distanceToDirectionChangeM = nullableDouble("distance_to_direction_change_m"),
+        effectiveDistanceToDirectionChangeM = nullableDouble("effective_distance_to_direction_change_m"),
+        routeCrossTrackM = nullableDouble("route_cross_track_m"),
+        plannedBearingDeg = nullableDouble("planned_bearing_deg"),
+        walkingBearingDeg = nullableDouble("walking_bearing_deg"),
+        headingDifferenceDeg = nullableDouble("heading_difference_deg"),
+        positionNearRoute = optBoolean("position_near_route", true),
+        directionAligned = optBoolean("direction_aligned", true),
+        directionChangeDue = optBoolean("direction_change_due"),
         distanceToTrafficWarningM = nullableDouble("distance_to_traffic_warning_m")
             ?: nullableDouble("distanceToTrafficWarningM"),
         distanceToCrossingWarningM = nullableDouble("distance_to_crossing_warning_m")

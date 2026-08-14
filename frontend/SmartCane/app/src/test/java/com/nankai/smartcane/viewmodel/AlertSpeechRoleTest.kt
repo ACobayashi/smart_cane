@@ -6,6 +6,7 @@ import com.nankai.smartcane.data.network.LocalCueMetadataDto
 import com.nankai.smartcane.data.network.LocalCueRiskDto
 import com.nankai.smartcane.data.network.LocalCueSpeechDto
 import com.nankai.smartcane.data.network.EmergencyAlertDto
+import com.nankai.smartcane.data.network.NavigationStepDto
 import com.nankai.smartcane.data.local.DemoData
 import com.nankai.smartcane.data.model.CareRelation
 import com.nankai.smartcane.data.model.RelationStatus
@@ -253,6 +254,36 @@ class AlertSpeechRoleTest {
     }
 
     @Test
+    fun plannedNavigationDirectionUsesMapOrientationThenPolylineFallback() {
+        val north = navigationStepForTest(orientation = "北", polyline = "121.0,31.0;121.001,31.0")
+        val eastFallback = navigationStepForTest(orientation = "[]", polyline = "121.0,31.0;121.001,31.0")
+        assertEquals("北", plannedNavigationDirection(north))
+        assertEquals("东", plannedNavigationDirection(eastFallback))
+    }
+
+    @Test
+    fun directionChangeReminderUsesTheNextAbsoluteDirection() {
+        assertEquals("10米后向北走", navigationDirectionChangeReminder("北", true))
+        assertNull(navigationDirectionChangeReminder("北", false))
+        assertNull(navigationDirectionChangeReminder("", true))
+    }
+
+    @Test
+    fun plannedDirectionSegmentCombinesConsecutiveMapSteps() {
+        val segment = plannedNavigationSegment(
+            listOf(
+                navigationStepForTest("东", "121.0,31.0;121.0004,31.0", distanceM = 40),
+                navigationStepForTest("东", "121.0004,31.0;121.001,31.0", distanceM = 60),
+                navigationStepForTest("北", "121.001,31.0;121.001,31.001", distanceM = 100)
+            ),
+            0
+        )
+        assertEquals("东", segment?.currentDirection)
+        assertEquals("北", segment?.nextDirection)
+        assertEquals(100.0, segment?.distanceToChangeM ?: 0.0, 0.01)
+    }
+
+    @Test
     fun crossingRemindersSpeakAtThirtyAndTenMeters() {
         assertEquals(
             CrossingReminder(30, "前方30米有斑马线，请减速"),
@@ -373,6 +404,23 @@ class AlertSpeechRoleTest {
         )
     }
 
+
+    private fun navigationStepForTest(
+        orientation: String,
+        polyline: String,
+        instruction: String = "",
+        distanceM: Int = 100
+    ) = NavigationStepDto(
+        stepIndex = 0,
+        instruction = instruction,
+        roadName = "测试路",
+        distanceM = distanceM,
+        roadSegmentId = null,
+        riskScore = 0.0,
+        confidenceScore = 1.0,
+        polyline = polyline,
+        orientation = orientation
+    )
 
     private fun localCueForTest() = LocalCueDto(
         id = 301,

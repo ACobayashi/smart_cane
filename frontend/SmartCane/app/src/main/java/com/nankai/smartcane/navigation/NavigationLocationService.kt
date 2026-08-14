@@ -93,8 +93,18 @@ class NavigationLocationService : Service(), LocationListener {
         if (System.currentTimeMillis() - lastUploadAt < 2_000L) return
         val activeSession = sessionId() ?: return
         val activeDevice = deviceId() ?: return
-        val distanceDeltaM = lastAcceptedLocation?.distanceTo(location)?.toDouble()
+        val previousLocation = lastAcceptedLocation
+        val distanceDeltaM = previousLocation?.distanceTo(location)?.toDouble()
             ?.takeIf { it in 0.0..100.0 } ?: 0.0
+        val displacementBearing = previousLocation
+            ?.takeIf { distanceDeltaM >= 2.0 }
+            ?.bearingTo(location)
+        val walkingBearing = navigationWalkingBearing(
+            gpsBearingDeg = location.bearing.takeIf { location.hasBearing() },
+            speedMps = location.speed.takeIf { location.hasSpeed() },
+            displacementBearingDeg = displacementBearing,
+            phoneHeadingDeg = PhoneHeadingProvider.latestHeadingDeg()
+        )
         lastAcceptedLocation = Location(location)
         lastUploadAt = System.currentTimeMillis()
         executor.execute {
@@ -107,12 +117,16 @@ class NavigationLocationService : Service(), LocationListener {
                     provider = location.provider ?: "fused",
                     quality = "navigation",
                     accuracyM = location.accuracy,
-                    bearingDeg = PhoneHeadingProvider.latestHeadingDeg()
-                        ?: location.bearing.takeIf { location.hasBearing() }
+                    bearingDeg = walkingBearing
                 )
             )
             val update = SmartCaneApiClient.updateNavigationSession(
-                activeSession, location.latitude, location.longitude, location.accuracy.toDouble(), distanceDeltaM
+                activeSession,
+                location.latitude,
+                location.longitude,
+                location.accuracy.toDouble(),
+                distanceDeltaM,
+                walkingBearing?.toDouble()
             ) ?: return@execute
             sendBroadcast(Intent(ACTION_STATE_CHANGED).setPackage(packageName)
                 .putExtra(EXTRA_SESSION_ID, activeSession)
@@ -121,10 +135,19 @@ class NavigationLocationService : Service(), LocationListener {
                 .putExtra(EXTRA_DISTANCE_TO_ROUTE_M, update.distanceToRouteM)
                 .putExtra(EXTRA_DISTANCE_TO_DESTINATION_M, update.distanceToDestinationM)
                 .putExtra(EXTRA_DISTANCE_TO_NEXT_ACTION_M, update.distanceToNextActionM)
+                .putExtra(EXTRA_CURRENT_DIRECTION, update.currentDirection)
+                .putExtra(EXTRA_NEXT_DIRECTION, update.nextDirection)
+                .putExtra(EXTRA_DIRECTION_CHANGE_DUE, update.directionChangeDue)
+                .putExtra(EXTRA_POSITION_NEAR_ROUTE, update.positionNearRoute)
+                .putExtra(EXTRA_DIRECTION_ALIGNED, update.directionAligned)
                 .apply {
                     update.effectiveDistanceToNextActionM?.let {
                         putExtra(EXTRA_EFFECTIVE_DISTANCE_TO_NEXT_ACTION_M, it)
                     }
+                    update.effectiveDistanceToDirectionChangeM?.let {
+                        putExtra(EXTRA_EFFECTIVE_DISTANCE_TO_DIRECTION_CHANGE_M, it)
+                    }
+                    update.walkingBearingDeg?.let { putExtra(EXTRA_WALKING_BEARING_DEG, it) }
                 }
                 .putExtra(EXTRA_LOCATION_ACCURACY_M, location.accuracy.toDouble())
                 .putExtra(EXTRA_DISTANCE_TO_CROSSING_WARNING_M, update.distanceToCrossingWarningM ?: Double.MAX_VALUE)
@@ -237,6 +260,13 @@ class NavigationLocationService : Service(), LocationListener {
         const val EXTRA_DISTANCE_TO_DESTINATION_M = "distance_to_destination_m"
         const val EXTRA_DISTANCE_TO_NEXT_ACTION_M = "distance_to_next_action_m"
         const val EXTRA_EFFECTIVE_DISTANCE_TO_NEXT_ACTION_M = "effective_distance_to_next_action_m"
+        const val EXTRA_EFFECTIVE_DISTANCE_TO_DIRECTION_CHANGE_M = "effective_distance_to_direction_change_m"
+        const val EXTRA_CURRENT_DIRECTION = "current_direction"
+        const val EXTRA_NEXT_DIRECTION = "next_direction"
+        const val EXTRA_DIRECTION_CHANGE_DUE = "direction_change_due"
+        const val EXTRA_POSITION_NEAR_ROUTE = "position_near_route"
+        const val EXTRA_DIRECTION_ALIGNED = "direction_aligned"
+        const val EXTRA_WALKING_BEARING_DEG = "walking_bearing_deg"
         const val EXTRA_LOCATION_ACCURACY_M = "location_accuracy_m"
         const val EXTRA_DISTANCE_TO_CROSSING_WARNING_M = "distance_to_crossing_warning_m"
         const val EXTRA_OFF_ROUTE = "off_route"
@@ -280,3 +310,16 @@ internal fun navigationLocationTimedOut(nowMs: Long, lastUsableLocationAtMs: Lon
 internal fun navigationSessionToStop(requestedSessionId: String?, storedSessionId: String?): String? =
     requestedSessionId?.trim()?.takeIf(String::isNotEmpty)
         ?: storedSessionId?.trim()?.takeIf(String::isNotEmpty)
+
+internal fun navigationWalkingBearing(
+    gpsBearingDeg: Float?,
+    speedMps: Float?,
+    displacementBearingDeg: Float?,
+    phoneHeadingDeg: Float?
+): Float? = when {
+    gpsBearingDeg?.isFinite() == true && speedMps?.isFinite() == true && speedMps >= 0.4f -> gpsBearingDeg
+    displacementBearingDeg?.isFinite() == true -> displacementBearingDeg
+    phoneHeadingDeg?.isFinite() == true -> phoneHeadingDeg
+    gpsBearingDeg?.isFinite() == true -> gpsBearingDeg
+    else -> null
+}?.let { ((it % 360f) + 360f) % 360f }
