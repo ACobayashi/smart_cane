@@ -121,6 +121,11 @@ class NavigationLocationService : Service(), LocationListener {
                 .putExtra(EXTRA_DISTANCE_TO_ROUTE_M, update.distanceToRouteM)
                 .putExtra(EXTRA_DISTANCE_TO_DESTINATION_M, update.distanceToDestinationM)
                 .putExtra(EXTRA_DISTANCE_TO_NEXT_ACTION_M, update.distanceToNextActionM)
+                .apply {
+                    update.effectiveDistanceToNextActionM?.let {
+                        putExtra(EXTRA_EFFECTIVE_DISTANCE_TO_NEXT_ACTION_M, it)
+                    }
+                }
                 .putExtra(EXTRA_LOCATION_ACCURACY_M, location.accuracy.toDouble())
                 .putExtra(EXTRA_DISTANCE_TO_CROSSING_WARNING_M, update.distanceToCrossingWarningM ?: Double.MAX_VALUE)
                 .putExtra(EXTRA_OFF_ROUTE, update.offRoute)
@@ -231,6 +236,7 @@ class NavigationLocationService : Service(), LocationListener {
         const val EXTRA_DISTANCE_TO_ROUTE_M = "distance_to_route_m"
         const val EXTRA_DISTANCE_TO_DESTINATION_M = "distance_to_destination_m"
         const val EXTRA_DISTANCE_TO_NEXT_ACTION_M = "distance_to_next_action_m"
+        const val EXTRA_EFFECTIVE_DISTANCE_TO_NEXT_ACTION_M = "effective_distance_to_next_action_m"
         const val EXTRA_LOCATION_ACCURACY_M = "location_accuracy_m"
         const val EXTRA_DISTANCE_TO_CROSSING_WARNING_M = "distance_to_crossing_warning_m"
         const val EXTRA_OFF_ROUTE = "off_route"

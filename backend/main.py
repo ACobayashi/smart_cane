@@ -62,6 +62,8 @@ NAVIGATION_MOVING_RECENT_SECONDS = 8
 NAVIGATION_SESSION_VISIBLE_SECONDS = 20
 NAVIGATION_ADVICE_TIMEOUT_SECONDS = 2.0
 NAVIGATION_COMMAND_TIMEOUT_SECONDS = 2.0
+NAVIGATION_ACTION_ACCURACY_COMPENSATION_MAX_M = 5.0
+NAVIGATION_STEP_SWITCH_BASE_M = 3.0
 AMAP_TRAFFIC_TIMEOUT_SECONDS = 0.4
 TRAFFIC_INTERSECTION_MATCH_M = 50.0
 RISK_POINT_CLUSTER_RADIUS_M = 12.0
@@ -2805,6 +2807,19 @@ def point_to_segment_distance_m(
     end_lat: float,
     end_lng: float,
 ) -> float:
+    return point_to_segment_projection_m(
+        point_lat, point_lng, start_lat, start_lng, end_lat, end_lng
+    )[0]
+
+
+def point_to_segment_projection_m(
+    point_lat: float,
+    point_lng: float,
+    start_lat: float,
+    start_lng: float,
+    end_lat: float,
+    end_lng: float,
+) -> tuple[float, float]:
     px, py = local_xy_m(point_lat, point_lng, start_lat, start_lng)
     ax, ay = 0.0, 0.0
     bx, by = local_xy_m(end_lat, end_lng, start_lat, start_lng)
@@ -2812,11 +2827,11 @@ def point_to_segment_distance_m(
     dy = by - ay
     length_sq = dx * dx + dy * dy
     if length_sq <= 0:
-        return math.hypot(px - ax, py - ay)
+        return math.hypot(px - ax, py - ay), 0.0
     t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
     closest_x = ax + t * dx
     closest_y = ay + t * dy
-    return math.hypot(px - closest_x, py - closest_y)
+    return math.hypot(px - closest_x, py - closest_y), t
 
 
 def min_distance_to_polyline_m(lat: float, lng: float, points: list[dict[str, float]]) -> float:
@@ -2835,6 +2850,34 @@ def min_distance_to_polyline_m(lat: float, lng: float, points: list[dict[str, fl
         )
         for index in range(len(points) - 1)
     )
+
+
+def remaining_distance_on_polyline_m(lat: float, lng: float, points: list[dict[str, float]]) -> float:
+    if not points:
+        return float("inf")
+    if len(points) == 1:
+        return haversine_m(lat, lng, points[0]["lat"], points[0]["lng"])
+    segment_lengths = [
+        haversine_m(
+            points[index]["lat"], points[index]["lng"],
+            points[index + 1]["lat"], points[index + 1]["lng"],
+        )
+        for index in range(len(points) - 1)
+    ]
+    projections = [
+        point_to_segment_projection_m(
+            lat,
+            lng,
+            points[index]["lat"],
+            points[index]["lng"],
+            points[index + 1]["lat"],
+            points[index + 1]["lng"],
+        )
+        for index in range(len(points) - 1)
+    ]
+    segment_index = min(range(len(projections)), key=lambda index: projections[index][0])
+    progress = projections[segment_index][1]
+    return (1.0 - progress) * segment_lengths[segment_index] + sum(segment_lengths[segment_index + 1:])
 
 
 ROAD_FIXED_RISK_TYPES = {"ground_step_down", "ground_step_up", "ground_drop", "ground_step", "confirmed_user_mark", "fixed_obstacle"}
@@ -4732,18 +4775,36 @@ def create_navigation_session(
     return session_id
 
 
-def navigation_step_index(steps: list[dict[str, Any]], lat: float, lng: float) -> tuple[int, float]:
-    best_index = 0
-    best_distance = float("inf")
-    for idx, step in enumerate(steps):
-        points = parse_polyline(str(step.get("polyline") or ""))
-        if not points:
-            continue
-        distance = min_distance_to_polyline_m(lat, lng, points)
-        if distance < best_distance:
-            best_index = idx
-            best_distance = distance
-    return best_index, best_distance
+def navigation_accuracy_compensation_m(accuracy_m: Optional[float]) -> float:
+    try:
+        accuracy = max(0.0, float(accuracy_m or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    return min(accuracy, NAVIGATION_ACTION_ACCURACY_COMPENSATION_MAX_M)
+
+
+def navigation_step_index(
+    steps: list[dict[str, Any]],
+    lat: float,
+    lng: float,
+    previous_step_index: int = 0,
+    accuracy_m: Optional[float] = None,
+) -> tuple[int, float]:
+    if not steps:
+        return 0, float("inf")
+    current_index = max(0, min(int(previous_step_index or 0), len(steps) - 1))
+    current_points = parse_polyline(str(steps[current_index].get("polyline") or ""))
+    if current_points and current_index < len(steps) - 1:
+        remaining_m = remaining_distance_on_polyline_m(lat, lng, current_points)
+        switch_radius_m = max(
+            NAVIGATION_STEP_SWITCH_BASE_M,
+            navigation_accuracy_compensation_m(accuracy_m),
+        )
+        if remaining_m <= switch_radius_m:
+            current_index += 1
+    selected_points = parse_polyline(str(steps[current_index].get("polyline") or ""))
+    selected_distance = min_distance_to_polyline_m(lat, lng, selected_points) if selected_points else float("inf")
+    return current_index, selected_distance
 
 
 def navigation_route_points(steps: list[dict[str, Any]]) -> list[dict[str, float]]:
@@ -4786,8 +4847,11 @@ def distance_to_step_action_m(step: Optional[dict[str, Any]], lat: float, lng: f
     points = parse_polyline(str((step or {}).get("polyline") or ""))
     if not points:
         return float((step or {}).get("distance") or 0.0)
-    endpoint = points[-1]
-    return haversine_m(lat, lng, float(endpoint["lat"]), float(endpoint["lng"]))
+    return remaining_distance_on_polyline_m(lat, lng, points)
+
+
+def effective_navigation_action_distance_m(distance_m: float, accuracy_m: Optional[float]) -> float:
+    return max(0.0, float(distance_m) - navigation_accuracy_compensation_m(accuracy_m))
 
 
 def finish_active_traversal(
@@ -4849,7 +4913,13 @@ def update_navigation_session(session_id: str, update: NavigationSessionUpdate) 
         steps = json.loads(row["route_steps_json"] or "[]")
         previous_step_index = int(row["current_step_index"] or 0)
         route_lat, route_lng = align_navigation_location(row, update.lat, update.lng)
-        step_index, step_off_route_m = navigation_step_index(steps, route_lat, route_lng)
+        step_index, step_off_route_m = navigation_step_index(
+            steps,
+            route_lat,
+            route_lng,
+            previous_step_index=previous_step_index,
+            accuracy_m=update.accuracy_m,
+        )
         route_points = navigation_route_points(steps)
         off_route_m = min_distance_to_polyline_m(route_lat, route_lng, route_points) if route_points else step_off_route_m
         off_route_threshold_m = navigation_off_route_threshold_m(update.accuracy_m)
@@ -4923,6 +4993,9 @@ def update_navigation_session(session_id: str, update: NavigationSessionUpdate) 
         recalculate_road_risk_score(segment_id)
     step = steps[step_index] if steps and step_index < len(steps) else None
     distance_to_next_action_m = distance_to_step_action_m(step, route_lat, route_lng)
+    effective_distance_to_next_action_m = effective_navigation_action_distance_m(
+        distance_to_next_action_m, update.accuracy_m
+    )
     crossing_distance_m = None
     if step and step.get("crossing_lat") is not None and step.get("crossing_lng") is not None:
         crossing_distance_m = haversine_m(
@@ -4935,6 +5008,8 @@ def update_navigation_session(session_id: str, update: NavigationSessionUpdate) 
         "off_route_threshold_m": round(off_route_threshold_m, 1),
         "distance_to_destination_m": round(destination_distance_m, 1),
         "distance_to_next_action_m": round(distance_to_next_action_m, 1),
+        "effective_distance_to_next_action_m": round(effective_distance_to_next_action_m, 1),
+        "location_accuracy_m": round(max(0.0, float(update.accuracy_m or 0.0)), 1),
         "distance_to_crossing_warning_m": round(crossing_distance_m, 1) if crossing_distance_m is not None else None,
         "distance_to_traffic_warning_m": None,
         "off_route": should_replan, "off_route_count": off_route_count,

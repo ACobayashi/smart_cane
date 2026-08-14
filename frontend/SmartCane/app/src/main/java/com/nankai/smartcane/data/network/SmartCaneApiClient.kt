@@ -388,6 +388,7 @@ data class NavigationUpdateDto(
     val distanceToRouteM: Double,
     val distanceToDestinationM: Double,
     val distanceToNextActionM: Double,
+    val effectiveDistanceToNextActionM: Double?,
     val distanceToTrafficWarningM: Double?,
     val distanceToCrossingWarningM: Double?,
     val offRoute: Boolean,
@@ -1465,6 +1466,8 @@ object SmartCaneApiClient {
         distanceToRouteM = optDouble("distance_to_route_m"),
         distanceToDestinationM = optDouble("distance_to_destination_m"),
         distanceToNextActionM = optDouble("distance_to_next_action_m"),
+        effectiveDistanceToNextActionM = nullableDouble("effective_distance_to_next_action_m")
+            ?: nullableDouble("effectiveDistanceToNextActionM"),
         distanceToTrafficWarningM = nullableDouble("distance_to_traffic_warning_m")
             ?: nullableDouble("distanceToTrafficWarningM"),
         distanceToCrossingWarningM = nullableDouble("distance_to_crossing_warning_m")

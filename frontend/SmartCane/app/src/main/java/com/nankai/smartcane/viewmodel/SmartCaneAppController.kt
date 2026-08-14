@@ -134,6 +134,13 @@ class SmartCaneAppController private constructor(
                     val distanceToDestination = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_DESTINATION_M, 0.0)
                     val distanceToNextAction = intent.getDoubleExtra(NavigationLocationService.EXTRA_DISTANCE_TO_NEXT_ACTION_M, Double.MAX_VALUE)
                     val locationAccuracy = intent.getDoubleExtra(NavigationLocationService.EXTRA_LOCATION_ACCURACY_M, 0.0)
+                    val hasServerEffectiveDistance = intent.hasExtra(
+                        NavigationLocationService.EXTRA_EFFECTIVE_DISTANCE_TO_NEXT_ACTION_M
+                    )
+                    val turnTriggerDistance = intent.getDoubleExtra(
+                        NavigationLocationService.EXTRA_EFFECTIVE_DISTANCE_TO_NEXT_ACTION_M,
+                        distanceToNextAction
+                    )
                     val distanceToCrossingWarning = intent.getDoubleExtra(
                         NavigationLocationService.EXTRA_DISTANCE_TO_CROSSING_WARNING_M, Double.MAX_VALUE
                     )
@@ -152,7 +159,12 @@ class SmartCaneAppController private constructor(
                         speakText("已到达目的地。", priority = TtsPriority.NAVIGATION)
                     } else {
                         maybeSpeakCompletedNavigationTurn(stepIndex)
-                        maybeSpeakNavigationStep(stepIndex, instruction, distanceToNextAction, locationAccuracy)
+                        maybeSpeakNavigationStep(
+                            stepIndex,
+                            instruction,
+                            turnTriggerDistance,
+                            if (hasServerEffectiveDistance) 0.0 else locationAccuracy
+                        )
                         maybeSpeakCrossingWarning(crossingWarningId, crossingType, distanceToCrossingWarning)
                     }
                     lastNavigationStepIndex = stepIndex

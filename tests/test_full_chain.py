@@ -570,6 +570,40 @@ def test_navigation_returns_distance_to_next_action(tmp_path, monkeypatch):
     assert 20 <= result["distance_to_next_action_m"] <= 35
 
 
+def test_navigation_action_distance_follows_route_progress_instead_of_straight_line():
+    points = main.parse_polyline(
+        "116.471293,39.876141;116.472092,39.876141;116.472235,39.876141"
+    )
+    lat = 39.876062
+    lng = 116.472150
+    endpoint = points[-1]
+    straight_distance = main.haversine_m(lat, lng, endpoint["lat"], endpoint["lng"])
+    route_remaining = main.remaining_distance_on_polyline_m(lat, lng, points)
+    assert straight_distance > 10
+    assert route_remaining < 10
+
+
+def test_navigation_step_progress_is_monotonic_and_switches_only_near_step_end():
+    steps = [
+        {"polyline": "121.0,31.0;121.0,31.001"},
+        {"polyline": "121.0,31.001;121.001,31.001"},
+        {"polyline": "121.001,31.001;121.001,31.002"},
+    ]
+    index, _ = main.navigation_step_index(steps, 31.0005, 121.0, previous_step_index=0, accuracy_m=5)
+    assert index == 0
+    index, _ = main.navigation_step_index(steps, 31.001, 121.0, previous_step_index=0, accuracy_m=5)
+    assert index == 1
+    index, _ = main.navigation_step_index(steps, 31.0015, 121.001, previous_step_index=0, accuracy_m=5)
+    assert index == 1
+    index, _ = main.navigation_step_index(steps, 31.001, 121.0, previous_step_index=1, accuracy_m=5)
+    assert index == 1
+
+
+def test_navigation_effective_action_distance_caps_accuracy_compensation():
+    assert main.effective_navigation_action_distance_m(11.36, 4.26) < 10
+    assert main.effective_navigation_action_distance_m(20.0, 50.0) == 15.0
+
+
 def test_firmware_source_contains_local_step_and_fall_contract():
     firmware = (ROOT / "firmware" / "smartcane_arduino" / "risk_logic.cpp").read_text(encoding="utf-8")
     config = (ROOT / "firmware" / "smartcane_arduino" / "config.h").read_text(encoding="utf-8")
