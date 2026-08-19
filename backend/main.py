@@ -54,7 +54,10 @@ GROUND_DROP_DELTA_CM = 11
 DEFAULT_NEARBY_RADIUS_M = 80.0
 REALTIME_NEARBY_WARNING_RADIUS_M = 10.0
 ROUTE_RISK_BUFFER_M = 8.0
-NAVIGATION_RISK_POINT_LIMIT = 50
+AMAP_COORDINATE_BATCH_SIZE = 40
+AMAP_COORDINATE_BATCH_CONCURRENCY = 4
+RISK_POINT_COORDINATE_BACKFILL_INTERVAL_SECONDS = 2.0
+ROUTE_RISK_QUERY_MIN_PADDING_M = 30.0
 WALKING_NAVIGATION_MAX_DISTANCE_M = 3000.0
 NAVIGATION_OFF_ROUTE_BASE_M = 45.0
 NAVIGATION_OFF_ROUTE_REQUIRED_FRAMES = 5
@@ -413,6 +416,7 @@ class CareRelationRequestCreate(BaseModel):
 
 
 app = FastAPI(title="Smart Cane Collaborative Risk Backend", version="2.0.0")
+_RISK_COORD_BACKFILL_TASK: Optional[asyncio.Task[Any]] = None
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -523,6 +527,9 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'active',
                 lat REAL NOT NULL,
                 lng REAL NOT NULL,
+                amap_lat REAL,
+                amap_lng REAL,
+                amap_coord_updated_at TEXT,
                 risk_type TEXT NOT NULL,
                 risk_level TEXT NOT NULL,
                 confidence REAL NOT NULL DEFAULT 0.5,
@@ -774,6 +781,13 @@ def init_db() -> None:
         ensure_column(conn, "risk_points", "latest_event_id", "INTEGER")
         ensure_column(conn, "risk_points", "voice_prompt", "TEXT")
         ensure_column(conn, "risk_points", "message", "TEXT")
+        ensure_column(conn, "risk_points", "amap_lat", "REAL")
+        ensure_column(conn, "risk_points", "amap_lng", "REAL")
+        ensure_column(conn, "risk_points", "amap_coord_updated_at", "TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_risk_points_amap_bounds "
+            "ON risk_points(status, amap_lat, amap_lng)"
+        )
         ensure_column(conn, "device_state", "device_name", "TEXT")
         ensure_column(conn, "device_state", "heading_deg", "REAL")
         ensure_column(conn, "device_state", "direction", "TEXT")
@@ -1741,25 +1755,25 @@ def risk_point_message_from_event(event: dict[str, Any]) -> str:
     return str(event.get("voice_prompt") or legacy_event_message(event) or "风险点")
 
 
-def upsert_risk_point_for_event(event: dict[str, Any]) -> None:
+def upsert_risk_point_for_event(event: dict[str, Any]) -> Optional[int]:
     risk_type = str(event.get("risk_type") or "none")
     level = str(event.get("risk_level") or "low")
     if risk_type not in MAPPABLE_RISK_TYPES or level not in LEVEL_RANK:
-        return
+        return None
     if risk_type == "fall_detected":
         level = "high"
     if is_test_event_like(event):
-        return
+        return None
     lat = event.get("lat")
     lng = event.get("lng")
     if lat is None or lng is None:
-        return
+        return None
     lat = float(lat)
     lng = float(lng)
     if abs(lat) < 1e-9 and abs(lng) < 1e-9:
-        return
+        return None
     if is_legacy_sim_point(lat, lng):
-        return
+        return None
 
     now = event.get("timestamp") or now_iso()
     expires_at = (datetime.now(timezone.utc) + timedelta(seconds=risk_point_ttl_seconds(risk_type, level))).isoformat(timespec="seconds")
@@ -1798,7 +1812,8 @@ def upsert_risk_point_for_event(event: dict[str, Any]) -> None:
                 UPDATE risk_points
                 SET lat = ?, lng = ?, risk_level = ?, confidence = ?, report_count = ?,
                     source_devices_json = ?, last_reported_at = ?, expires_at = ?,
-                    latest_event_id = ?, voice_prompt = ?, message = ?
+                    latest_event_id = ?, voice_prompt = ?, message = ?,
+                    amap_lat = NULL, amap_lng = NULL, amap_coord_updated_at = NULL
                 WHERE id = ?
                 """,
                 (
@@ -1816,10 +1831,11 @@ def upsert_risk_point_for_event(event: dict[str, Any]) -> None:
                     point["id"],
                 ),
             )
+            risk_point_id = int(point["id"])
         else:
             devices = [device_id]
             confidence = risk_point_confidence(level, 1, 1)
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO risk_points (
                     status, lat, lng, risk_type, risk_level, confidence, report_count,
@@ -1843,6 +1859,8 @@ def upsert_risk_point_for_event(event: dict[str, Any]) -> None:
                     message,
                 ),
             )
+            risk_point_id = int(cursor.lastrowid)
+    return risk_point_id
 
 
 def risk_point_to_event_dict(row: sqlite3.Row, origin_lat: Optional[float] = None, origin_lng: Optional[float] = None) -> dict[str, Any]:
@@ -1863,6 +1881,10 @@ def risk_point_to_event_dict(row: sqlite3.Row, origin_lat: Optional[float] = Non
         "level": point["risk_level"],
         "lat": point["lat"],
         "lng": point["lng"],
+        "amap_lat": point.get("amap_lat"),
+        "amap_lng": point.get("amap_lng"),
+        "amapLat": point.get("amap_lat"),
+        "amapLng": point.get("amap_lng"),
         "latitude": point["lat"],
         "longitude": point["lng"],
         "timestamp": point["last_reported_at"],
@@ -2598,13 +2620,17 @@ async def amap_get(
     path: str,
     params: dict[str, Any],
     timeout_seconds: float = 12.0,
+    client: Optional[httpx.AsyncClient] = None,
 ) -> dict[str, Any]:
     key = amap_key()
     if not key:
         raise HTTPException(status_code=503, detail="AMAP_WEB_KEY is not configured")
     payload = {**params, "key": key, "output": "JSON"}
-    async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False) as client:
-        response = await client.get(f"{AMAP_BASE_URL}{path}", params=payload)
+    if client is None:
+        async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False) as owned_client:
+            response = await owned_client.get(f"{AMAP_BASE_URL}{path}", params=payload)
+    else:
+        response = await client.get(f"{AMAP_BASE_URL}{path}", params=payload, timeout=timeout_seconds)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     data = response.json()
@@ -2628,6 +2654,107 @@ async def convert_to_amap_coord(lat: float, lng: float, coordsys: str = "gps") -
     converted = str(data.get("locations", "")).split(";")[0]
     converted_lng, converted_lat = [float(part) for part in converted.split(",", 1)]
     return converted_lat, converted_lng
+
+
+async def convert_risk_points_to_amap(
+    points: list[dict[str, Any]],
+) -> dict[int, tuple[float, float]]:
+    """Convert arbitrary risk-point counts through Amap's 40-point batches."""
+    if not points:
+        return {}
+
+    chunks = [
+        points[index : index + AMAP_COORDINATE_BATCH_SIZE]
+        for index in range(0, len(points), AMAP_COORDINATE_BATCH_SIZE)
+    ]
+    semaphore = asyncio.Semaphore(AMAP_COORDINATE_BATCH_CONCURRENCY)
+    timeout = httpx.Timeout(15.0, connect=8.0)
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+        async def convert_chunk(chunk: list[dict[str, Any]]) -> list[tuple[int, float, float]]:
+            locations = "|".join(
+                amap_location(float(item["lng"]), float(item["lat"]))
+                for item in chunk
+            )
+            async with semaphore:
+                data = await amap_get(
+                    "/assistant/coordinate/convert",
+                    {"locations": locations, "coordsys": "gps"},
+                    client=client,
+                )
+            converted_locations = [
+                value for value in str(data.get("locations") or "").split(";") if value
+            ]
+            if len(converted_locations) != len(chunk):
+                raise HTTPException(status_code=502, detail="Amap coordinate batch result count mismatch")
+            converted: list[tuple[int, float, float]] = []
+            for item, value in zip(chunk, converted_locations):
+                converted_lng, converted_lat = [float(part) for part in value.split(",", 1)]
+                converted.append((int(item["id"]), converted_lat, converted_lng))
+            return converted
+
+        converted_chunks = await asyncio.gather(*(convert_chunk(chunk) for chunk in chunks))
+
+    return {
+        point_id: (amap_lat, amap_lng)
+        for chunk in converted_chunks
+        for point_id, amap_lat, amap_lng in chunk
+    }
+
+
+async def backfill_missing_active_risk_point_amap_coords() -> int:
+    """Persist converted coordinates once so route planning stays database-only."""
+    if not amap_configured():
+        return 0
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, lat, lng
+            FROM risk_points
+            WHERE status = 'active' AND (amap_lat IS NULL OR amap_lng IS NULL)
+            ORDER BY last_reported_at DESC
+            """
+        ).fetchall()
+    pending = [row_to_dict(row) for row in rows]
+    converted = await convert_risk_points_to_amap(pending)
+    if not converted:
+        return 0
+
+    updated_at = now_iso()
+    updated = 0
+    pending_by_id = {int(item["id"]): item for item in pending}
+    with db() as conn:
+        for point_id, (amap_lat, amap_lng) in converted.items():
+            source = pending_by_id[point_id]
+            cursor = conn.execute(
+                """
+                UPDATE risk_points
+                SET amap_lat = ?, amap_lng = ?, amap_coord_updated_at = ?
+                WHERE id = ? AND lat = ? AND lng = ?
+                """,
+                (
+                    amap_lat,
+                    amap_lng,
+                    updated_at,
+                    point_id,
+                    source["lat"],
+                    source["lng"],
+                ),
+            )
+            updated += cursor.rowcount
+    return updated
+
+
+async def risk_point_coordinate_backfill_loop() -> None:
+    while True:
+        try:
+            await backfill_missing_active_risk_point_amap_coords()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Navigation performs the same backfill synchronously, so a transient
+            # background failure cannot permanently exclude a new risk point.
+            pass
+        await asyncio.sleep(RISK_POINT_COORDINATE_BACKFILL_INTERVAL_SECONDS)
 
 
 async def geocode_address(address: str, city: Optional[str] = None) -> dict[str, Any]:
@@ -3174,6 +3301,68 @@ def match_pending_road_observations(limit: int = 200) -> int:
         recalculate_road_risk_score(segment_id)
     return matched
 
+def route_risk_bounds(
+    points: list[dict[str, float]],
+    buffer_m: float,
+) -> tuple[float, float, float, float]:
+    latitudes = [float(point["lat"]) for point in points]
+    longitudes = [float(point["lng"]) for point in points]
+    padding_m = max(float(buffer_m), ROUTE_RISK_QUERY_MIN_PADDING_M)
+    middle_lat = sum(latitudes) / len(latitudes)
+    lat_padding = padding_m / 111_320.0
+    lng_meters_per_degree = max(1.0, 111_320.0 * abs(math.cos(math.radians(middle_lat))))
+    lng_padding = padding_m / lng_meters_per_degree
+    return (
+        min(latitudes) - lat_padding,
+        max(latitudes) + lat_padding,
+        min(longitudes) - lng_padding,
+        max(longitudes) + lng_padding,
+    )
+
+
+def active_route_risk_points(
+    points: list[dict[str, float]],
+    buffer_m: float,
+) -> list[dict[str, Any]]:
+    """Return every active point in the route's Amap-coordinate bounding box."""
+    if not points:
+        return []
+    expire_risk_points()
+    min_lat, max_lat, min_lng, max_lng = route_risk_bounds(points, buffer_m)
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM risk_points
+            WHERE status = 'active'
+              AND amap_lat BETWEEN ? AND ?
+              AND amap_lng BETWEEN ? AND ?
+            """,
+            (min_lat, max_lat, min_lng, max_lng),
+        ).fetchall()
+        latest_event_ids = [int(row["latest_event_id"]) for row in rows if row["latest_event_id"]]
+        latest_events: dict[int, dict[str, Any]] = {}
+        if latest_event_ids:
+            placeholders = ",".join("?" for _ in latest_event_ids)
+            event_rows = conn.execute(
+                f"SELECT * FROM risk_events WHERE id IN ({placeholders})",
+                tuple(latest_event_ids),
+            ).fetchall()
+            latest_events = {int(row["id"]): event_to_dict(row) for row in event_rows}
+
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if is_legacy_sim_point(float(row["lat"]), float(row["lng"])):
+            continue
+        if any(is_test_device_id(device) for device in parse_devices_json(row["source_devices_json"])):
+            continue
+        latest_event = latest_events.get(int(row["latest_event_id"] or 0))
+        if latest_event and is_test_event_like(latest_event):
+            continue
+        candidates.append(risk_point_to_event_dict(row))
+    return candidates
+
+
 async def route_risk_summary(points: list[dict[str, float]], buffer_m: float) -> dict[str, Any]:
     if not points:
         return {
@@ -3188,18 +3377,13 @@ async def route_risk_summary(points: list[dict[str, float]], buffer_m: float) ->
 
     risk_points: list[dict[str, Any]] = []
     score = 0.0
-    # Route planning only considers the most recently updated shared points.
-    # Converting every historical point to GCJ-02 serially makes navigation
-    # latency grow with the database and can exceed the mobile client's timeout.
-    for item in active_risk_points(
-        limit=NAVIGATION_RISK_POINT_LIMIT,
-        order_by_latest=True,
-    ):
+    # Missing coordinates are converted in Amap's 40-point batches and then
+    # persisted. Normal route planning only scans indexed points near the route.
+    await backfill_missing_active_risk_point_amap_coords()
+    for item in active_route_risk_points(points, buffer_m):
         level = str(item.get("risk_level") or item.get("riskLevel") or "low").lower()
-        try:
-            risk_lat, risk_lng = await convert_to_amap_coord(float(item["lat"]), float(item["lng"]), "gps")
-        except Exception:
-            risk_lat, risk_lng = float(item["lat"]), float(item["lng"])
+        risk_lat = float(item["amap_lat"])
+        risk_lng = float(item["amap_lng"])
         distance = min_distance_to_polyline_m(risk_lat, risk_lng, points)
         accuracy_m = float(item.get("location_accuracy_m") or item.get("locationAccuracyM") or 0)
         effective_buffer = min(30.0, max(8.0, float(buffer_m), accuracy_m))
@@ -4117,7 +4301,8 @@ async def parse_command_with_llm(text: str, device_id: str) -> dict[str, Any]:
 
 
 @app.on_event("startup")
-def on_startup() -> None:
+async def on_startup() -> None:
+    global _RISK_COORD_BACKFILL_TASK
     init_db()
     normalize_risk_point_expirations()
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(timespec="seconds")
@@ -4131,6 +4316,18 @@ def on_startup() -> None:
             """,
             (now_iso(), now_iso(), cutoff),
         )
+    if amap_configured() and (_RISK_COORD_BACKFILL_TASK is None or _RISK_COORD_BACKFILL_TASK.done()):
+        _RISK_COORD_BACKFILL_TASK = asyncio.create_task(risk_point_coordinate_backfill_loop())
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    global _RISK_COORD_BACKFILL_TASK
+    if _RISK_COORD_BACKFILL_TASK is None:
+        return
+    _RISK_COORD_BACKFILL_TASK.cancel()
+    await asyncio.gather(_RISK_COORD_BACKFILL_TASK, return_exceptions=True)
+    _RISK_COORD_BACKFILL_TASK = None
 
 
 @app.get("/api/health")
@@ -5306,8 +5503,10 @@ async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
     origin_lat, origin_lng, dest_lat, dest_lng, resolved = await resolve_route_endpoint(request)
     origin_coordsys = str(resolved.get("origin", {}).get("coordsys") or request.coordsys)
     dest_coordsys = str(resolved.get("destination", {}).get("coordsys") or request.coordsys)
-    origin_amap_lat, origin_amap_lng = await convert_to_amap_coord(origin_lat, origin_lng, origin_coordsys)
-    dest_amap_lat, dest_amap_lng = await convert_to_amap_coord(dest_lat, dest_lng, dest_coordsys)
+    (origin_amap_lat, origin_amap_lng), (dest_amap_lat, dest_amap_lng) = await asyncio.gather(
+        convert_to_amap_coord(origin_lat, origin_lng, origin_coordsys),
+        convert_to_amap_coord(dest_lat, dest_lng, dest_coordsys),
+    )
     straight_distance_m = haversine_m(origin_amap_lat, origin_amap_lng, dest_amap_lat, dest_amap_lng)
     if straight_distance_m > WALKING_NAVIGATION_MAX_DISTANCE_M:
         voice_prompt = "目的地超过3公里，当前仅支持3公里内的步行导航。请换一个更近的目的地。"
@@ -5375,8 +5574,8 @@ async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
         "amap_origin": route["amap_origin"],
         "amap_destination": route["amap_destination"],
         "risk_method": {
-            "name": "active_risk_points_route_buffer_v2",
-            "description": "active risk points within the route polyline buffer are counted; lower combined score is safer",
+            "name": "indexed_active_route_risk_points_v3",
+            "description": "all active risk points in the indexed route bounds are checked against the route polyline; lower combined score is safer",
             "route_buffer_m": request.route_buffer_m,
             "counted_levels": ["medium", "high"],
         },

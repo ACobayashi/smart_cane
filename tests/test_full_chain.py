@@ -1524,26 +1524,134 @@ def test_risk_aware_route_does_not_wait_for_llm(tmp_path, monkeypatch):
     assert result["llm_advice"]["skipped"] == "speed_first"
 
 
-def test_route_risk_summary_only_queries_latest_fifty_points(monkeypatch):
+def test_route_risk_summary_uses_all_cached_points_near_route(monkeypatch):
     captured = {}
 
-    def fake_active_risk_points(*args, **kwargs):
-        captured.update(kwargs)
-        return []
+    async def fake_backfill():
+        captured["backfilled"] = True
+        return 0
 
-    monkeypatch.setattr(main, "active_risk_points", fake_active_risk_points)
+    def fake_route_points(points, buffer_m):
+        captured["points"] = points
+        captured["buffer_m"] = buffer_m
+        return [
+            {
+                "id": point_id,
+                "risk_level": "medium",
+                "lat": 39.0,
+                "lng": 117.0,
+                "amap_lat": 39.0,
+                "amap_lng": 117.0,
+            }
+            for point_id in range(1, 61)
+        ]
 
-    result = main.asyncio.run(main.route_risk_summary(
+    monkeypatch.setattr(main, "backfill_missing_active_risk_point_amap_coords", fake_backfill)
+    monkeypatch.setattr(main, "active_route_risk_points", fake_route_points)
+    route_points = [{"lat": 39.0, "lng": 117.0}, {"lat": 39.001, "lng": 117.001}]
+
+    result = main.asyncio.run(main.route_risk_summary(route_points, buffer_m=8.0))
+
+    assert captured == {"backfilled": True, "points": route_points, "buffer_m": 8.0}
+    assert result["risk_count"] == 60
+    assert result["medium_count"] == 60
+
+
+def test_amap_coordinate_conversion_batches_without_limiting_total_points(monkeypatch):
+    batch_sizes = []
+
+    async def fake_amap_get(path, params, timeout_seconds=12.0, client=None):
+        assert path == "/assistant/coordinate/convert"
+        locations = params["locations"].split("|")
+        batch_sizes.append(len(locations))
+        return {"status": "1", "locations": ";".join(locations)}
+
+    monkeypatch.setattr(main, "amap_get", fake_amap_get)
+    points = [
+        {"id": point_id, "lat": 39.0 + point_id / 100_000, "lng": 117.0}
+        for point_id in range(1, 86)
+    ]
+
+    converted = main.asyncio.run(main.convert_risk_points_to_amap(points))
+
+    assert sorted(batch_sizes) == [5, 40, 40]
+    assert len(converted) == 85
+
+
+def test_route_bounds_query_returns_more_than_fifty_active_points(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "route_bounds.db")
+    main.init_db()
+    now = main.now_iso()
+    expires_at = (main.datetime.now(main.timezone.utc) + main.timedelta(days=1)).isoformat(timespec="seconds")
+    with main.db() as conn:
+        for point_id in range(60):
+            conn.execute(
+                """
+                INSERT INTO risk_points (
+                    status, lat, lng, amap_lat, amap_lng, amap_coord_updated_at,
+                    risk_type, risk_level, confidence, report_count,
+                    source_devices_json, first_reported_at, last_reported_at,
+                    expires_at, latest_event_id, voice_prompt, message
+                ) VALUES ('active', ?, ?, ?, ?, ?, 'user_mark', 'medium', 0.8, 1,
+                          '["cane_real"]', ?, ?, ?, NULL, '风险点', '风险点')
+                """,
+                (
+                    39.0,
+                    117.0 + point_id / 10_000_000,
+                    39.0,
+                    117.0 + point_id / 10_000_000,
+                    now,
+                    now,
+                    now,
+                    expires_at,
+                ),
+            )
+
+    points = main.active_route_risk_points(
         [{"lat": 39.0, "lng": 117.0}, {"lat": 39.001, "lng": 117.001}],
         buffer_m=8.0,
-    ))
+    )
 
-    assert captured == {
-        "limit": main.NAVIGATION_RISK_POINT_LIMIT,
-        "order_by_latest": True,
-    }
-    assert main.NAVIGATION_RISK_POINT_LIMIT == 50
-    assert result["risk_count"] == 0
+    assert len(points) == 60
+
+
+def test_missing_risk_coordinates_are_backfilled_and_persisted(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "route_backfill.db")
+    main.init_db()
+    now = main.now_iso()
+    expires_at = (main.datetime.now(main.timezone.utc) + main.timedelta(days=1)).isoformat(timespec="seconds")
+    with main.db() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO risk_points (
+                status, lat, lng, risk_type, risk_level, confidence, report_count,
+                source_devices_json, first_reported_at, last_reported_at,
+                expires_at, latest_event_id, voice_prompt, message
+            ) VALUES ('active', 39.0, 117.0, 'user_mark', 'high', 0.9, 1,
+                      '["cane_real"]', ?, ?, ?, NULL, '高风险点', '高风险点')
+            """,
+            (now, now, expires_at),
+        )
+        point_id = int(cursor.lastrowid)
+
+    async def fake_convert(points):
+        assert [item["id"] for item in points] == [point_id]
+        return {point_id: (39.001, 117.002)}
+
+    monkeypatch.setattr(main, "amap_configured", lambda: True)
+    monkeypatch.setattr(main, "convert_risk_points_to_amap", fake_convert)
+
+    updated = main.asyncio.run(main.backfill_missing_active_risk_point_amap_coords())
+
+    with main.db() as conn:
+        stored = conn.execute(
+            "SELECT amap_lat, amap_lng, amap_coord_updated_at FROM risk_points WHERE id = ?",
+            (point_id,),
+        ).fetchone()
+    assert updated == 1
+    assert stored["amap_lat"] == 39.001
+    assert stored["amap_lng"] == 117.002
+    assert stored["amap_coord_updated_at"]
 
 
 def test_route_overview_speaks_total_distance_and_cardinal_segments():
