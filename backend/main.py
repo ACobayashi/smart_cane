@@ -54,6 +54,7 @@ GROUND_DROP_DELTA_CM = 11
 DEFAULT_NEARBY_RADIUS_M = 80.0
 REALTIME_NEARBY_WARNING_RADIUS_M = 10.0
 ROUTE_RISK_BUFFER_M = 8.0
+NAVIGATION_RISK_POINT_LIMIT = 50
 WALKING_NAVIGATION_MAX_DISTANCE_M = 3000.0
 NAVIGATION_OFF_ROUTE_BASE_M = 45.0
 NAVIGATION_OFF_ROUTE_REQUIRED_FRAMES = 5
@@ -3187,7 +3188,13 @@ async def route_risk_summary(points: list[dict[str, float]], buffer_m: float) ->
 
     risk_points: list[dict[str, Any]] = []
     score = 0.0
-    for item in active_risk_points(limit=1000):
+    # Route planning only considers the most recently updated shared points.
+    # Converting every historical point to GCJ-02 serially makes navigation
+    # latency grow with the database and can exceed the mobile client's timeout.
+    for item in active_risk_points(
+        limit=NAVIGATION_RISK_POINT_LIMIT,
+        order_by_latest=True,
+    ):
         level = str(item.get("risk_level") or item.get("riskLevel") or "low").lower()
         try:
             risk_lat, risk_lng = await convert_to_amap_coord(float(item["lat"]), float(item["lng"]), "gps")

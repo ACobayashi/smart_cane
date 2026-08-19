@@ -1524,6 +1524,28 @@ def test_risk_aware_route_does_not_wait_for_llm(tmp_path, monkeypatch):
     assert result["llm_advice"]["skipped"] == "speed_first"
 
 
+def test_route_risk_summary_only_queries_latest_fifty_points(monkeypatch):
+    captured = {}
+
+    def fake_active_risk_points(*args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(main, "active_risk_points", fake_active_risk_points)
+
+    result = main.asyncio.run(main.route_risk_summary(
+        [{"lat": 39.0, "lng": 117.0}, {"lat": 39.001, "lng": 117.001}],
+        buffer_m=8.0,
+    ))
+
+    assert captured == {
+        "limit": main.NAVIGATION_RISK_POINT_LIMIT,
+        "order_by_latest": True,
+    }
+    assert main.NAVIGATION_RISK_POINT_LIMIT == 50
+    assert result["risk_count"] == 0
+
+
 def test_route_overview_speaks_total_distance_and_cardinal_segments():
     route = {
         "distance_m": 430,
